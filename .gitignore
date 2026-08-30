@@ -1,0 +1,55 @@
+# Local Python environments
+.venv/
+.venv-sim/
+
+# Training logs and experiment trackers
+logs/
+runs/
+wandb/
+*.log
+events.out.tfevents.*
+
+# Training checkpoints (keep deliberately exported deployment policies elsewhere)
+checkpoint_*.pt
+model_*.pt
+best_policy.pt
+*.ckpt
+
+# Python and tool caches
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.cache/
+
+# Python package/build artifacts
+*.egg-info/
+.eggs/
+build/
+dist/
+*.whl
+
+# Test and coverage outputs
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+TEST*.xml
+
+# Editor settings and temporary files
+.vscode/
+.idea/
+.marscode/
+*.swp
+*.swo
+*~
+
+# Local secrets
+.env
+.env.*
+!.env.example
+
+# Operating-system metadata
+.DS_Store
+Thumbs.db
