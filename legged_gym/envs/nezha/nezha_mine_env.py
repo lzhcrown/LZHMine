@@ -10,11 +10,29 @@ class NezhaMINEEnv(LeggedRobot):
     """Nezha-specific observation and hybrid joint/wheel control interface.
 
     Both actor and critic histories are newest-first.  The four estimator
-    targets (body-frame linear velocity and base height) occupy indices 65:69
+    targets (body-frame linear velocity and base height) occupy indices 371:375
     in every privileged frame.
     """
 
     LEG_JOINT_IDS = [0, 1, 2, 4, 5, 6, 8, 9, 10, 12, 13, 14]
+
+    def _process_rigid_body_props(self, props, env_id):
+        """Keep the randomized base mass/COM for the full privileged frame."""
+        props = super()._process_rigid_body_props(props, env_id)
+        if not hasattr(self, "mine_base_mass"):
+            self.mine_base_mass = torch.zeros(
+                self.num_envs, 1, dtype=torch.float32, device=self.device
+            )
+            self.mine_base_com = torch.zeros(
+                self.num_envs, 3, dtype=torch.float32, device=self.device
+            )
+        self.mine_base_mass[env_id, 0] = props[0].mass
+        self.mine_base_com[env_id] = torch.tensor(
+            [props[0].com.x, props[0].com.y, props[0].com.z],
+            dtype=torch.float32,
+            device=self.device,
+        )
+        return props
 
     def _get_noise_scale_vec(self, cfg):
         noise = torch.zeros(cfg.env.num_one_step_observations, device=self.device)
@@ -59,23 +77,34 @@ class NezhaMINEEnv(LeggedRobot):
                 self.cfg.env.num_height_observations,
                 device=self.device,
             )
+        dof_acc = (self.last_dof_vel - self.dof_vel) / self.dt
         base_height = self._get_base_heights().unsqueeze(1)
         force_scale, force_shift = get_scale_shift(
             self.cfg.normalization.contact_force_range
         )
-        foot_forces = (
-            self.contact_forces[:, self.feet_indices, :].reshape(self.num_envs, -1)
-            - force_shift
+        all_contact_forces = (
+            self.contact_forces.reshape(self.num_envs, -1) - force_shift
         ) * force_scale
+        if all_contact_forces.shape[-1] != 51:
+            raise RuntimeError(
+                "The complete Nezha privileged frame requires 17 rigid bodies "
+                f"(51 contact-force values), got {all_contact_forces.shape[-1]}"
+            )
+        actual_p_gains = self.Kp_factors * self.p_gains.unsqueeze(0)
+        actual_d_gains = self.Kd_factors * self.d_gains.unsqueeze(0)
         privileged = torch.cat(
             (
                 actor_clean,
+                dof_acc * self.obs_scales.dof_acc,
+                self.torques * self.obs_scales.torques,
+                self.mine_base_mass - self.mine_base_mass.mean(),
+                self.mine_base_com,
+                actual_p_gains / 20.0,
+                actual_d_gains / 0.2,
+                all_contact_forces,
+                terrain_heights,
                 self.base_lin_vel * self.obs_scales.lin_vel,
                 base_height * self.obs_scales.height_measurements,
-                terrain_heights,
-                foot_forces,
-                self.payload,
-                self.com_displacement,
             ),
             dim=-1,
         )
@@ -147,3 +176,36 @@ class NezhaMINEEnv(LeggedRobot):
         leg_velocity = self.dof_vel.clone()
         leg_velocity[:, self.wheel_indices] = 0.0
         return torch.sum(torch.square(leg_velocity), dim=1)
+
+    def _reward_dof_pos_limits(self):
+        out_of_limits = -(self.dof_pos - self.dof_pos_limits[:, 0]).clip(max=0.0)
+        out_of_limits += (self.dof_pos - self.dof_pos_limits[:, 1]).clip(min=0.0)
+        out_of_limits[:, self.wheel_indices] = 0.0
+        return torch.sum(out_of_limits, dim=1)
+
+    def _reward_feet_stumble(self):
+        return torch.any(
+            torch.norm(self.contact_forces[:, self.feet_indices, :2], dim=2)
+            > 5.0 * torch.abs(self.contact_forces[:, self.feet_indices, 2]),
+            dim=1,
+        )
+
+    def _reward_feet_contact_uniform(self):
+        contact = self.contact_forces[:, self.feet_indices, 2] > 1.0
+        contact_mean = torch.mean(contact.float(), dim=1, keepdim=True)
+        return torch.sum(torch.abs(contact.float() - contact_mean), dim=1)
+
+    def _reward_smoothness(self):
+        second_difference = self.actions - 2.0 * self.last_actions + self.last_last_actions
+        second_difference[:, self.wheel_indices] = 0.0
+        second_difference *= self.cfg.control.action_scale
+        valid = (self.last_actions != 0.0) & (self.last_last_actions != 0.0)
+        return torch.sum(torch.square(second_difference) * valid.float(), dim=1)
+
+    def _reward_joint_power(self):
+        return torch.sum(torch.abs(self.dof_vel) * torch.abs(self.torques), dim=1)
+
+    def _reward_wheel_contact_vel_y(self):
+        contact = self.contact_forces[:, self.feet_indices, 2] > 1.0
+        penalty = torch.square(self.feet_vel[:, :, 1]) * contact.float()
+        return torch.mean(penalty, dim=1)

@@ -2,7 +2,7 @@ import torch
 
 from deploy.nezha.policy_runtime import NezhaObservationHistory
 from rsl_rl.algorithms import MINEPPO
-from rsl_rl.modules import MINEActorCritic, MINEPolicyExporter
+from rsl_rl.modules import MINEActorCritic, MINEEstimator, MINEPolicyExporter
 
 
 def make_policy():
@@ -32,6 +32,7 @@ def test_mine_forward_update_and_gate_probabilities():
     mode_probabilities = policy.estimator.mode_probabilities(observations)
 
     assert actions.shape == (16, 4)
+    assert len(losses) == 13
     assert all(torch.isfinite(torch.tensor(losses)))
     assert mode_probabilities.shape == (16, 3)
     assert torch.allclose(
@@ -62,6 +63,49 @@ def test_nezha_observation_history_is_newest_first():
 
     assert torch.equal(history[0], second)
     assert torch.equal(history[1], first)
+
+
+def test_semantic_labels_follow_fixed_wheel_leg_hybrid_indices():
+    semantic_cfg = {
+        "enabled": True,
+        "loss_coef": 0.1,
+        "mode_loss_coef": 0.5,
+        "command_slice": [6, 9],
+        "dof_vel_slice": [21, 37],
+        "action_slice": [49, 65],
+        "wheel_dof_indices": [3, 7, 11, 15],
+        "leg_dof_indices": [0, 1, 2, 4, 5, 6, 8, 9, 10, 12, 13, 14],
+        "wheel_activity_low": 0.05,
+        "wheel_activity_high": 0.20,
+        "leg_activity_low": 0.03,
+        "leg_activity_high": 0.12,
+        "static_command_threshold": 0.05,
+        "leg_action_delta_weight": 0.70,
+        "leg_velocity_weight": 0.30,
+    }
+    estimator = MINEEstimator(
+        temporal_steps=2,
+        num_one_step_obs=65,
+        num_one_step_privileged_obs=375,
+        estimation_target_indices=[371, 372, 373, 374],
+        enc_hidden_dims=[32],
+        tar_hidden_dims=[32],
+        latent_dim=8,
+        mode_semantic_cfg=semantic_cfg,
+    )
+    history = torch.zeros(4, 130)
+    current = history[:, :65]
+    current[:3, 6] = 0.5
+    wheel_ids = torch.tensor([3, 7, 11, 15]) + 49
+    leg_ids = torch.tensor([0, 1, 2, 4, 5, 6, 8, 9, 10, 12, 13, 14]) + 49
+    current[0, wheel_ids] = 0.30
+    current[1, leg_ids] = 0.30
+    current[2, wheel_ids] = 0.30
+    current[2, leg_ids] = 0.30
+
+    targets, _, valid, _, _ = estimator._semantic_mode_targets(history)
+    assert torch.equal(torch.argmax(targets[:3], dim=-1), torch.tensor([0, 1, 2]))
+    assert torch.equal(valid, torch.tensor([True, True, True, False]))
 
 
 def test_mine_ppo_update_uses_separate_estimator_optimizer():

@@ -43,9 +43,9 @@ class MINEActorCritic(nn.Module):
         num_prototypes: int = 32,
         temperature: float = 3.0,
         estimator_learning_rate: float = 1e-3,
+        estimator_max_grad_norm: float = 10.0,
         mode_loss_coef: float = 0.5,
-        gate_balance_coef: float = 0.05,
-        gate_entropy_coef: float = 0.01,
+        mode_semantic_cfg=None,
         activation: str = "elu",
         init_noise_std: float = 1.0,
         **kwargs,
@@ -75,9 +75,9 @@ class MINEActorCritic(nn.Module):
             num_prototypes=num_prototypes,
             temperature=temperature,
             learning_rate=estimator_learning_rate,
+            max_grad_norm=estimator_max_grad_norm,
             mode_loss_coef=mode_loss_coef,
-            gate_balance_coef=gate_balance_coef,
-            gate_entropy_coef=gate_entropy_coef,
+            mode_semantic_cfg=mode_semantic_cfg,
             activation=activation,
         )
         actor_input_dim = num_one_step_obs + self.num_est_prob + latent_dim

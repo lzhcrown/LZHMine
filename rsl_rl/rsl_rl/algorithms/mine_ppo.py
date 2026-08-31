@@ -96,7 +96,16 @@ class MINEPPO:
             "estimation": 0.0,
             "swap": 0.0,
             "mode": 0.0,
-            "gate_entropy": 0.0,
+            "semantic_mode": 0.0,
+            "semantic_valid_ratio": 0.0,
+            "wheel_target_ratio": 0.0,
+            "leg_target_ratio": 0.0,
+            "hybrid_target_ratio": 0.0,
+            "wheel_activity": 0.0,
+            "leg_activity": 0.0,
+            "wheel_gate_probability": 0.0,
+            "leg_gate_probability": 0.0,
+            "hybrid_gate_probability": 0.0,
         }
         updates = 0
         generator = self.storage.mini_batch_generator(
@@ -143,12 +152,24 @@ class MINEPPO:
                     for group in self.optimizer.param_groups:
                         group["lr"] = self.learning_rate
 
-            estimation_loss, swap_loss, mode_loss, gate_entropy = (
-                self.actor_critic.estimator.update(
-                    obs_batch,
-                    next_critic_obs_batch,
-                    learning_rate=self.learning_rate,
-                )
+            (
+                estimation_loss,
+                swap_loss,
+                mode_loss,
+                semantic_loss,
+                semantic_valid_ratio,
+                wheel_target_ratio,
+                leg_target_ratio,
+                hybrid_target_ratio,
+                wheel_activity,
+                leg_activity,
+                wheel_gate_probability,
+                leg_gate_probability,
+                hybrid_gate_probability,
+            ) = self.actor_critic.estimator.update(
+                obs_batch,
+                next_critic_obs_batch,
+                learning_rate=self.learning_rate,
             )
 
             ratio = torch.exp(
@@ -190,7 +211,16 @@ class MINEPPO:
             totals["estimation"] += estimation_loss
             totals["swap"] += swap_loss
             totals["mode"] += mode_loss
-            totals["gate_entropy"] += gate_entropy
+            totals["semantic_mode"] += semantic_loss
+            totals["semantic_valid_ratio"] += semantic_valid_ratio
+            totals["wheel_target_ratio"] += wheel_target_ratio
+            totals["leg_target_ratio"] += leg_target_ratio
+            totals["hybrid_target_ratio"] += hybrid_target_ratio
+            totals["wheel_activity"] += wheel_activity
+            totals["leg_activity"] += leg_activity
+            totals["wheel_gate_probability"] += wheel_gate_probability
+            totals["leg_gate_probability"] += leg_gate_probability
+            totals["hybrid_gate_probability"] += hybrid_gate_probability
             updates += 1
 
         self.storage.clear()

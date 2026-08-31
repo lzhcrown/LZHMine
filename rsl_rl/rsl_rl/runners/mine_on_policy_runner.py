@@ -174,8 +174,23 @@ class MINEOnPolicyRunner:
         fps = int(steps / max(iteration_time, 1e-8))
 
         if self.writer is not None:
-            for name, value in losses.items():
-                self.writer.add_scalar(f"Loss/{name}", value, iteration)
+            for name in ("value", "surrogate", "estimation", "swap", "mode", "semantic_mode"):
+                self.writer.add_scalar(f"Loss/{name}", losses[name], iteration)
+            for name in (
+                "semantic_valid_ratio",
+                "wheel_target_ratio",
+                "leg_target_ratio",
+                "hybrid_target_ratio",
+                "wheel_activity",
+                "leg_activity",
+            ):
+                self.writer.add_scalar(f"ModeSemantic/{name}", losses[name], iteration)
+            for name in (
+                "wheel_gate_probability",
+                "leg_gate_probability",
+                "hybrid_gate_probability",
+            ):
+                self.writer.add_scalar(f"ModeGate/{name}", losses[name], iteration)
             self.writer.add_scalar("Loss/learning_rate", self.alg.learning_rate, iteration)
             self.writer.add_scalar(
                 "Policy/mean_noise_std",
@@ -205,7 +220,13 @@ class MINEOnPolicyRunner:
             f"MINE iteration {iteration} | {fps} steps/s | "
             f"value={losses['value']:.4f} policy={losses['surrogate']:.4f} "
             f"estimate={losses['estimation']:.4f} swap={losses['swap']:.4f} "
-            f"mode={losses['mode']:.4f}{reward_text}"
+            f"mode={losses['mode']:.4f} semantic={losses['semantic_mode']:.4f} "
+            f"valid={losses['semantic_valid_ratio']:.3f} "
+            f"target[w/l/h]=({losses['wheel_target_ratio']:.2f}/"
+            f"{losses['leg_target_ratio']:.2f}/{losses['hybrid_target_ratio']:.2f}) "
+            f"gate[w/l/h]=({losses['wheel_gate_probability']:.2f}/"
+            f"{losses['leg_gate_probability']:.2f}/"
+            f"{losses['hybrid_gate_probability']:.2f}){reward_text}"
         )
 
     def save(self, path, infos=None):

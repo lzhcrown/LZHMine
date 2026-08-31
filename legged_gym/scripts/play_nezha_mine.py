@@ -20,6 +20,7 @@ from legged_gym.utils import Logger, export_policy_as_jit, get_args, task_regist
 
 
 TASK_NAME = "nezha_mine"
+MODE_NAMES = ("wheel", "leg", "hybrid")
 DOMAIN_RANDOMIZATION_FLAGS = (
     "randomize_payload_mass",
     "randomize_com_displacement",
@@ -98,8 +99,11 @@ class NezhaPlayRecorder:
             "base_ang_vel_z": env.base_ang_vel[robot, 2].item(),
         }
         if gate_probs is not None:
-            for mode_index, probability in enumerate(gate_probs[robot]):
-                row[f"gate_mode_{mode_index}"] = probability.item()
+            for mode_name, probability in zip(MODE_NAMES, gate_probs[robot]):
+                row[f"gate_{mode_name}_probability"] = probability.item()
+            row["selected_mode"] = MODE_NAMES[
+                int(torch.argmax(gate_probs[robot]).item())
+            ]
         if estimate is not None:
             row["estimated_base_vel_x"] = estimate[robot, 0].item()
             row["estimated_base_vel_y"] = estimate[robot, 1].item()
@@ -275,7 +279,8 @@ def play(args):
             true_velocity = env.base_lin_vel[0].detach().cpu().numpy()
             true_height = env._get_base_heights()[0].item()
             print(
-                f"step {step:5d} | gate={np.array2string(mode_mean, precision=3)} "
+                f"step {step:5d} | mode={MODE_NAMES[int(np.argmax(mode_mean))]} "
+                f"gate[w/l/h]={np.array2string(mode_mean, precision=3)} "
                 f"| v_est={np.array2string(estimated[:3], precision=3)} "
                 f"v_true={np.array2string(true_velocity, precision=3)} "
                 f"| h_est={estimated[3]:.3f} h_true={true_height:.3f}"

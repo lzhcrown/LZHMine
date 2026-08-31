@@ -13,11 +13,13 @@ class NezhaMINECfg(LeggedRobotCfg):
         num_one_step_observations = 65
         num_observations = frame_stack * num_one_step_observations
         num_height_observations = 187
-        # actor(65) + velocity(3) + height(1) + terrain(187) + feet force(12)
-        # + randomized payload(1) + randomized COM(3)
-        num_one_step_privileged_obs = 272
+        # Complete privileged frame, aligned with wheel_gym_CQ:
+        # actor(65) + dof_acc(16) + torques(16) + base_mass(1)
+        # + base_com(3) + kp(16) + kd(16) + all-body contact forces(51)
+        # + terrain heights(187) + velocity/height estimation targets(4).
+        num_one_step_privileged_obs = 375
         num_privileged_obs = critic_frame_stack * num_one_step_privileged_obs
-        estimation_target_indices = [65, 66, 67, 68]
+        estimation_target_indices = [371, 372, 373, 374]
         episode_length_s = 20
 
     class terrain(LeggedRobotCfg.terrain):
@@ -27,9 +29,13 @@ class NezhaMINECfg(LeggedRobotCfg):
         num_rows = 10
         num_cols = 20
         max_init_terrain_level = 5
+        # LZHMine's terrain generator has eight valid branches.  Keep all
+        # eight probabilities so discrete obstacles are actually generated;
+        # the five-entry legacy wheel_gym_CQ list would index out of range.
         terrain_proportions = [0.1, 0.1, 0.15, 0.15, 0.2, 0.1, 0.1, 0.1]
         curriculum = True
         measure_heights = True
+        restitution = 0.5
 
     class commands(LeggedRobotCfg.commands):
         heading_command = False
@@ -42,7 +48,7 @@ class NezhaMINECfg(LeggedRobotCfg):
             heading = [-3.14, 3.14]
 
     class init_state(LeggedRobotCfg.init_state):
-        pos = [0.0, 0.0, 0.62]
+        pos = [0.0, 0.0, 0.60]
         rot = [0.0, 0.0, 0.0, 1.0]
         default_joint_angles = {
             "FL_hip_joint": -0.10,
@@ -109,21 +115,22 @@ class NezhaMINECfg(LeggedRobotCfg):
         com_displacement_range = [-0.05, 0.05]
         randomize_friction = True
         friction_range = [0.2, 1.25]
-        randomize_motor_strength = True
+        randomize_restitution = False
+        randomize_motor_strength = False
         motor_strength_range = [0.9, 1.1]
-        randomize_kp = True
+        randomize_kp = False
         kp_range = [0.9, 1.1]
-        randomize_kd = True
+        randomize_kd = False
         kd_range = [0.9, 1.1]
-        randomize_initial_joint_pos = True
+        randomize_initial_joint_pos = False
         initial_joint_pos_range = [0.9, 1.1]
-        disturbance = True
+        disturbance = False
         disturbance_range = [-30.0, 30.0]
         disturbance_interval = 400  # policy steps, approximately 8 s at 50 Hz
         push_robots = True
         push_interval_s = 10
         max_push_vel_xy = 0.5
-        delay = True
+        delay = False
 
     class rewards(LeggedRobotCfg.rewards):
         only_positive_rewards = False
@@ -138,14 +145,22 @@ class NezhaMINECfg(LeggedRobotCfg):
             ang_vel_xy = -0.2
             orientation = -2.0
             base_height = -1.0
-            hip_default = -2.0
-            stand_still = -1.0
+            feet_air_time = 4.0
+            feet_contact_uniform = -0.1
+            hip_default = -8.0
+            stand_still = -3.0
             collision = -0.1
             feet_stumble = -0.5
             action_rate = -0.01
             torques = -2.5e-6
             dof_vel = -2.0e-3
             dof_acc = -2.5e-7
+            dof_pos_limits = -0.9
+            run_still = -0.1
+            smoothness = -0.05
+            joint_power = -2.0e-4
+            feet_contact_forces = -1.0e-3
+            wheel_contact_vel_y = -1.0
 
     class normalization(LeggedRobotCfg.normalization):
         contact_force_range = [0.0, 200.0]
@@ -155,7 +170,10 @@ class NezhaMINECfg(LeggedRobotCfg):
             ang_vel = 1.0
             dof_pos = 1.0
             dof_vel = 0.05
+            dof_acc = 1.0
             height_measurements = 5.0
+            torques = 1.0
+            force_measurements = 0.01
 
     class viewer(LeggedRobotCfg.viewer):
         pos = [3.0, -3.0, 2.0]
@@ -178,9 +196,27 @@ class NezhaMINECfgPPO(LeggedRobotCfgPPO):
         num_prototypes = 32
         temperature = 3.0
         estimator_learning_rate = 1e-3
+        estimator_max_grad_norm = 10.0
         mode_loss_coef = 0.5
-        gate_balance_coef = 0.05
-        gate_entropy_coef = 0.01
+        # Fixed semantic indices: 0=wheel, 1=leg, 2=wheel-leg hybrid.
+        # Static/uncertain samples are excluded from semantic supervision.
+        mode_semantic_cfg = {
+            "enabled": True,
+            "loss_coef": 0.10,
+            "mode_loss_coef": 0.50,
+            "command_slice": [6, 9],
+            "dof_vel_slice": [21, 37],
+            "action_slice": [49, 65],
+            "wheel_dof_indices": [3, 7, 11, 15],
+            "leg_dof_indices": [0, 1, 2, 4, 5, 6, 8, 9, 10, 12, 13, 14],
+            "wheel_activity_low": 0.05,
+            "wheel_activity_high": 0.20,
+            "leg_activity_low": 0.03,
+            "leg_activity_high": 0.12,
+            "static_command_threshold": 0.05,
+            "leg_action_delta_weight": 0.70,
+            "leg_velocity_weight": 0.30,
+        }
         activation = "elu"
 
     class algorithm(LeggedRobotCfgPPO.algorithm):

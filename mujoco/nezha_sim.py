@@ -91,13 +91,15 @@ def run(args):
         d_gains=cfg["d_gains"],
         action_scale=cfg["action_scale"],
         wheel_velocity_scale=cfg["wheel_velocity_scale"],
+        history_steps=int(cfg.get("history_steps", 2)),
+        observation_scales=cfg.get("observation_scales"),
         torque_limits=cfg["torque_limits"],
         device=args.device,
     )
     data.qpos[root_qpos_address : root_qpos_address + 7] = [
         0.0,
         0.0,
-        cfg.get("initial_base_height", 0.62),
+        cfg.get("initial_base_height", 0.60),
         1.0,
         0.0,
         0.0,
@@ -115,6 +117,15 @@ def run(args):
         else None
     )
     start_time = time.time()
+    policy_step = 0
+    gate_log_interval = (
+        args.gate_log_interval
+        if args.gate_log_interval is not None
+        else int(cfg.get("gate_log_interval", 100))
+    )
+    mode_names = tuple(cfg.get("mode_names", ["wheel", "leg", "hybrid"]))
+    if len(mode_names) != 3:
+        raise ValueError("mode_names must contain wheel, leg and hybrid labels")
     try:
         while viewer_context is None or viewer_context.is_running():
             rotation = data.xmat[root_body_id].reshape(3, 3)
@@ -129,6 +140,13 @@ def run(args):
                 dof_pos,
                 dof_vel,
             )
+            if gate_log_interval > 0 and policy_step % gate_log_interval == 0:
+                mode_probs = runtime.mode_probabilities().cpu().numpy()
+                selected_mode = mode_names[int(np.argmax(mode_probs))]
+                print(
+                    f"step {policy_step:6d} | mode={selected_mode} "
+                    f"gate[w/l/h]={np.array2string(mode_probs, precision=3)}"
+                )
             data.qfrc_applied[:] = 0.0
             data.qfrc_applied[dof_addresses] = torques.cpu().numpy()
             step_start = time.time()
@@ -142,6 +160,7 @@ def run(args):
                     time.sleep(remaining)
             elif args.duration > 0 and time.time() - start_time >= args.duration:
                 break
+            policy_step += 1
     finally:
         if viewer_context is not None:
             viewer_context.close()
@@ -161,6 +180,12 @@ def parse_args():
     parser.add_argument("--yaw", type=float, default=0.0)
     parser.add_argument("--headless", action="store_true")
     parser.add_argument("--duration", type=float, default=10.0)
+    parser.add_argument(
+        "--gate-log-interval",
+        type=int,
+        default=None,
+        help="Print wheel/leg/hybrid gate probabilities every N policy steps; 0 disables it.",
+    )
     return parser.parse_args()
 
 

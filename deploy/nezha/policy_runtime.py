@@ -14,6 +14,7 @@ NUM_ACTIONS = 16
 NUM_ONE_STEP_OBS = 65
 LEG_JOINT_IDS = [0, 1, 2, 4, 5, 6, 8, 9, 10, 12, 13, 14]
 WHEEL_JOINT_IDS = [3, 7, 11, 15]
+MODE_NAMES = ("wheel", "leg", "hybrid")
 
 
 class NezhaObservationHistory:
@@ -118,6 +119,8 @@ class NezhaPolicyRuntime:
         wheel_velocity_scale: float = 10.0,
         torque_limits: Sequence[float] = None,
         device: str = "cpu",
+        history_steps: int = 2,
+        observation_scales: Dict[str, float] = None,
     ):
         for name, values in (
             ("default_dof_pos", default_dof_pos),
@@ -128,8 +131,16 @@ class NezhaPolicyRuntime:
                 raise ValueError(f"{name} must contain 16 values")
         self.device = torch.device(device)
         self.policy = torch.jit.load(policy_path, map_location=self.device).eval()
+        if not hasattr(self.policy, "get_mode_probabilities"):
+            raise RuntimeError(
+                "The policy is not an integrated gated-modal export. "
+                "Re-export it with play_nezha_mine.py."
+            )
         self.observations = NezhaObservationHistory(
-            default_dof_pos, device=device
+            default_dof_pos,
+            history_steps=history_steps,
+            scales=observation_scales,
+            device=device,
         )
         self.default_dof_pos = torch.tensor(
             default_dof_pos, dtype=torch.float32, device=self.device
@@ -141,10 +152,16 @@ class NezhaPolicyRuntime:
         self.action_scale = action_scale
         self.wheel_velocity_scale = wheel_velocity_scale
         self.previous_actions = torch.zeros(NUM_ACTIONS, device=self.device)
+        self.last_mode_probabilities = torch.zeros(3, device=self.device)
 
     def reset(self):
         self.previous_actions.zero_()
+        self.last_mode_probabilities.zero_()
         self.observations.reset()
+
+    def mode_probabilities(self) -> torch.Tensor:
+        """Return the last [wheel, leg, hybrid] gate probabilities."""
+        return self.last_mode_probabilities.clone()
 
     @torch.inference_mode()
     def step(
@@ -165,6 +182,12 @@ class NezhaPolicyRuntime:
         )
         history = self.observations.push(one_step)
         actions = self.policy(history).squeeze(0).clamp(-100.0, 100.0)
+        probabilities = self.policy.get_mode_probabilities(history).squeeze(0)
+        if probabilities.shape != (3,):
+            raise RuntimeError(
+                f"Policy returned gate probabilities {probabilities.shape}; expected [3]"
+            )
+        self.last_mode_probabilities.copy_(probabilities)
         if actions.shape != (NUM_ACTIONS,):
             raise RuntimeError(f"Policy returned {actions.shape}; expected [16]")
 

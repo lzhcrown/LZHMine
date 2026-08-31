@@ -6,7 +6,7 @@ soft modality gate blends learnable modal prototypes before the source latent
 is passed to the policy.
 """
 
-from typing import List, Tuple
+from typing import Dict, List, Tuple
 
 import torch
 import torch.nn as nn
@@ -46,6 +46,10 @@ class MINEEstimator(nn.Module):
     training, play, export, MuJoCo and deployment.
     """
 
+    WHEEL_MODE = 0
+    LEG_MODE = 1
+    HYBRID_MODE = 2
+
     def __init__(
         self,
         temporal_steps: int,
@@ -64,8 +68,7 @@ class MINEEstimator(nn.Module):
         learning_rate: float = 1e-3,
         max_grad_norm: float = 10.0,
         mode_loss_coef: float = 0.5,
-        gate_balance_coef: float = 0.05,
-        gate_entropy_coef: float = 0.01,
+        mode_semantic_cfg: Dict = None,
         activation: str = "elu",
         **kwargs,
     ):
@@ -89,9 +92,63 @@ class MINEEstimator(nn.Module):
         self.sinkhorn_iterations = sinkhorn_iterations
         self.learning_rate = learning_rate
         self.max_grad_norm = max_grad_norm
-        self.mode_loss_coef = mode_loss_coef
-        self.gate_balance_coef = gate_balance_coef
-        self.gate_entropy_coef = gate_entropy_coef
+        semantic_cfg = mode_semantic_cfg or {}
+        self.mode_semantic_enabled = bool(semantic_cfg.get("enabled", False))
+        self.mode_semantic_loss_coef = float(semantic_cfg.get("loss_coef", 0.0))
+        self.mode_loss_coef = float(
+            semantic_cfg.get("mode_loss_coef", mode_loss_coef)
+        )
+        self.mode_command_slice = list(semantic_cfg.get("command_slice", [6, 9]))
+        self.mode_dof_vel_slice = list(semantic_cfg.get("dof_vel_slice", [21, 37]))
+        self.mode_action_slice = list(semantic_cfg.get("action_slice", [49, 65]))
+        self.mode_wheel_dof_indices = list(
+            semantic_cfg.get("wheel_dof_indices", [3, 7, 11, 15])
+        )
+        self.mode_leg_dof_indices = list(
+            semantic_cfg.get(
+                "leg_dof_indices",
+                [0, 1, 2, 4, 5, 6, 8, 9, 10, 12, 13, 14],
+            )
+        )
+        self.wheel_activity_low = float(
+            semantic_cfg.get("wheel_activity_low", 0.05)
+        )
+        self.wheel_activity_high = float(
+            semantic_cfg.get("wheel_activity_high", 0.20)
+        )
+        self.leg_activity_low = float(semantic_cfg.get("leg_activity_low", 0.03))
+        self.leg_activity_high = float(
+            semantic_cfg.get("leg_activity_high", 0.12)
+        )
+        self.static_command_threshold = float(
+            semantic_cfg.get("static_command_threshold", 0.05)
+        )
+        self.leg_action_delta_weight = float(
+            semantic_cfg.get("leg_action_delta_weight", 0.70)
+        )
+        self.leg_velocity_weight = float(
+            semantic_cfg.get("leg_velocity_weight", 0.30)
+        )
+        if num_modes != 3 and self.mode_semantic_enabled:
+            raise ValueError("Semantic mode anchoring requires exactly three modes")
+        if self.wheel_activity_high <= self.wheel_activity_low:
+            raise ValueError("wheel_activity_high must exceed wheel_activity_low")
+        if self.leg_activity_high <= self.leg_activity_low:
+            raise ValueError("leg_activity_high must exceed leg_activity_low")
+        for semantic_slice in (
+            self.mode_command_slice,
+            self.mode_dof_vel_slice,
+            self.mode_action_slice,
+        ):
+            if (
+                len(semantic_slice) != 2
+                or semantic_slice[0] < 0
+                or semantic_slice[0] >= semantic_slice[1]
+                or semantic_slice[1] > num_one_step_obs
+            ):
+                raise ValueError(
+                    "Semantic observation slices must lie inside one observation frame"
+                )
         self.register_buffer(
             "estimation_target_indices",
             torch.tensor(estimation_target_indices, dtype=torch.long),
@@ -121,7 +178,9 @@ class MINEEstimator(nn.Module):
             raise ValueError("obs_history must have shape [batch, history * observation]")
         return obs_history
 
-    def _source(self, obs_history: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    def _source(
+        self, obs_history: torch.Tensor
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         history = self._flatten_history(obs_history)
         expected_dim = self.temporal_steps * self.num_one_step_obs
         if history.shape[-1] != expected_dim:
@@ -133,35 +192,116 @@ class MINEEstimator(nn.Module):
         source_latent = parts[..., self.num_est_prob :]
 
         current_obs = history[..., : self.num_one_step_obs]
-        mode_probs = F.softmax(self.mode_gate(current_obs), dim=-1)
+        mode_logits = self.mode_gate(current_obs)
+        mode_probs = F.softmax(mode_logits, dim=-1)
         normalized_modes = F.normalize(self.mode_prototypes, dim=-1, p=2.0)
         modal_scale = torch.matmul(mode_probs, normalized_modes)
         latent = F.normalize(source_latent * modal_scale, dim=-1, p=2.0, eps=1e-8)
-        return estimate, latent, mode_probs
+        return estimate, latent, mode_probs, mode_logits
 
     def forward(self, obs_history: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-        estimate, latent, _ = self._source(obs_history)
+        estimate, latent, _, _ = self._source(obs_history)
         return estimate.detach(), latent.detach()
 
     def encode(self, obs_history: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        return self._source(obs_history)
+        estimate, latent, mode_probs, _ = self._source(obs_history)
+        return estimate, latent, mode_probs
 
     @torch.no_grad()
     def get_latent(self, obs_history: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-        estimate, latent, _ = self._source(obs_history)
+        estimate, latent, _, _ = self._source(obs_history)
         return estimate, latent
 
     @torch.no_grad()
     def mode_probabilities(self, obs_history: torch.Tensor) -> torch.Tensor:
-        _, _, probabilities = self._source(obs_history)
+        _, _, probabilities, _ = self._source(obs_history)
         return probabilities
+
+    @staticmethod
+    def _soft_activity(activity: torch.Tensor, low: float, high: float) -> torch.Tensor:
+        return torch.clamp((activity - low) / (high - low), min=0.0, max=1.0)
+
+    def _semantic_mode_targets(
+        self, obs_history: torch.Tensor
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Create causal wheel/leg/hybrid soft labels for estimator training.
+
+        LZHMine histories are newest-first.  The gate still consumes only the
+        current frame; the previous frame is used only by this training-time
+        label builder to distinguish a fixed leg pose from active leg motion.
+        """
+        history = self._flatten_history(obs_history).detach()
+        current_obs = history[..., : self.num_one_step_obs]
+        if self.temporal_steps > 1:
+            previous_obs = history[
+                ..., self.num_one_step_obs : 2 * self.num_one_step_obs
+            ]
+        else:
+            previous_obs = current_obs
+
+        command = current_obs[
+            :, self.mode_command_slice[0] : self.mode_command_slice[1]
+        ]
+        current_dof_vel = current_obs[
+            :, self.mode_dof_vel_slice[0] : self.mode_dof_vel_slice[1]
+        ]
+        current_action = current_obs[
+            :, self.mode_action_slice[0] : self.mode_action_slice[1]
+        ]
+        previous_action = previous_obs[
+            :, self.mode_action_slice[0] : self.mode_action_slice[1]
+        ]
+
+        # Commanded wheel activity avoids classifying passive wheel rotation as
+        # wheel propulsion.
+        wheel_activity = current_action[:, self.mode_wheel_dof_indices].abs().mean(
+            dim=-1
+        )
+        leg_action_delta = (
+            current_action[:, self.mode_leg_dof_indices]
+            - previous_action[:, self.mode_leg_dof_indices]
+        ).abs().mean(dim=-1)
+        leg_velocity = current_dof_vel[:, self.mode_leg_dof_indices].abs().mean(
+            dim=-1
+        )
+        leg_activity = (
+            self.leg_action_delta_weight * leg_action_delta
+            + self.leg_velocity_weight * leg_velocity
+        )
+
+        wheel_active = self._soft_activity(
+            wheel_activity, self.wheel_activity_low, self.wheel_activity_high
+        )
+        leg_active = self._soft_activity(
+            leg_activity, self.leg_activity_low, self.leg_activity_high
+        )
+        target_mass = torch.stack(
+            (
+                wheel_active * (1.0 - leg_active),
+                (1.0 - wheel_active) * leg_active,
+                wheel_active * leg_active,
+            ),
+            dim=-1,
+        )
+        moving_confidence = target_mass.sum(dim=-1)
+        targets = target_mass / moving_confidence.unsqueeze(-1).clamp_min(1e-6)
+
+        command_activity = torch.norm(command, dim=-1)
+        static_mask = (
+            (command_activity < self.static_command_threshold)
+            & (wheel_activity < self.wheel_activity_low)
+            & (leg_activity < self.leg_activity_low)
+        )
+        valid_mask = (~static_mask) & (moving_confidence > 1e-6)
+        confidence = moving_confidence * valid_mask.float()
+        return targets, confidence, valid_mask, wheel_activity, leg_activity
 
     def update(
         self,
         obs_history: torch.Tensor,
         next_critic_obs: torch.Tensor,
         learning_rate: float = None,
-    ) -> Tuple[float, float, float, float]:
+    ) -> Tuple[float, ...]:
         if learning_rate is not None:
             self.learning_rate = learning_rate
             for group in self.optimizer.param_groups:
@@ -169,7 +309,9 @@ class MINEEstimator(nn.Module):
 
         privileged = next_critic_obs[..., : self.num_one_step_privileged_obs].detach()
         target_values = privileged.index_select(-1, self.estimation_target_indices)
-        predicted_values, source_latent, mode_probs = self._source(obs_history)
+        predicted_values, source_latent, mode_probs, mode_logits = self._source(
+            obs_history
+        )
         target_latent = F.normalize(self.target(privileged), dim=-1, p=2.0, eps=1e-8)
 
         with torch.no_grad():
@@ -184,26 +326,48 @@ class MINEEstimator(nn.Module):
         source_log_probs = F.log_softmax(source_scores / self.temperature, dim=-1)
         target_log_probs = F.log_softmax(target_scores / self.temperature, dim=-1)
         swap_loss = -0.5 * (
-            (source_assignments * target_log_probs).sum(dim=-1).mean()
-            + (target_assignments * source_log_probs).sum(dim=-1).mean()
-        )
+            source_assignments * target_log_probs
+            + target_assignments * source_log_probs
+        ).mean()
         estimation_loss = F.mse_loss(predicted_values, target_values)
 
         normalized_modes = F.normalize(self.mode_prototypes, dim=-1, p=2.0, eps=1e-8)
-        modal_target = F.normalize(mode_probs @ normalized_modes, dim=-1, p=2.0, eps=1e-8)
-        mode_loss = (1.0 - F.cosine_similarity(source_latent, modal_target, dim=-1)).mean()
+        similarity = source_latent.detach() @ normalized_modes.T
+        mode_loss = F.cross_entropy(similarity, torch.argmax(mode_probs, dim=-1))
 
-        mean_mode_probs = mode_probs.mean(dim=0)
-        balance_loss = torch.sum(
-            mean_mode_probs * torch.log(mean_mode_probs * float(self.num_modes) + 1e-8)
-        )
-        entropy_loss = -torch.sum(mode_probs * torch.log(mode_probs + 1e-8), dim=-1).mean()
+        semantic_loss = source_latent.new_zeros(())
+        semantic_valid_ratio = source_latent.new_zeros(())
+        semantic_mode_ratios = source_latent.new_zeros(3)
+        mean_wheel_activity = source_latent.new_zeros(())
+        mean_leg_activity = source_latent.new_zeros(())
+        if self.mode_semantic_enabled and self.mode_semantic_loss_coef > 0.0:
+            (
+                semantic_targets,
+                semantic_confidence,
+                valid_mask,
+                wheel_activity,
+                leg_activity,
+            ) = self._semantic_mode_targets(obs_history)
+            per_sample_semantic_loss = -(
+                semantic_targets * F.log_softmax(mode_logits, dim=-1)
+            ).sum(dim=-1)
+            confidence_sum = semantic_confidence.sum()
+            if confidence_sum.item() > 0.0:
+                semantic_loss = (
+                    per_sample_semantic_loss * semantic_confidence
+                ).sum() / confidence_sum
+                semantic_mode_ratios = (
+                    semantic_targets * semantic_confidence.unsqueeze(-1)
+                ).sum(dim=0) / confidence_sum
+            semantic_valid_ratio = valid_mask.float().mean()
+            mean_wheel_activity = wheel_activity.mean()
+            mean_leg_activity = leg_activity.mean()
+
         total_loss = (
             estimation_loss
             + swap_loss
             + self.mode_loss_coef * mode_loss
-            + self.gate_balance_coef * balance_loss
-            + self.gate_entropy_coef * entropy_loss
+            + self.mode_semantic_loss_coef * semantic_loss
         )
 
         if not torch.isfinite(total_loss):
@@ -213,11 +377,21 @@ class MINEEstimator(nn.Module):
         nn.utils.clip_grad_norm_(self.parameters(), self.max_grad_norm)
         self.optimizer.step()
 
+        mean_mode_probs = mode_probs.detach().mean(dim=0)
         return (
             estimation_loss.item(),
             swap_loss.item(),
             mode_loss.item(),
-            entropy_loss.item(),
+            semantic_loss.item(),
+            semantic_valid_ratio.item(),
+            semantic_mode_ratios[self.WHEEL_MODE].item(),
+            semantic_mode_ratios[self.LEG_MODE].item(),
+            semantic_mode_ratios[self.HYBRID_MODE].item(),
+            mean_wheel_activity.item(),
+            mean_leg_activity.item(),
+            mean_mode_probs[self.WHEEL_MODE].item(),
+            mean_mode_probs[self.LEG_MODE].item(),
+            mean_mode_probs[self.HYBRID_MODE].item(),
         )
 
     @torch.no_grad()

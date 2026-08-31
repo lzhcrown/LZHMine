@@ -4,9 +4,9 @@
 
 ## 方法与代码结构
 
-门控模态双编码器从 `LZHMine` 的 MINE 路线迁入，并按 `LZHloco` 分层：
+门控模态双编码器从 `wheel_gym_CQ` 的 MINE 路线迁入，并按 `LZHMine` 分层：
 
-- `rsl_rl/rsl_rl/modules/mine_estimator.py`：历史观测 source encoder、训练期特权观测 target encoder、三模态 soft gate、模态原型与 prototype swap loss。
+- `rsl_rl/rsl_rl/modules/mine_estimator.py`：历史观测 source encoder、训练期完整375维特权观测 target encoder、三模态 soft gate、模态原型、prototype swap loss 与软语义监督。
 - `rsl_rl/rsl_rl/modules/mine_actor_critic.py`：估计值和门控 latent 与最新一帧本体观测融合后送入 actor；包含与在线推理完全一致的 TorchScript exporter。
 - `rsl_rl/rsl_rl/algorithms/mine_ppo.py`：PPO 与 estimator 独立优化器，避免同一 estimator 参数被两个 Adam 状态重复更新。
 - `rsl_rl/rsl_rl/runners/mine_on_policy_runner.py`：rollout、终止状态特权观测、日志、断点与 best policy。
@@ -14,7 +14,9 @@
 - `deploy/nezha/`：不依赖仿真器的观测历史和混合控制运行时，供真机 SDK 接入。
 - `mujoco/nezha_sim.py`：复用同一部署运行时的 sim-to-sim 入口。
 
-所有阶段统一采用 `newest-first` 历史顺序：当前帧位于扁平历史的最前面。Actor 历史为 `2 x 65 = 130`；四个估计目标是机体坐标系线速度和基座高度。
+所有阶段统一采用 `newest-first` 历史顺序：当前帧位于扁平历史的最前面。Actor 历史为 `2 x 65 = 130`；critic 历史为 `3 x 375 = 1125`。参考编码器输入最新一帧完整375维特权观测，四个估计目标是机体坐标系线速度和基座高度。
+
+三种模态的固定编号为 `0=wheel`、`1=leg`、`2=hybrid`。门控网络只输入当前65维观测；训练时的软语义标签额外读取前一帧动作，用于区分固定腿姿态和主动腿运动。该标签生成器不会导出到 sim-to-sim 或真机策略。
 
 ## 环境准备
 
@@ -63,6 +65,8 @@ python legged_gym/scripts/train_nezha_mine.py \
 
 训练输出位于 `logs/nezha_mine/<时间>_gated_modal_dual_encoder/`。
 
+完整特权帧已由旧版272维调整为375维，参考编码器首层形状随之变化；旧的 LZHMine checkpoint 不能直接续训，请从新实验开始训练。
+
 ## Isaac Gym Play 与导出
 
 ```bash
@@ -90,11 +94,10 @@ logs/nezha_mine/exported/<运行目录名>/policy.pt
 pip install mujoco pyyaml
 ```
 
-当前已有 Nezha URDF，但没有经过验证的浮动基座 Nezha MJCF。请在 `mujoco/nezha_config.yaml` 设置 `model_path`，或通过 `--model` 传入自己的浮动基座 MJCF。入口会先校验 free joint 和全部 16 个 Nezha 关节，不会回退到其他机器人模型。
+`mujoco/nezha_config.yaml` 默认指向 `mujoco/models/nezha_scene.xml`，其中包含浮动基座 Nezha 与平面场景；也可以通过 `--model` 传入其他经过验证的 MJCF。入口会先校验 free joint 和全部16个 Nezha 关节，不会回退到其他机器人模型，并周期性输出 wheel/leg/hybrid 门控概率。
 
 ```bash
 python mujoco/nezha_sim.py \
-  --model /absolute/path/to/nezha.xml \
   --policy logs/nezha_mine/exported/latest/policy.pt \
   --vx 0.5
 ```
