@@ -24,15 +24,15 @@ class NezhaMINECfg(LeggedRobotCfg):
 
     class terrain(LeggedRobotCfg.terrain):
         mesh_type = "trimesh"
+        generator_profile = "wheel_gym_cq"
         terrain_length = 10.0
         terrain_width = 10.0
         num_rows = 10
         num_cols = 20
         max_init_terrain_level = 5
-        # LZHMine's terrain generator has eight valid branches.  Keep all
-        # eight probabilities so discrete obstacles are actually generated;
-        # the five-entry legacy wheel_gym_CQ list would index out of range.
-        terrain_proportions = [0.1, 0.1, 0.15, 0.15, 0.2, 0.1, 0.1, 0.1]
+        # wheel_gym_CQ Apr10 gated-three-class baseline:
+        # plane, slope, rough slope, stairs down, stairs up.
+        terrain_proportions = [0.1, 0.1, 0.35, 0.2, 0.25]
         curriculum = True
         measure_heights = True
         restitution = 0.5
@@ -134,6 +134,10 @@ class NezhaMINECfg(LeggedRobotCfg):
 
     class rewards(LeggedRobotCfg.rewards):
         only_positive_rewards = False
+        tracking_sigma = 0.25
+        soft_dof_pos_limit = 0.9
+        soft_dof_vel_limit = 0.9
+        soft_torque_limit = 1.0
         base_height_target = 0.50
         max_contact_force = 400.0
 
@@ -145,7 +149,7 @@ class NezhaMINECfg(LeggedRobotCfg):
             ang_vel_xy = -0.2
             orientation = -2.0
             base_height = -1.0
-            feet_air_time = 4.0
+            feet_air_time = 1.0
             feet_contact_uniform = -0.1
             hip_default = -8.0
             stand_still = -3.0
@@ -179,6 +183,23 @@ class NezhaMINECfg(LeggedRobotCfg):
         pos = [3.0, -3.0, 2.0]
         lookat = [0.0, 0.0, 0.5]
 
+    class sim(LeggedRobotCfg.sim):
+        dt = 0.005
+        substeps = 1
+
+        class physx(LeggedRobotCfg.sim.physx):
+            num_threads = 10
+            solver_type = 1
+            num_position_iterations = 4
+            num_velocity_iterations = 0
+            contact_offset = 0.01
+            rest_offset = 0.0
+            bounce_threshold_velocity = 0.1
+            max_depenetration_velocity = 1.0
+            max_gpu_contact_pairs = 2**23
+            default_buffer_size_multiplier = 5
+            contact_collection = 2
+
 
 class NezhaMINECfgPPO(LeggedRobotCfgPPO):
     seed = 10
@@ -188,8 +209,14 @@ class NezhaMINECfgPPO(LeggedRobotCfgPPO):
         init_noise_std = 1.0
         actor_hidden_dims = [512, 256, 128]
         critic_hidden_dims = [512, 256, 128]
+        # Match wheel_gym_CQ's effective source network:
+        # 130 -> 256 -> 128 -> 64 -> (4 estimates + 16 latent).
         enc_hidden_dims = [256, 128, 64]
         tar_hidden_dims = [256, 128, 64]
+        # The original Apr10 experiment left is_privileged_obs at False, so
+        # the target encoder consumes the actor-equivalent 65-D prefix rather
+        # than the complete 375-D privileged frame.
+        is_privileged_obs = False
         latent_dim = 16
         num_modes = 3
         gate_hidden_dim = 64
@@ -198,11 +225,11 @@ class NezhaMINECfgPPO(LeggedRobotCfgPPO):
         estimator_learning_rate = 1e-3
         estimator_max_grad_norm = 10.0
         mode_loss_coef = 0.5
-        # Fixed semantic indices: 0=wheel, 1=leg, 2=wheel-leg hybrid.
-        # Static/uncertain samples are excluded from semantic supervision.
+        # Disable LZHMine's later semantic anchoring to reproduce the original
+        # self-labelled three-way gate objective.
         mode_semantic_cfg = {
-            "enabled": True,
-            "loss_coef": 0.10,
+            "enabled": False,
+            "loss_coef": 0.0,
             "mode_loss_coef": 0.50,
             "command_slice": [6, 9],
             "dof_vel_slice": [21, 37],
@@ -240,7 +267,7 @@ class NezhaMINECfgPPO(LeggedRobotCfgPPO):
         max_iterations = 100000
         save_interval = 200
         experiment_name = "nezha_mine"
-        run_name = "gated_modal_dual_encoder"
+        run_name = "wheel_gym_cq_reproduction"
         resume = False
         load_run = -1
         checkpoint = -1

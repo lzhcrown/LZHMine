@@ -1,9 +1,9 @@
 """Gated modal dual-encoder used by the Nezha MINE policy.
 
 The source encoder consumes proprioceptive history available on the robot.  The
-target encoder is training-only and consumes privileged simulator state.  A
-soft modality gate blends learnable modal prototypes before the source latent
-is passed to the policy.
+target encoder is training-only and consumes a configured simulator target
+view.  A soft modality gate blends learnable modal prototypes before the
+source latent is passed to the policy.
 """
 
 from typing import Dict, List, Tuple
@@ -43,7 +43,9 @@ class MINEEstimator(nn.Module):
     """Modality-gated source/target estimator.
 
     Observation histories are flattened and ordered newest-first throughout
-    training, play, export, MuJoCo and deployment.
+    training, play, export, MuJoCo and deployment.  The target encoder can
+    consume either the full privileged frame or its actor-observation prefix;
+    the latter reproduces wheel_gym_CQ's ``is_privileged_obs=False`` experiment.
     """
 
     WHEEL_MODE = 0
@@ -56,6 +58,7 @@ class MINEEstimator(nn.Module):
         num_one_step_obs: int,
         num_one_step_privileged_obs: int,
         estimation_target_indices: List[int],
+        is_privileged_obs: bool = True,
         enc_hidden_dims: List[int] = [256, 128, 64],
         tar_hidden_dims: List[int] = [256, 128, 64],
         latent_dim: int = 16,
@@ -84,6 +87,7 @@ class MINEEstimator(nn.Module):
         self.temporal_steps = temporal_steps
         self.num_one_step_obs = num_one_step_obs
         self.num_one_step_privileged_obs = num_one_step_privileged_obs
+        self.is_privileged_obs = bool(is_privileged_obs)
         self.num_est_prob = len(estimation_target_indices)
         self.num_latent = latent_dim
         self.num_modes = num_modes
@@ -160,8 +164,13 @@ class MINEEstimator(nn.Module):
             self.num_est_prob + latent_dim,
             activation,
         )
+        target_input_dim = (
+            num_one_step_privileged_obs
+            if self.is_privileged_obs
+            else num_one_step_obs
+        )
         self.target = _mlp(
-            num_one_step_privileged_obs,
+            target_input_dim,
             tar_hidden_dims,
             latent_dim,
             activation,
@@ -312,7 +321,14 @@ class MINEEstimator(nn.Module):
         predicted_values, source_latent, mode_probs, mode_logits = self._source(
             obs_history
         )
-        target_latent = F.normalize(self.target(privileged), dim=-1, p=2.0, eps=1e-8)
+        target_input = (
+            privileged
+            if self.is_privileged_obs
+            else privileged[..., : self.num_one_step_obs]
+        )
+        target_latent = F.normalize(
+            self.target(target_input), dim=-1, p=2.0, eps=1e-8
+        )
 
         with torch.no_grad():
             self.proto.weight.copy_(F.normalize(self.proto.weight, dim=-1, p=2.0, eps=1e-8))

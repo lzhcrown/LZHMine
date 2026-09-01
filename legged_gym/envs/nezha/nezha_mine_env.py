@@ -190,6 +190,21 @@ class NezhaMINEEnv(LeggedRobot):
             dim=1,
         )
 
+    def _reward_feet_air_time(self):
+        """wheel_gym_CQ landing-time reward used by the Apr10 baseline."""
+        contact = self.contact_forces[:, self.feet_indices, 2] > 1.0
+        contact_filtered = torch.logical_or(contact, self.last_contacts)
+        self.last_contacts = contact
+        first_contact = (self.feet_air_time > 0.0) * contact_filtered
+        self.feet_air_time += self.dt
+        reward = torch.sum(
+            (self.feet_air_time - 0.6) * first_contact,
+            dim=1,
+        )
+        reward *= torch.norm(self.commands[:, :2], dim=1) > 0.1
+        self.feet_air_time *= ~contact_filtered
+        return reward
+
     def _reward_feet_contact_uniform(self):
         contact = self.contact_forces[:, self.feet_indices, 2] > 1.0
         contact_mean = torch.mean(contact.float(), dim=1, keepdim=True)

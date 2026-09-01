@@ -40,6 +40,23 @@ def test_mine_forward_update_and_gate_probabilities():
     )
 
 
+def test_wheel_gym_cq_target_encoder_uses_actor_observation_width():
+    estimator = MINEEstimator(
+        temporal_steps=2,
+        num_one_step_obs=65,
+        num_one_step_privileged_obs=375,
+        estimation_target_indices=[371, 372, 373, 374],
+        is_privileged_obs=False,
+        enc_hidden_dims=[32],
+        tar_hidden_dims=[32],
+        latent_dim=8,
+    )
+
+    assert estimator.target[0].in_features == 65
+    losses = estimator.update(torch.randn(4, 130), torch.randn(4, 1125))
+    assert all(torch.isfinite(torch.tensor(losses)))
+
+
 def test_scripted_export_matches_online_policy():
     policy = make_policy().eval()
     observations = torch.randn(8, 20)
