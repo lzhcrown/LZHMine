@@ -60,6 +60,16 @@ def train(args):
     print(f"environments:       {env.num_envs}")
     print(f"actor observations: {env.num_obs} ({env.history_length} x {env.num_one_step_obs})")
     print(f"critic observations:{env.num_privileged_obs}")
+    target_width = (
+        env.num_one_step_privileged_obs
+        if train_cfg.policy.is_privileged_obs
+        else env.num_one_step_obs
+    )
+    print(f"target encoder obs: {target_width}")
+    print(
+        "semantic gate loss: "
+        f"{train_cfg.policy.mode_semantic_cfg['enabled']}"
+    )
     print(f"actions:            {env.num_actions}")
     print(f"device:             {args.rl_device}")
     print(f"log directory:      {runner.log_dir}")

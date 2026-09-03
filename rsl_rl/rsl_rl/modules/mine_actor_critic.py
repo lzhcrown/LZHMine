@@ -33,6 +33,8 @@ class MINEActorCritic(nn.Module):
         num_one_step_privileged_obs: int,
         estimation_target_indices: List[int],
         num_actions: int,
+        history_order: str = "oldest_first",
+        is_privileged_obs: bool = True,
         actor_hidden_dims: List[int] = [512, 256, 128],
         critic_hidden_dims: List[int] = [512, 256, 128],
         enc_hidden_dims: List[int] = [256, 128, 64],
@@ -56,6 +58,9 @@ class MINEActorCritic(nn.Module):
             raise ValueError("Actor observation width must be a whole number of frames")
 
         self.history_size = num_actor_obs // num_one_step_obs
+        if history_order not in ("oldest_first", "newest_first"):
+            raise ValueError("Unsupported history_order: " + history_order)
+        self.history_order = history_order
         self.num_actor_obs = num_actor_obs
         self.num_one_step_obs = num_one_step_obs
         self.num_actions = num_actions
@@ -64,9 +69,11 @@ class MINEActorCritic(nn.Module):
 
         self.estimator = MINEEstimator(
             temporal_steps=self.history_size,
+            history_order=history_order,
             num_one_step_obs=num_one_step_obs,
             num_one_step_privileged_obs=num_one_step_privileged_obs,
             estimation_target_indices=estimation_target_indices,
+            is_privileged_obs=is_privileged_obs,
             enc_hidden_dims=enc_hidden_dims,
             tar_hidden_dims=tar_hidden_dims,
             latent_dim=latent_dim,
@@ -87,10 +94,6 @@ class MINEActorCritic(nn.Module):
         self.std = nn.Parameter(init_noise_std * torch.ones(num_actions))
         self.distribution = None
         Normal.set_default_validate_args = False
-
-    def policy_parameters(self):
-        """Parameters optimized by PPO (the estimator has its own optimizer)."""
-        return list(self.actor.parameters()) + list(self.critic.parameters()) + [self.std]
 
     def reset(self, dones=None):
         del dones
@@ -113,13 +116,18 @@ class MINEActorCritic(nn.Module):
     def _actor_input(self, obs_history: torch.Tensor) -> torch.Tensor:
         with torch.no_grad():
             estimate, latent = self.estimator(obs_history)
-        current_obs = obs_history[..., : self.num_one_step_obs]
+        # The actor consumes the newest frame. wheel_gym_CQ stores histories
+        # chronologically, so that frame is at the end of the flat history.
+        current_obs = (
+            obs_history[..., -self.num_one_step_obs :]
+            if self.history_order == "oldest_first"
+            else obs_history[..., : self.num_one_step_obs]
+        )
         return torch.cat((current_obs, estimate, latent), dim=-1)
 
     def update_distribution(self, obs_history: torch.Tensor):
         mean = self.actor(self._actor_input(obs_history))
-        safe_std = self.std.clamp_min(1e-4)
-        self.distribution = Normal(mean, mean * 0.0 + safe_std)
+        self.distribution = Normal(mean, mean * 0.0 + self.std)
 
     def act(self, obs_history=None, **kwargs):
         del kwargs
@@ -149,6 +157,9 @@ class MINEPolicyExporter(nn.Module):
         self.mode_gate = copy.deepcopy(estimator.mode_gate).cpu()
         self.num_one_step_obs = estimator.num_one_step_obs
         self.num_est_prob = estimator.num_est_prob
+        self.history_order_code = (
+            1 if actor_critic.history_order == "oldest_first" else 0
+        )
         self.register_buffer(
             "mode_prototypes",
             estimator.mode_prototypes.detach().clone().cpu(),
@@ -158,17 +169,30 @@ class MINEPolicyExporter(nn.Module):
         parts = self.encoder(obs_history)
         estimate = parts[..., : self.num_est_prob]
         latent = parts[..., self.num_est_prob :]
-        current_obs = obs_history[..., : self.num_one_step_obs]
-        mode_probs = F.softmax(self.mode_gate(current_obs), dim=-1)
-        normalized_modes = F.normalize(self.mode_prototypes, dim=-1, p=2.0)
-        modal_scale = torch.matmul(mode_probs, normalized_modes)
+        current_obs = (
+            obs_history[..., -self.num_one_step_obs :]
+            if self.history_order_code == 1
+            else obs_history[..., : self.num_one_step_obs]
+        )
+        gate_obs = obs_history[..., : self.num_one_step_obs]
+        mode_probs = F.softmax(self.mode_gate(gate_obs), dim=-1)
+        # Online source inference uses raw modal prototypes. Normalization is
+        # used only by the estimator's training update.
+        modal_scale = torch.matmul(mode_probs, self.mode_prototypes)
         latent = F.normalize(latent * modal_scale, dim=-1, p=2.0)
         return self.actor(torch.cat((current_obs, estimate, latent), dim=-1))
 
     @torch.jit.export
     def get_mode_probabilities(self, obs_history: torch.Tensor) -> torch.Tensor:
+        # Preserve the original gate contract: despite the chronological
+        # history, the gate consumes the oldest frame.
         current_obs = obs_history[..., : self.num_one_step_obs]
         return F.softmax(self.mode_gate(current_obs), dim=-1)
+
+    @torch.jit.export
+    def get_history_order_code(self) -> int:
+        """Return 1 for the wheel_gym_CQ oldest-to-newest history layout."""
+        return self.history_order_code
 
     def export(self, path: str):
         self.eval()

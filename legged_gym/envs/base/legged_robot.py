@@ -847,6 +847,10 @@ class LeggedRobot(BaseTask):
              3. Store indices of different bodies of the robot
         """
         asset_path = self.cfg.asset.file.format(LEGGED_GYM_ROOT_DIR=LEGGED_GYM_ROOT_DIR)
+        if not os.path.isfile(asset_path):
+            raise FileNotFoundError(
+                f"Configured robot asset does not exist: {asset_path}"
+            )
         asset_root = os.path.dirname(asset_path)
         asset_file = os.path.basename(asset_path)
 

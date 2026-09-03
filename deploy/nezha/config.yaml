@@ -1,7 +1,9 @@
-policy_path: "logs/nezha_mine/exported/latest/policy.pt"
+policy_path: "logs/nezha3_mine/exported/latest/policy.pt"
 control_frequency_hz: 50
 history_steps: 2
-history_order: newest_first
+history_order: auto
+legacy_history_order: newest_first
+zero_wheel_velocity_observations: true
 mode_names: [wheel, leg, hybrid]
 observation_scales:
   lin_vel: 2.0

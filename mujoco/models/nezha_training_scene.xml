@@ -1,0 +1,33 @@
+<mujoco model="nezha gated-modal full-training-curriculum sim-to-sim">
+  <include file="nezha.xml"/>
+
+  <option timestep="0.005" gravity="0 0 -9.81"/>
+
+  <visual>
+    <headlight diffuse="0.6 0.6 0.6" ambient="0.3 0.3 0.3" specular="0 0 0"/>
+    <global azimuth="-130" elevation="-20"/>
+  </visual>
+
+  <asset>
+    <texture type="skybox" builtin="gradient" rgb1="0.3 0.5 0.7" rgb2="0 0 0"
+             width="512" height="3072"/>
+    <texture type="2d" name="roughtex" builtin="checker" mark="edge"
+             rgb1="0.28 0.32 0.24" rgb2="0.16 0.20 0.13" markrgb="0.55 0.6 0.45"
+             width="300" height="300"/>
+    <material name="roughground" texture="roughtex" texuniform="true"
+              texrepeat="8 8" reflectance="0.1"/>
+    <!-- Full training map: 10x20 tiles of 10x10 m, plus a 25 m border.
+         The sampled vertices span 149.9 x 249.9 m and [-0.95, 0.95] m. -->
+    <hfield name="training_curriculum" file="../../../../mujoco/models/assets/nezha_training_curriculum.bin"
+            size="74.95 124.95 1.9 0.1"/>
+  </asset>
+
+  <worldbody>
+    <light pos="0 0 2" dir="0 0 -1" directional="true"/>
+    <!-- Isaac Gym vertices start at (-border,-border), with 0.1 m spacing.
+         Therefore x=[-25,124.9], y=[-25,224.9], center=(49.95,99.95). -->
+    <geom name="training_terrain" type="hfield" hfield="training_curriculum"
+          pos="49.95 99.95 -0.95" material="roughground" contype="2" conaffinity="1"
+          friction="1.0 0.01 0.001"/>
+  </worldbody>
+</mujoco>

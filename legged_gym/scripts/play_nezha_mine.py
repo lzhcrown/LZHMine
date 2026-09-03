@@ -46,6 +46,7 @@ PLAY_ARGUMENTS = [
     {"name": "--enable_domain_rand", "action": "store_true", "default": False, "help": "Keep training domain randomization enabled."},
     {"name": "--no_noise", "action": "store_true", "default": False, "help": "Disable observation noise (LZHMine play keeps it enabled)."},
     {"name": "--no_export", "action": "store_true", "default": False, "help": "Do not export the integrated TorchScript policy."},
+    {"name": "--checkpoint_history_order", "type": str, "default": "oldest_first", "help": "History layout used when this checkpoint was trained: oldest_first (Apr10-compatible) or newest_first (legacy LZHMine)."},
     {"name": "--gate_log_interval", "type": int, "default": 100, "help": "Print gate/estimator diagnostics every N steps; 0 disables it."},
     {"name": "--record_frames", "action": "store_true", "default": False, "help": "Write viewer frames under the experiment log."},
     {"name": "--move_camera", "action": "store_true", "default": False, "help": "Make the viewer camera follow Nezha."},
@@ -188,8 +189,14 @@ def play(args):
         raise ValueError("play_num_envs and play_steps must be positive")
     if args.terrain not in ("plane", "heightfield", "trimesh"):
         raise ValueError("terrain must be plane, heightfield or trimesh")
+    if args.checkpoint_history_order not in ("oldest_first", "newest_first"):
+        raise ValueError(
+            "checkpoint_history_order must be oldest_first or newest_first"
+        )
 
     env_cfg.env.num_envs = args.play_num_envs
+    env_cfg.env.history_order = args.checkpoint_history_order
+    train_cfg.policy.history_order = args.checkpoint_history_order
     env_cfg.env.episode_length_s = max(env_cfg.env.episode_length_s, 30)
     env_cfg.sim.max_gpu_contact_pairs = max(2**10, args.play_num_envs * 256)
     env_cfg.noise.add_noise = not args.no_noise
@@ -260,6 +267,7 @@ def play(args):
     print(f"checkpoint run:     {export_label}")
     print(f"command [vx,vy,wz]:{command}")
     print(f"terrain/noise:      {args.terrain} / {env_cfg.noise.add_noise}")
+    print(f"history order:      {args.checkpoint_history_order}")
     print(f"domain randomization: {args.enable_domain_rand}")
     print(f"steps/environments: {args.play_steps} / {env.num_envs}")
     print("=" * 72)

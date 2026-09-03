@@ -1,11 +1,19 @@
-# Standalone floating-base Nezha MJCF with a plane scene.
-model_path: "mujoco/models/nezha_scene.xml"
-policy_path: "logs/nezha_mine/exported/latest/policy.pt"
+# Fixed side-by-side terrain gallery. The robot starts at x=-5, y=0 on the
+# shared flat staging area, then uses lateral motion to select a lane.
+model_path: "mujoco/models/nezha_course_scene.xml"
+terrain_metadata_path: "mujoco/models/assets/nezha_terrain_course.json"
+policy_path: "logs/nezha3_mine/exported/latest/policy.pt"
 control_frequency_hz: 50
 initial_base_height: 0.60
 gate_log_interval: 100
 history_steps: 2
-history_order: newest_first
+history_order: auto
+# Existing exports made before history metadata was added used LZHMine's old
+# newest-first layout. New exports report the Apr10 oldest-first layout.
+legacy_history_order: newest_first
+zero_wheel_velocity_observations: true
+standby_at_zero_command: true
+settle_time_s: 2.0
 mode_names: [wheel, leg, hybrid]
 observation_scales:
   lin_vel: 2.0

@@ -112,6 +112,9 @@ class Terrain:
                                 length=self.width_per_env_pixels,
                                 vertical_scale=self.cfg.vertical_scale,
                                 horizontal_scale=self.cfg.horizontal_scale)
+        if getattr(self.cfg, "generator_profile", None) == "wheel_gym_cq":
+            return self._make_wheel_gym_cq_terrain(terrain, choice, difficulty)
+
         slope = difficulty * 0.4
         amplitude = 0.01 + 0.07 * difficulty
         step_height = 0.05 + 0.18 * difficulty
@@ -143,6 +146,60 @@ class Terrain:
         else:
             pit_terrain(terrain, depth=pit_depth, platform_size=4.)
         
+        return terrain
+
+    def _make_wheel_gym_cq_terrain(self, terrain, choice, difficulty):
+        """Reproduce the Apr10 wheel_gym_CQ gated-mode terrain curriculum."""
+        if len(self.proportions) != 5:
+            raise ValueError(
+                "wheel_gym_cq terrain profile requires five terrain proportions"
+            )
+
+        slope = difficulty * 0.4
+        random_height = 0.05 + difficulty * 0.02
+        step_height = 0.03 + 0.18 * difficulty
+
+        if choice < self.proportions[0]:
+            terrain_utils.pyramid_sloped_terrain(
+                terrain, slope=0.0, platform_size=3.0
+            )
+        elif choice < self.proportions[1]:
+            midpoint = self.proportions[0] + (
+                self.proportions[1] - self.proportions[0]
+            ) / 2.0
+            if choice < midpoint:
+                slope *= -1.0
+            terrain_utils.pyramid_sloped_terrain(
+                terrain, slope=slope, platform_size=3.0
+            )
+        elif choice < self.proportions[2]:
+            midpoint = self.proportions[1] + (
+                self.proportions[2] - self.proportions[1]
+            ) / 2.0
+            if choice < midpoint:
+                slope *= -1.0
+            terrain_utils.pyramid_sloped_terrain(
+                terrain, slope=slope * 0.5, platform_size=3.0
+            )
+            terrain_utils.random_uniform_terrain(
+                terrain,
+                min_height=-random_height,
+                max_height=random_height,
+                step=0.005,
+                downsampled_scale=0.2,
+            )
+        elif choice < self.proportions[4]:
+            if choice < self.proportions[3]:
+                step_height *= -1.0
+            terrain_utils.pyramid_stairs_terrain(
+                terrain,
+                step_width=0.7,
+                step_height=step_height,
+                platform_size=4.0,
+            )
+        else:
+            raise ValueError(f"Terrain choice must be below 1.0, got {choice}")
+
         return terrain
 
     def add_terrain_to_map(self, terrain, row, col):

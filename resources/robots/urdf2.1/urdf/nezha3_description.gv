@@ -1,0 +1,68 @@
+digraph G {
+node [shape=box];
+"trunk" [label="trunk"];
+"FL_hip" [label="FL_hip"];
+"FL_thigh" [label="FL_thigh"];
+"FL_calf" [label="FL_calf"];
+"FL_footmotor" [label="FL_footmotor"];
+"FL_foot" [label="FL_foot"];
+"FR_hip" [label="FR_hip"];
+"FR_thigh" [label="FR_thigh"];
+"FR_calf" [label="FR_calf"];
+"FR_footmotor" [label="FR_footmotor"];
+"FR_foot" [label="FR_foot"];
+"Lidar" [label="Lidar"];
+"RL_hip" [label="RL_hip"];
+"RL_thigh" [label="RL_thigh"];
+"RL_calf" [label="RL_calf"];
+"RL_footmotor" [label="RL_footmotor"];
+"RL_foot" [label="RL_foot"];
+"RR_hip" [label="RR_hip"];
+"RR_thigh" [label="RR_thigh"];
+"RR_calf" [label="RR_calf"];
+"RR_footmotor" [label="RR_footmotor"];
+"RR_foot" [label="RR_foot"];
+node [shape=ellipse, color=blue, fontcolor=blue];
+"trunk" -> "FL_hip_joint" [label="xyz: 0.42614 0.064917 0.013531 \nrpy: 0 -0 0"]
+"FL_hip_joint" -> "FL_hip"
+"FL_hip" -> "FL_thigh_joint" [label="xyz: 0 0.1325 0 \nrpy: 0 -0 0"]
+"FL_thigh_joint" -> "FL_thigh"
+"FL_thigh" -> "FL_calf_joint" [label="xyz: 0 0.0245 -0.33 \nrpy: 0 -0 0"]
+"FL_calf_joint" -> "FL_calf"
+"FL_calf" -> "FL_footmotor_fixed" [label="xyz: 5.7407e-05 0.0205 -0.33 \nrpy: 0 -0 0"]
+"FL_footmotor_fixed" -> "FL_footmotor"
+"FL_footmotor" -> "FL_foot_joint" [label="xyz: 0.00010365 0.034479 0.00033954 \nrpy: 0 -0 0"]
+"FL_foot_joint" -> "FL_foot"
+"trunk" -> "FR_hip_joint" [label="xyz: 0.42614 -0.089083 0.013531 \nrpy: 0 -0 0"]
+"FR_hip_joint" -> "FR_hip"
+"FR_hip" -> "FR_thigh_joint" [label="xyz: 0 -0.1325 0 \nrpy: 0 -0 0"]
+"FR_thigh_joint" -> "FR_thigh"
+"FR_thigh" -> "FR_calf_joint" [label="xyz: 0 -0.0245 -0.33 \nrpy: 0 -0 0"]
+"FR_calf_joint" -> "FR_calf"
+"FR_calf" -> "FR_footmotor_fixed" [label="xyz: 5.7407e-05 -0.0205 -0.33 \nrpy: 0 -0 0"]
+"FR_footmotor_fixed" -> "FR_footmotor"
+"FR_footmotor" -> "FR_foot_joint" [label="xyz: 7.9882e-05 -0.034479 0.0003459 \nrpy: 0 -0 0"]
+"FR_foot_joint" -> "FR_foot"
+"trunk" -> "Lidar_fixed_joint" [label="xyz: 0.56234 -0.012083 -0.027985 \nrpy: 0 -0 0"]
+"Lidar_fixed_joint" -> "Lidar"
+"trunk" -> "RL_hip_joint" [label="xyz: -0.43586 0.064917 0.013531 \nrpy: 0 -0 0"]
+"RL_hip_joint" -> "RL_hip"
+"RL_hip" -> "RL_thigh_joint" [label="xyz: 0 0.1325 0 \nrpy: 0 -0 0"]
+"RL_thigh_joint" -> "RL_thigh"
+"RL_thigh" -> "RL_calf_joint" [label="xyz: 0 0.0245 -0.33 \nrpy: 0 -0 0"]
+"RL_calf_joint" -> "RL_calf"
+"RL_calf" -> "RL_footmotor_fixed" [label="xyz: 5.7407e-05 0.0205 -0.33 \nrpy: 0 -0 0"]
+"RL_footmotor_fixed" -> "RL_footmotor"
+"RL_footmotor" -> "RL_foot_joint" [label="xyz: 0.00010365 0.034479 0.00033954 \nrpy: 0 -0 0"]
+"RL_foot_joint" -> "RL_foot"
+"trunk" -> "RR_hip_joint" [label="xyz: -0.43586 -0.089083 0.013531 \nrpy: 0 -0 0"]
+"RR_hip_joint" -> "RR_hip"
+"RR_hip" -> "RR_thigh_joint" [label="xyz: 0 -0.1325 0 \nrpy: 0 -0 0"]
+"RR_thigh_joint" -> "RR_thigh"
+"RR_thigh" -> "RR_calf_joint" [label="xyz: 0 -0.0245 -0.33 \nrpy: 0 -0 0"]
+"RR_calf_joint" -> "RR_calf"
+"RR_calf" -> "RR_footmotor_fixed" [label="xyz: 5.7407e-05 -0.0205 -0.33 \nrpy: 0 -0 0"]
+"RR_footmotor_fixed" -> "RR_footmotor"
+"RR_footmotor" -> "RR_foot_joint" [label="xyz: 7.9882e-05 -0.034479 0.0003459 \nrpy: 0 -0 0"]
+"RR_foot_joint" -> "RR_foot"
+}

@@ -18,12 +18,14 @@ MODE_NAMES = ("wheel", "leg", "hybrid")
 
 
 class NezhaObservationHistory:
-    """Build the newest-first 2x65 observation consumed by the policy."""
+    """Build the flattened observation history consumed by the policy."""
 
     def __init__(
         self,
         default_dof_pos: Sequence[float],
         history_steps: int = 2,
+        history_order: str = "oldest_first",
+        zero_wheel_velocity_observations: bool = True,
         scales: Dict[str, float] = None,
         device: str = "cpu",
     ):
@@ -34,6 +36,14 @@ class NezhaObservationHistory:
             default_dof_pos, dtype=torch.float32, device=self.device
         )
         self.history_steps = history_steps
+        if history_order not in ("oldest_first", "newest_first"):
+            raise ValueError(
+                "history_order must be 'oldest_first' or 'newest_first'"
+            )
+        self.history_order = history_order
+        self.zero_wheel_velocity_observations = bool(
+            zero_wheel_velocity_observations
+        )
         self.scales = scales or {
             "lin_vel": 2.0,
             "ang_vel": 1.0,
@@ -77,6 +87,9 @@ class NezhaObservationHistory:
             if tensor.shape != shape:
                 raise ValueError(f"Runtime input has shape {tensor.shape}, expected {shape}")
         leg_ids = torch.tensor(LEG_JOINT_IDS, device=self.device)
+        if self.zero_wheel_velocity_observations:
+            velocity = velocity.clone()
+            velocity[torch.tensor(WHEEL_JOINT_IDS, device=self.device)] = 0.0
         position_error = (position - self.default_dof_pos) * self.scales["dof_pos"]
         return torch.cat(
             (
@@ -101,8 +114,12 @@ class NezhaObservationHistory:
     def push(self, one_step_observation: torch.Tensor) -> torch.Tensor:
         if one_step_observation.shape != (NUM_ONE_STEP_OBS,):
             raise ValueError("one_step_observation must have shape [65]")
-        self.history[1:] = self.history[:-1].clone()
-        self.history[0] = one_step_observation
+        if self.history_order == "oldest_first":
+            self.history[:-1] = self.history[1:].clone()
+            self.history[-1] = one_step_observation
+        else:
+            self.history[1:] = self.history[:-1].clone()
+            self.history[0] = one_step_observation
         return self.history.reshape(1, -1)
 
 
@@ -120,6 +137,9 @@ class NezhaPolicyRuntime:
         torque_limits: Sequence[float] = None,
         device: str = "cpu",
         history_steps: int = 2,
+        history_order: str = "auto",
+        legacy_history_order: str = "newest_first",
+        zero_wheel_velocity_observations: bool = True,
         observation_scales: Dict[str, float] = None,
     ):
         for name, values in (
@@ -136,9 +156,20 @@ class NezhaPolicyRuntime:
                 "The policy is not an integrated gated-modal export. "
                 "Re-export it with play_nezha_mine.py."
             )
+        if history_order == "auto":
+            if hasattr(self.policy, "get_history_order_code"):
+                history_order = (
+                    "oldest_first"
+                    if int(self.policy.get_history_order_code()) == 1
+                    else "newest_first"
+                )
+            else:
+                history_order = legacy_history_order
         self.observations = NezhaObservationHistory(
             default_dof_pos,
             history_steps=history_steps,
+            history_order=history_order,
+            zero_wheel_velocity_observations=zero_wheel_velocity_observations,
             scales=observation_scales,
             device=device,
         )
@@ -153,6 +184,7 @@ class NezhaPolicyRuntime:
         self.wheel_velocity_scale = wheel_velocity_scale
         self.previous_actions = torch.zeros(NUM_ACTIONS, device=self.device)
         self.last_mode_probabilities = torch.zeros(3, device=self.device)
+        self.wheel_ids = torch.tensor(WHEEL_JOINT_IDS, device=self.device)
 
     def reset(self):
         self.previous_actions.zero_()
@@ -162,6 +194,36 @@ class NezhaPolicyRuntime:
     def mode_probabilities(self) -> torch.Tensor:
         """Return the last [wheel, leg, hybrid] gate probabilities."""
         return self.last_mode_probabilities.clone()
+
+    def compute_torques(
+        self,
+        actions: torch.Tensor,
+        dof_pos: Sequence[float],
+        dof_vel: Sequence[float],
+    ) -> torch.Tensor:
+        """Recompute PD torques for one physics substep.
+
+        Isaac Gym holds the policy action for four 5 ms physics steps but
+        evaluates the PD law at each step. MuJoCo must do the same.
+        """
+        position = torch.as_tensor(
+            dof_pos, dtype=torch.float32, device=self.device
+        )
+        velocity = torch.as_tensor(
+            dof_vel, dtype=torch.float32, device=self.device
+        )
+        position_target = self.default_dof_pos + actions * self.action_scale
+        velocity_target = torch.zeros_like(actions)
+        position_target[self.wheel_ids] = position[self.wheel_ids]
+        velocity_target[self.wheel_ids] = (
+            actions[self.wheel_ids] * self.wheel_velocity_scale
+        )
+        torques = self.p_gains * (position_target - position) + self.d_gains * (
+            velocity_target - velocity
+        )
+        return torch.clamp(
+            torques, -self.torque_limits, self.torque_limits
+        )
 
     @torch.inference_mode()
     def step(
@@ -191,18 +253,6 @@ class NezhaPolicyRuntime:
         if actions.shape != (NUM_ACTIONS,):
             raise RuntimeError(f"Policy returned {actions.shape}; expected [16]")
 
-        position = torch.as_tensor(dof_pos, dtype=torch.float32, device=self.device)
-        velocity = torch.as_tensor(dof_vel, dtype=torch.float32, device=self.device)
-        position_target = self.default_dof_pos + actions * self.action_scale
-        velocity_target = torch.zeros_like(actions)
-        wheel_ids = torch.tensor(WHEEL_JOINT_IDS, device=self.device)
-        position_target[wheel_ids] = position[wheel_ids]
-        velocity_target[wheel_ids] = (
-            actions[wheel_ids] * self.wheel_velocity_scale
-        )
-        torques = self.p_gains * (position_target - position) + self.d_gains * (
-            velocity_target - velocity
-        )
-        torques = torch.clamp(torques, -self.torque_limits, self.torque_limits)
+        torques = self.compute_torques(actions, dof_pos, dof_vel)
         self.previous_actions.copy_(actions)
         return actions, torques

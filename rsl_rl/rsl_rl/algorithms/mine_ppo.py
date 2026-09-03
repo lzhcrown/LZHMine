@@ -4,7 +4,7 @@ import torch
 import torch.nn as nn
 
 from rsl_rl.modules.mine_actor_critic import MINEActorCritic
-from rsl_rl.storage.him_rollout_storage import HIMRolloutStorage
+from rsl_rl.storage.mine_rollout_storage import MINERolloutStorage
 
 
 class MINEPPO:
@@ -35,10 +35,13 @@ class MINEPPO:
         self.learning_rate = learning_rate
         self.actor_critic = actor_critic.to(device)
         self.storage = None
-        # The estimator is deliberately excluded: it has a separate optimizer
-        # and receives gradients only from its dual-encoder objectives.
-        self.optimizer = torch.optim.Adam(actor_critic.policy_parameters(), lr=learning_rate)
-        self.transition = HIMRolloutStorage.Transition()
+        # Match wheel_gym_CQ's checkpoint and optimizer parameter group.  The
+        # estimator also retains its dedicated optimizer; policy inference is
+        # detached, so PPO normally contributes no estimator gradients.
+        self.optimizer = torch.optim.Adam(
+            self.actor_critic.parameters(), lr=learning_rate
+        )
+        self.transition = MINERolloutStorage.Transition()
 
         self.clip_param = clip_param
         self.num_learning_epochs = num_learning_epochs
@@ -51,7 +54,7 @@ class MINEPPO:
         self.use_clipped_value_loss = use_clipped_value_loss
 
     def init_storage(self, num_envs, num_transitions_per_env, actor_obs_shape, critic_obs_shape, action_shape):
-        self.storage = HIMRolloutStorage(
+        self.storage = MINERolloutStorage(
             num_envs,
             num_transitions_per_env,
             actor_obs_shape,
@@ -197,12 +200,10 @@ class MINEPPO:
                 + self.value_loss_coef * value_loss
                 - self.entropy_coef * entropy_batch.mean()
             )
-            if not torch.isfinite(policy_loss):
-                raise FloatingPointError("Non-finite PPO policy loss")
             self.optimizer.zero_grad()
             policy_loss.backward()
             nn.utils.clip_grad_norm_(
-                self.actor_critic.policy_parameters(), self.max_grad_norm
+                self.actor_critic.parameters(), self.max_grad_norm
             )
             self.optimizer.step()
 

@@ -3,6 +3,7 @@ import torch
 from deploy.nezha.policy_runtime import NezhaObservationHistory
 from rsl_rl.algorithms import MINEPPO
 from rsl_rl.modules import MINEActorCritic, MINEEstimator, MINEPolicyExporter
+from rsl_rl.storage.mine_rollout_storage import MINERolloutStorage
 
 
 def make_policy():
@@ -40,29 +41,87 @@ def test_mine_forward_update_and_gate_probabilities():
     )
 
 
-def test_scripted_export_matches_online_policy():
+def test_wheel_gym_cq_target_encoder_uses_actor_observation_width():
+    estimator = MINEEstimator(
+        temporal_steps=2,
+        num_one_step_obs=65,
+        num_one_step_privileged_obs=375,
+        estimation_target_indices=[371, 372, 373, 374],
+        is_privileged_obs=False,
+        enc_hidden_dims=[32],
+        tar_hidden_dims=[32],
+        latent_dim=8,
+    )
+
+    assert estimator.target[0].in_features == 65
+    losses = estimator.update(torch.randn(4, 130), torch.randn(4, 1125))
+    assert all(torch.isfinite(torch.tensor(losses)))
+
+
+def test_scripted_export_matches_online_raw_modal_prototype_path():
     policy = make_policy().eval()
     observations = torch.randn(8, 20)
     exporter = MINEPolicyExporter(policy).eval()
     scripted = torch.jit.script(exporter)
 
+    parts = exporter.encoder(observations)
+    estimate = parts[..., : policy.num_est_prob]
+    latent = parts[..., policy.num_est_prob :]
+    gate_obs = observations[..., : policy.num_one_step_obs]
+    current = observations[..., -policy.num_one_step_obs :]
+    probabilities = torch.softmax(exporter.mode_gate(gate_obs), dim=-1)
+    modal_scale = probabilities @ exporter.mode_prototypes
+    latent = torch.nn.functional.normalize(latent * modal_scale, dim=-1)
+    expected = exporter.actor(torch.cat((current, estimate, latent), dim=-1))
+
     assert torch.allclose(
-        policy.act_inference(observations),
+        expected,
         scripted(observations),
         atol=1e-6,
     )
-    assert scripted.get_mode_probabilities(observations).shape == (8, 3)
+    assert torch.allclose(
+        probabilities,
+        scripted.get_mode_probabilities(observations),
+        atol=1e-6,
+    )
+    assert scripted.get_history_order_code() == 1
 
 
-def test_nezha_observation_history_is_newest_first():
+def test_nezha_observation_history_is_oldest_first():
     builder = NezhaObservationHistory([0.0] * 16)
     first = torch.ones(65)
     second = torch.full((65,), 2.0)
     builder.push(first)
     history = builder.push(second).reshape(2, 65)
 
-    assert torch.equal(history[0], second)
-    assert torch.equal(history[1], first)
+    assert torch.equal(history[0], first)
+    assert torch.equal(history[1], second)
+
+
+def test_runtime_observation_zeros_wheel_velocity_like_apr10_training():
+    builder = NezhaObservationHistory([0.0] * 16)
+    one_step = builder.build_one_step(
+        [0.0] * 3,
+        [0.0, 0.0, -1.0],
+        [0.0] * 3,
+        [0.0] * 16,
+        list(range(16)),
+        [0.0] * 16,
+    )
+    velocity_obs = one_step[21:37]
+    assert torch.equal(velocity_obs[[3, 7, 11, 15]], torch.zeros(4))
+    assert abs(velocity_obs[2].item() - 2 * 0.05) < 1e-6
+
+
+def test_mine_returns_do_not_apply_lzhmine_reward_or_advantage_clamps():
+    storage = MINERolloutStorage(2, 1, [1], [1], [1])
+    storage.rewards[0, 0, 0] = 100.0
+    storage.rewards[0, 1, 0] = -100.0
+    storage.dones[0, :, 0] = 1
+
+    storage.compute_returns(torch.zeros(2, 1), gamma=0.99, lam=0.95)
+
+    assert storage.returns[0, 0, 0].item() == 100.0
 
 
 def test_semantic_labels_follow_fixed_wheel_leg_hybrid_indices():
@@ -94,7 +153,7 @@ def test_semantic_labels_follow_fixed_wheel_leg_hybrid_indices():
         mode_semantic_cfg=semantic_cfg,
     )
     history = torch.zeros(4, 130)
-    current = history[:, :65]
+    current = history[:, -65:]
     current[:3, 6] = 0.5
     wheel_ids = torch.tensor([3, 7, 11, 15]) + 49
     leg_ids = torch.tensor([0, 1, 2, 4, 5, 6, 8, 9, 10, 12, 13, 14]) + 49
@@ -108,7 +167,7 @@ def test_semantic_labels_follow_fixed_wheel_leg_hybrid_indices():
     assert torch.equal(valid, torch.tensor([True, True, True, False]))
 
 
-def test_mine_ppo_update_uses_separate_estimator_optimizer():
+def test_mine_ppo_optimizer_matches_wheel_gym_cq_parameter_group():
     policy = make_policy()
     algorithm = MINEPPO(
         policy,
@@ -135,5 +194,5 @@ def test_mine_ppo_update_uses_separate_estimator_optimizer():
         for group in algorithm.optimizer.param_groups
         for parameter in group["params"]
     }
-    assert estimator_ids.isdisjoint(policy_optimizer_ids)
+    assert estimator_ids.issubset(policy_optimizer_ids)
     assert all(torch.isfinite(torch.tensor(value)) for value in losses.values())

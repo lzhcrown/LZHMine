@@ -52,7 +52,6 @@ class MINEOnPolicyRunner:
         self.tot_timesteps = 0
         self.tot_time = 0.0
         self.current_learning_iteration = 0
-        self.best_mean_reward = -float("inf")
         self.env.reset()
 
     def learn(self, num_learning_iterations, init_at_random_ep_len=False):
@@ -94,8 +93,8 @@ class MINEOnPolicyRunner:
                         termination_privileged_obs,
                     ) = step_result
                     critic_obs = privileged_obs if privileged_obs is not None else obs
-                    obs = torch.nan_to_num(obs.to(self.device))
-                    critic_obs = torch.nan_to_num(critic_obs.to(self.device))
+                    obs = obs.to(self.device)
+                    critic_obs = critic_obs.to(self.device)
                     rewards = rewards.to(self.device)
                     dones = dones.to(self.device)
 
@@ -127,7 +126,6 @@ class MINEOnPolicyRunner:
             learning_start = time.time()
             losses = self.alg.update()
             learning_time = time.time() - learning_start
-            self.current_learning_iteration = iteration + 1
             if self.log_dir is not None:
                 self._log(
                     iteration,
@@ -138,18 +136,16 @@ class MINEOnPolicyRunner:
                     rewbuffer,
                     lenbuffer,
                 )
-                if self.current_learning_iteration % self.save_interval == 0:
+                if iteration % self.save_interval == 0:
                     self.save(
                         os.path.join(
                             self.log_dir,
-                            f"model_{self.current_learning_iteration}.pt",
+                            f"model_{iteration}.pt",
                         )
                     )
-                if rewbuffer and statistics.mean(rewbuffer) > self.best_mean_reward:
-                    self.best_mean_reward = statistics.mean(rewbuffer)
-                    self.save(os.path.join(self.log_dir, "best_policy.pt"))
             ep_infos.clear()
 
+        self.current_learning_iteration += num_learning_iterations
         if self.log_dir is not None:
             self.save(
                 os.path.join(

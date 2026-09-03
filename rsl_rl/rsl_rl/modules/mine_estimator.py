@@ -1,9 +1,9 @@
 """Gated modal dual-encoder used by the Nezha MINE policy.
 
 The source encoder consumes proprioceptive history available on the robot.  The
-target encoder is training-only and consumes privileged simulator state.  A
-soft modality gate blends learnable modal prototypes before the source latent
-is passed to the policy.
+target encoder is training-only and consumes a configured simulator target
+view.  A soft modality gate blends learnable modal prototypes before the
+source latent is passed to the policy.
 """
 
 from typing import Dict, List, Tuple
@@ -42,8 +42,10 @@ def _mlp(input_dim: int, hidden_dims: List[int], output_dim: int, activation: st
 class MINEEstimator(nn.Module):
     """Modality-gated source/target estimator.
 
-    Observation histories are flattened and ordered newest-first throughout
-    training, play, export, MuJoCo and deployment.
+    Observation histories are flattened in chronological order (oldest first),
+    matching wheel_gym_CQ. The target encoder can
+    consume either the full privileged frame or its actor-observation prefix;
+    the latter reproduces wheel_gym_CQ's ``is_privileged_obs=False`` experiment.
     """
 
     WHEEL_MODE = 0
@@ -56,6 +58,8 @@ class MINEEstimator(nn.Module):
         num_one_step_obs: int,
         num_one_step_privileged_obs: int,
         estimation_target_indices: List[int],
+        history_order: str = "oldest_first",
+        is_privileged_obs: bool = True,
         enc_hidden_dims: List[int] = [256, 128, 64],
         tar_hidden_dims: List[int] = [256, 128, 64],
         latent_dim: int = 16,
@@ -82,8 +86,12 @@ class MINEEstimator(nn.Module):
             raise ValueError("An estimation target index is outside one privileged frame")
 
         self.temporal_steps = temporal_steps
+        if history_order not in ("oldest_first", "newest_first"):
+            raise ValueError("Unsupported history_order: " + history_order)
+        self.history_order = history_order
         self.num_one_step_obs = num_one_step_obs
         self.num_one_step_privileged_obs = num_one_step_privileged_obs
+        self.is_privileged_obs = bool(is_privileged_obs)
         self.num_est_prob = len(estimation_target_indices)
         self.num_latent = latent_dim
         self.num_modes = num_modes
@@ -129,29 +137,37 @@ class MINEEstimator(nn.Module):
         self.leg_velocity_weight = float(
             semantic_cfg.get("leg_velocity_weight", 0.30)
         )
-        if num_modes != 3 and self.mode_semantic_enabled:
-            raise ValueError("Semantic mode anchoring requires exactly three modes")
-        if self.wheel_activity_high <= self.wheel_activity_low:
-            raise ValueError("wheel_activity_high must exceed wheel_activity_low")
-        if self.leg_activity_high <= self.leg_activity_low:
-            raise ValueError("leg_activity_high must exceed leg_activity_low")
-        for semantic_slice in (
-            self.mode_command_slice,
-            self.mode_dof_vel_slice,
-            self.mode_action_slice,
-        ):
-            if (
-                len(semantic_slice) != 2
-                or semantic_slice[0] < 0
-                or semantic_slice[0] >= semantic_slice[1]
-                or semantic_slice[1] > num_one_step_obs
-            ):
+        if self.mode_semantic_enabled:
+            if num_modes != 3:
                 raise ValueError(
-                    "Semantic observation slices must lie inside one observation frame"
+                    "Semantic mode anchoring requires exactly three modes"
                 )
+            if self.wheel_activity_high <= self.wheel_activity_low:
+                raise ValueError(
+                    "wheel_activity_high must exceed wheel_activity_low"
+                )
+            if self.leg_activity_high <= self.leg_activity_low:
+                raise ValueError(
+                    "leg_activity_high must exceed leg_activity_low"
+                )
+            for semantic_slice in (
+                self.mode_command_slice,
+                self.mode_dof_vel_slice,
+                self.mode_action_slice,
+            ):
+                if (
+                    len(semantic_slice) != 2
+                    or semantic_slice[0] < 0
+                    or semantic_slice[0] >= semantic_slice[1]
+                    or semantic_slice[1] > num_one_step_obs
+                ):
+                    raise ValueError(
+                        "Semantic observation slices must lie inside one observation frame"
+                    )
         self.register_buffer(
             "estimation_target_indices",
             torch.tensor(estimation_target_indices, dtype=torch.long),
+            persistent=False,
         )
 
         self.encoder = _mlp(
@@ -160,8 +176,13 @@ class MINEEstimator(nn.Module):
             self.num_est_prob + latent_dim,
             activation,
         )
+        target_input_dim = (
+            num_one_step_privileged_obs
+            if self.is_privileged_obs
+            else num_one_step_obs
+        )
         self.target = _mlp(
-            num_one_step_privileged_obs,
+            target_input_dim,
             tar_hidden_dims,
             latent_dim,
             activation,
@@ -194,9 +215,10 @@ class MINEEstimator(nn.Module):
         current_obs = history[..., : self.num_one_step_obs]
         mode_logits = self.mode_gate(current_obs)
         mode_probs = F.softmax(mode_logits, dim=-1)
-        normalized_modes = F.normalize(self.mode_prototypes, dim=-1, p=2.0)
-        modal_scale = torch.matmul(mode_probs, normalized_modes)
-        latent = F.normalize(source_latent * modal_scale, dim=-1, p=2.0, eps=1e-8)
+        # wheel_gym_CQ uses raw modal prototypes in policy forward passes and
+        # normalized prototypes only inside the estimator update.
+        modal_scale = torch.matmul(mode_probs, self.mode_prototypes)
+        latent = F.normalize(source_latent * modal_scale, dim=-1, p=2.0)
         return estimate, latent, mode_probs, mode_logits
 
     def forward(self, obs_history: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
@@ -226,16 +248,25 @@ class MINEEstimator(nn.Module):
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """Create causal wheel/leg/hybrid soft labels for estimator training.
 
-        LZHMine histories are newest-first.  The gate still consumes only the
-        current frame; the previous frame is used only by this training-time
+        Histories are oldest-first. The semantic helper is not used by the
+        Apr10 baseline; when enabled, the newest two frames are used to build
         label builder to distinguish a fixed leg pose from active leg motion.
         """
         history = self._flatten_history(obs_history).detach()
-        current_obs = history[..., : self.num_one_step_obs]
+        current_obs = (
+            history[..., -self.num_one_step_obs :]
+            if self.history_order == "oldest_first"
+            else history[..., : self.num_one_step_obs]
+        )
         if self.temporal_steps > 1:
-            previous_obs = history[
-                ..., self.num_one_step_obs : 2 * self.num_one_step_obs
-            ]
+            if self.history_order == "oldest_first":
+                previous_obs = history[
+                    ..., -2 * self.num_one_step_obs : -self.num_one_step_obs
+                ]
+            else:
+                previous_obs = history[
+                    ..., self.num_one_step_obs : 2 * self.num_one_step_obs
+                ]
         else:
             previous_obs = current_obs
 
@@ -307,15 +338,37 @@ class MINEEstimator(nn.Module):
             for group in self.optimizer.param_groups:
                 group["lr"] = learning_rate
 
-        privileged = next_critic_obs[..., : self.num_one_step_privileged_obs].detach()
-        target_values = privileged.index_select(-1, self.estimation_target_indices)
-        predicted_values, source_latent, mode_probs, mode_logits = self._source(
-            obs_history
+        # wheel_gym_CQ deliberately uses two slightly different modal paths:
+        # raw prototypes for policy inference, normalized prototypes here while
+        # training the dual encoder.  Keep the two paths separate.
+        history = self._flatten_history(obs_history)
+        source_parts = self.encoder(history)
+        predicted_values = source_parts[..., : self.num_est_prob]
+        source_latent = source_parts[..., self.num_est_prob :]
+        current_obs = history[..., : self.num_one_step_obs].detach()
+        mode_logits = self.mode_gate(current_obs)
+        mode_probs = F.softmax(mode_logits, dim=-1)
+        normalized_modes = F.normalize(self.mode_prototypes, dim=-1, p=2.0)
+        modal_scale = torch.matmul(mode_probs, normalized_modes)
+        source_latent = F.normalize(
+            source_latent * modal_scale, dim=-1, p=2.0
         )
-        target_latent = F.normalize(self.target(privileged), dim=-1, p=2.0, eps=1e-8)
+
+        privileged = (
+            next_critic_obs[..., -self.num_one_step_privileged_obs :]
+            if self.history_order == "oldest_first"
+            else next_critic_obs[..., : self.num_one_step_privileged_obs]
+        ).detach()
+        target_values = privileged.index_select(-1, self.estimation_target_indices)
+        target_input = (
+            privileged
+            if self.is_privileged_obs
+            else privileged[..., : self.num_one_step_obs]
+        )
+        target_latent = F.normalize(self.target(target_input), dim=-1, p=2.0)
 
         with torch.no_grad():
-            self.proto.weight.copy_(F.normalize(self.proto.weight, dim=-1, p=2.0, eps=1e-8))
+            self.proto.weight.copy_(F.normalize(self.proto.weight, dim=-1, p=2.0))
 
         source_scores = source_latent @ self.proto.weight.T
         target_scores = target_latent @ self.proto.weight.T
@@ -331,7 +384,6 @@ class MINEEstimator(nn.Module):
         ).mean()
         estimation_loss = F.mse_loss(predicted_values, target_values)
 
-        normalized_modes = F.normalize(self.mode_prototypes, dim=-1, p=2.0, eps=1e-8)
         similarity = source_latent.detach() @ normalized_modes.T
         mode_loss = F.cross_entropy(similarity, torch.argmax(mode_probs, dim=-1))
 
@@ -370,8 +422,6 @@ class MINEEstimator(nn.Module):
             + self.mode_semantic_loss_coef * semantic_loss
         )
 
-        if not torch.isfinite(total_loss):
-            raise FloatingPointError("Non-finite MINE estimator loss")
         self.optimizer.zero_grad()
         total_loss.backward()
         nn.utils.clip_grad_norm_(self.parameters(), self.max_grad_norm)
@@ -396,13 +446,12 @@ class MINEEstimator(nn.Module):
 
     @torch.no_grad()
     def _sinkhorn(self, scores: torch.Tensor) -> torch.Tensor:
-        scores = scores - scores.max(dim=1, keepdim=True).values
         assignments = torch.exp(scores / self.sinkhorn_epsilon).T
-        assignments /= assignments.sum().clamp_min(1e-12)
+        assignments /= assignments.sum()
         num_prototypes, batch_size = assignments.shape
         for _ in range(self.sinkhorn_iterations):
-            assignments /= assignments.sum(dim=1, keepdim=True).clamp_min(1e-12)
+            assignments /= assignments.sum(dim=1, keepdim=True)
             assignments /= float(num_prototypes)
-            assignments /= assignments.sum(dim=0, keepdim=True).clamp_min(1e-12)
+            assignments /= assignments.sum(dim=0, keepdim=True)
             assignments /= float(batch_size)
         return (assignments * float(batch_size)).T
