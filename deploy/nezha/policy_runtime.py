@@ -5,6 +5,7 @@ contains no Isaac Gym, MuJoCo or vendor communication dependency, which keeps
 the exact observation/control contract reusable on the real robot.
 """
 
+import warnings
 from typing import Dict, List, Sequence, Tuple
 
 import torch
@@ -150,7 +151,18 @@ class NezhaPolicyRuntime:
             if len(values) != NUM_ACTIONS:
                 raise ValueError(f"{name} must contain 16 values")
         self.device = torch.device(device)
-        self.policy = torch.jit.load(policy_path, map_location=self.device).eval()
+        # Current PyTorch versions deprecate TorchScript while this project's
+        # deployed checkpoints are still intentionally exported as policy.pt.
+        # Suppress only that known warning; loading failures remain visible.
+        with warnings.catch_warnings():
+            warnings.filterwarnings(
+                "ignore",
+                message=r"`torch\.jit\.load` is deprecated.*",
+                category=FutureWarning,
+            )
+            self.policy = torch.jit.load(
+                policy_path, map_location=self.device
+            ).eval()
         if not hasattr(self.policy, "get_mode_probabilities"):
             raise RuntimeError(
                 "The policy is not an integrated gated-modal export. "

@@ -19,7 +19,8 @@
     <compiler angle="radian" meshdir="../../resources/robots/urdf2.1/meshes/" autolimits="true" />
     <size njmax="500" nconmax="100" />
     <asset>
-        <material name="default_material" rgba="0.7 0.7 0.7 1" />
+        <material name="default_material" rgba="0.72 0.80 0.88 1"
+                  specular="0.35" shininess="0.45" reflectance="0.06" />
         <material name="collision_material" rgba="0.0 0.4 0.8 0.2" />
         <!-- The source trunk.STL has 1.19M faces, above MuJoCo's 200k STL
              limit. This 3 mm visual-only copy preserves its dimensions. -->

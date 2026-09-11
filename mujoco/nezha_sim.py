@@ -97,6 +97,19 @@ def _resolve_policy(path):
     resolved = _resolve(path)
     if resolved and os.path.isfile(resolved):
         return resolved
+    # A frequent command-line typo is to omit the final ``t`` in policy.pt.
+    # Accept it when the intended file is unambiguous and report the repair.
+    if resolved and resolved.endswith(".p"):
+        corrected = resolved + "t"
+        if os.path.isfile(corrected):
+            print(f"policy path ended in '.p'; using: {corrected}")
+            return corrected
+    # Also allow callers to pass an export directory instead of the file.
+    if resolved and os.path.isdir(resolved):
+        candidate = os.path.join(resolved, "policy.pt")
+        if os.path.isfile(candidate):
+            print(f"policy export directory supplied; using: {candidate}")
+            return candidate
     if resolved and os.path.basename(os.path.dirname(resolved)) == "latest":
         exported_root = os.path.dirname(os.path.dirname(resolved))
         candidates = [
@@ -111,6 +124,14 @@ def _resolve_policy(path):
             print(f"latest export alias is absent; using: {selected}")
             return selected
     return resolved
+
+
+def _require_file(path, description):
+    if not os.path.isfile(path):
+        raise FileNotFoundError(
+            f"{description} does not exist: {path}\n"
+            "Paths may be absolute or relative to the LZHMine repository root."
+        )
 
 
 def _load_config(path):
@@ -177,7 +198,7 @@ def _terrain_course_spawn(mujoco, model, cfg, initial_base_height):
     )
     position = ground_position + np.asarray([0.0, 0.0, initial_base_height])
     description = {
-        "difficulty": float(metadata["source_difficulty"]),
+        "profile": metadata.get("profile", "terrain_course"),
         "spawn": position,
         "lanes": metadata["lanes"],
         "sha256": metadata["height_field_sha256"],
@@ -278,6 +299,10 @@ def _settle_robot(
 
 
 def run(args):
+    if args.headless and args.duration <= 0:
+        raise ValueError(
+            "Headless simulation requires --duration to be greater than zero."
+        )
     try:
         import mujoco
         import mujoco.viewer
@@ -296,6 +321,8 @@ def run(args):
         raise ValueError("Set model_path in the config or pass --model <nezha.mjcf>")
     if not policy_path:
         raise ValueError("Set policy_path in the config or pass --policy <policy.pt>")
+    _require_file(model_path, "MuJoCo model")
+    _require_file(policy_path, "Exported policy")
 
     model = mujoco.MjModel.from_xml_path(model_path)
     data = mujoco.MjData(model)
@@ -372,7 +399,7 @@ def run(args):
         print(
             "Terrain gallery loaded: robot starts on flat staging area at "
             f"{np.array2string(description['spawn'], precision=3)}; "
-            f"source difficulty={description['difficulty']:.1f}; "
+            f"profile={description['profile']}; "
             f"raw_sha256={description['sha256'][:12]}..."
         )
         print("Lanes across y (use A/D on the staging area to align):")
@@ -384,7 +411,7 @@ def run(args):
             "Send a nonzero command to release it."
         )
         print("Keyboard: W/S=vx  A/D=vy  Q/E=yaw  Space=stop  R=reset")
-    start_time = time.time()
+    simulated_time = 0.0
     policy_step = 0
     gate_log_interval = (
         args.gate_log_interval
@@ -446,7 +473,8 @@ def run(args):
                     remaining = policy_dt - (time.time() - step_start)
                     if remaining > 0:
                         time.sleep(remaining)
-                elif args.duration > 0 and time.time() - start_time >= args.duration:
+                simulated_time += policy_dt
+                if args.duration > 0 and simulated_time + 1e-12 >= args.duration:
                     break
                 continue
             if in_standby:
@@ -492,12 +520,19 @@ def run(args):
                 remaining = policy_dt - (time.time() - step_start)
                 if remaining > 0:
                     time.sleep(remaining)
-            elif args.duration > 0 and time.time() - start_time >= args.duration:
-                break
+            simulated_time += sim_steps_per_policy * model.opt.timestep
             policy_step += 1
+            if args.duration > 0 and simulated_time + 1e-12 >= args.duration:
+                break
     finally:
         if viewer_context is not None:
             viewer_context.close()
+    base_position = data.qpos[root_qpos_address : root_qpos_address + 3]
+    print(
+        f"Simulation finished: simulated_time={simulated_time:.2f}s, "
+        f"policy_steps={policy_step}, "
+        f"base_xyz={np.array2string(base_position, precision=3)}"
+    )
 
 
 def parse_args():
@@ -533,7 +568,12 @@ def parse_args():
         help="Yaw-rate increment for Q/E in rad/s.",
     )
     parser.add_argument("--headless", action="store_true")
-    parser.add_argument("--duration", type=float, default=10.0)
+    parser.add_argument(
+        "--duration",
+        type=float,
+        default=10.0,
+        help="Simulated seconds to run; values <= 0 run until the viewer closes.",
+    )
     parser.add_argument(
         "--run-zero-policy",
         action="store_true",

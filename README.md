@@ -99,28 +99,56 @@ logs/nezha3_mine/exported/<运行目录名>/policy.pt
 
 ## MuJoCo Sim-to-Sim
 
-安装可选依赖：
+在 macOS 项目根目录中用 `uv` 创建独立的仿真环境（无需也无法在 Mac
+上安装 Isaac Gym）：
 
 ```bash
-pip install mujoco pyyaml
+uv venv --python 3.11
+source .venv/bin/activate
+uv pip install torch numpy pyyaml mujoco
 ```
 
-`mujoco/nezha_config.yaml` 默认使用 `mujoco/models/nezha_course_scene.xml`。机器人固定出生在 `x=-5, y=0` 的公共平地区；其前方是横向一字排开的7条路线，依次覆盖下楼梯、粗糙下坡、下坡、平地、上坡、粗糙上坡和上楼梯。先用 `A/D` 在平地区横移对准路线，再用 `W` 前进即可，无需重启或用命令行选择地形。各路线直接截取训练 curriculum 第5难度行中的实际地形数据。MuJoCo 模型关闭机器人自碰撞、加入训练基准的关节摩擦，并在每个5 ms物理步重新计算 PD 力矩。
+`mujoco/nezha_config.yaml` 默认使用 `mujoco/models/nezha_course_scene.xml`。
+机器人固定出生在 `x=-5, y=0` 的公共平地区，前方是3条横向一字
+排开的评测路线：
 
-训练地形配置变化后，重新生成综合测试赛道：
+- `y=-5 m`：5级20 cm楼梯，踏面70 cm，最高1.0 m；
+- `y=0 m`：高0.40 m、长6.0 m的矩形高台；
+- `y=+5 m`：170个随机凸起组成的确定性碎石路，最高12 cm。
+
+先用 `A/D` 在平地区横移对准路线，再用 `W` 前进即可。地形使用
+深蓝—浅蓝高对比棋盘格材质。MuJoCo 模型关闭机器人自碰撞、加入训练
+基准的关节摩擦，并在每个5 ms物理步重新计算 PD 力矩。这三种地形是
+评测用的压力测试场景，其中20 cm楼梯和40 cm高台超出当前训练地形分布。
+
+该评测赛道只依赖 NumPy，Mac 和 Linux 都可直接重新生成：
 
 ```bash
 source .venv/bin/activate
-export TORCH_EXTENSIONS_DIR=/home/bit/LZHMine/.cache/torch_extensions
 python mujoco/generate_terrain_course.py
 ```
 
-横向路线中心坐标为：`y=-15` 下楼梯、`-10` 粗糙下坡、`-5` 下坡、`0` 平地、`+5` 上坡、`+10` 粗糙上坡、`+15` 上楼梯。
+横向路线中心坐标为：`y=-5` 楼梯、`y=0` 高台、`y=+5` 碎石路。
+
+先执行无窗口 smoke test：
 
 ```bash
-/home/bit/WSZLoco/WSZloco/.venv-sim/bin/python mujoco/nezha_sim.py \
-  --policy logs/nezha3_mine/exported/latest/policy.pt
+python mujoco/nezha_sim.py \
+  --policy logs/nezha3_mine/exported/latest/policy.pt \
+  --headless --duration 3 --vx 0.5
 ```
+
+macOS 的交互式 viewer 必须通过 MuJoCo 安装的 `mjpython` 启动：
+
+```bash
+.venv/bin/mjpython mujoco/nezha_sim.py \
+  --policy logs/nezha3_mine/exported/latest/policy.pt \
+  --duration 60
+```
+
+`--policy` 也可以直接传入某个导出目录，脚本会在其中查找
+`policy.pt`。如果 `latest` 不存在，脚本会自动选择 `exported/`
+下最新的策略。`--duration` 表示仿真时间，而不是 headless 运行的墙钟时间。
 
 启动后机器人先隐藏预沉降，然后在零指令下冻结待机；按 `W/S` 调前后速度、`A/D` 调侧向速度、`Q/E` 调转向、空格停止、`R` 复位。要诊断策略本身在零指令下为何输出轮速，可加 `--run-zero-policy`。无窗口快速验证可加 `--headless --duration 10`。
 

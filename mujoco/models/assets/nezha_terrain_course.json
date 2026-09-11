@@ -1,26 +1,23 @@
 {
-  "generator": "legged_gym.utils.terrain.Terrain",
-  "profile": "wheel_gym_cq",
-  "training_seed": 10,
-  "source_difficulty": 0.5,
-  "horizontal_scale_m": 0.1,
-  "vertical_scale_m": 0.005,
+  "generator": "mujoco.generate_terrain_course",
+  "profile": "three_lane_visual_course",
+  "horizontal_scale_m": 0.05,
   "binary_shape": [
     401,
-    251
+    501
   ],
-  "height_min_m": -0.6,
-  "height_max_m": 0.6,
+  "height_min_m": 0.0,
+  "height_max_m": 1.0,
   "hfield_size": [
     12.5,
-    20.0,
-    1.2,
+    10.0,
+    1.0,
     0.1
   ],
   "hfield_position": [
     2.5,
     0.0,
-    -0.6
+    0.0
   ],
   "world_bounds": {
     "x": [
@@ -28,8 +25,8 @@
       15.0
     ],
     "y": [
-      -20.0,
-      20.0
+      -10.0,
+      10.0
     ]
   },
   "spawn_ground_position": [
@@ -53,76 +50,42 @@
   },
   "lanes": [
     {
-      "name": "stairs_down",
-      "source_curriculum_row": 5,
-      "source_curriculum_col": 11,
-      "y_min_m": -17.5,
-      "y_max_m": -12.5,
-      "y_center_m": -15.0,
-      "obstacle_x_start_m": 0.0,
-      "obstacle_x_end_m": 10.0
-    },
-    {
-      "name": "rough_slope_down",
-      "source_curriculum_row": 5,
-      "source_curriculum_col": 4,
-      "y_min_m": -12.5,
-      "y_max_m": -7.5,
-      "y_center_m": -10.0,
-      "obstacle_x_start_m": 0.0,
-      "obstacle_x_end_m": 10.0
-    },
-    {
-      "name": "slope_down",
-      "source_curriculum_row": 5,
-      "source_curriculum_col": 2,
+      "name": "stairs_20cm",
       "y_min_m": -7.5,
       "y_max_m": -2.5,
       "y_center_m": -5.0,
       "obstacle_x_start_m": 0.0,
-      "obstacle_x_end_m": 10.0
+      "obstacle_x_end_m": 10.0,
+      "step_height_m": 0.2,
+      "tread_depth_m": 0.7,
+      "step_count": 5,
+      "top_height_m": 1.0
     },
     {
-      "name": "plane",
-      "source_curriculum_row": 5,
-      "source_curriculum_col": 0,
+      "name": "platform_40cm",
       "y_min_m": -2.5,
       "y_max_m": 2.5,
       "y_center_m": 0.0,
       "obstacle_x_start_m": 0.0,
-      "obstacle_x_end_m": 10.0
+      "obstacle_x_end_m": 10.0,
+      "height_m": 0.4,
+      "x_range_m": [
+        1.5,
+        7.5
+      ]
     },
     {
-      "name": "slope_up",
-      "source_curriculum_row": 5,
-      "source_curriculum_col": 3,
+      "name": "rubble",
       "y_min_m": 2.5,
       "y_max_m": 7.5,
       "y_center_m": 5.0,
       "obstacle_x_start_m": 0.0,
-      "obstacle_x_end_m": 10.0
-    },
-    {
-      "name": "rough_slope_up",
-      "source_curriculum_row": 5,
-      "source_curriculum_col": 8,
-      "y_min_m": 7.5,
-      "y_max_m": 12.5,
-      "y_center_m": 10.0,
-      "obstacle_x_start_m": 0.0,
-      "obstacle_x_end_m": 10.0
-    },
-    {
-      "name": "stairs_up",
-      "source_curriculum_row": 5,
-      "source_curriculum_col": 15,
-      "y_min_m": 12.5,
-      "y_max_m": 17.5,
-      "y_center_m": 15.0,
-      "obstacle_x_start_m": 0.0,
-      "obstacle_x_end_m": 10.0
+      "obstacle_x_end_m": 10.0,
+      "maximum_bump_height_m": 0.12,
+      "seed": 20260904,
+      "bump_count": 170
     }
   ],
-  "height_field_sha256": "1b521550907f731a9fccea56ea360a4065c98b72a02f0e4722383dd1a8fcfebf",
-  "binary_data_sha256": "03be3f59dec66dd364cec72e776674ce503414f2019553de683fea0503774af2"
+  "height_field_sha256": "42435f0d944d0c32e0fd99f4190b42ab1e67341483912875fcb05a8f296123fe",
+  "binary_data_sha256": "2e040e7968904805a078c61953a0f220858207b305c8847b114c495213833a8d"
 }
