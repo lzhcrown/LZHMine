@@ -12,7 +12,8 @@ from pathlib import Path
 import numpy as np
 
 
-ASSET_DIR = Path(__file__).resolve().parent / "models" / "assets"
+DEPLOY_DIR = Path(__file__).resolve().parents[1]
+ASSET_DIR = DEPLOY_DIR / "nezha" / "mjcf" / "assets"
 BINARY_PATH = ASSET_DIR / "nezha_terrain_course.bin"
 METADATA_PATH = ASSET_DIR / "nezha_terrain_course.json"
 
@@ -168,7 +169,7 @@ def main():
     half_y = (y_count - 1) * HORIZONTAL_SCALE_M / 2.0
     height_samples_mm = np.rint(heights_m * 1000.0).astype(np.int16)
     metadata = {
-        "generator": "mujoco.generate_terrain_course",
+        "generator": "deploy.deploy_mujoco.tools.generate_terrain_course",
         "profile": "three_lane_visual_course",
         "horizontal_scale_m": HORIZONTAL_SCALE_M,
         "binary_shape": list(binary_data.shape),

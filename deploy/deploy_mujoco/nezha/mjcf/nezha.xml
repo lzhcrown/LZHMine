@@ -16,7 +16,7 @@
             </default>
         </default>
     </default>
-    <compiler angle="radian" meshdir="../../resources/robots/urdf2.1/meshes/" autolimits="true" />
+    <compiler angle="radian" meshdir="../meshes/" autolimits="true" />
     <size njmax="500" nconmax="100" />
     <asset>
         <material name="default_material" rgba="0.72 0.80 0.88 1"
@@ -24,7 +24,7 @@
         <material name="collision_material" rgba="0.0 0.4 0.8 0.2" />
         <!-- The source trunk.STL has 1.19M faces, above MuJoCo's 200k STL
              limit. This 3 mm visual-only copy preserves its dimensions. -->
-        <mesh name="trunk" file="../../../../mujoco/models/assets/trunk_visual.stl" />
+        <mesh name="trunk" file="trunk_visual.stl" />
         <mesh name="FL_hip" file="FL_hip.STL" />
         <mesh name="FL_thigh" file="FL_thigh.STL" />
         <mesh name="FL_calf" file="FL_calf.STL" />

@@ -18,7 +18,7 @@
               texrepeat="8 8" reflectance="0.1"/>
     <!-- Full training map: 10x20 tiles of 10x10 m, plus a 25 m border.
          The sampled vertices span 149.9 x 249.9 m and [-0.95, 0.95] m. -->
-    <hfield name="training_curriculum" file="../../../../mujoco/models/assets/nezha_training_curriculum.bin"
+    <hfield name="training_curriculum" file="../mjcf/assets/nezha_training_curriculum.bin"
             size="74.95 124.95 1.9 0.1"/>
   </asset>
 

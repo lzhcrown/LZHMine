@@ -23,7 +23,7 @@
               shininess="0.25"/>
     <!-- 25 m along x and 20 m along y: three side-by-side 5 m lanes
          (20 cm stairs, 40 cm platform, rubble) plus side margins. -->
-    <hfield name="terrain_course" file="../../../../mujoco/models/assets/nezha_terrain_course.bin"
+    <hfield name="terrain_course" file="../mjcf/assets/nezha_terrain_course.bin"
             size="12.5 10 1.0 0.1"/>
   </asset>
 

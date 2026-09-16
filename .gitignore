@@ -9,11 +9,27 @@ wandb/
 *.log
 events.out.tfevents.*
 
-# Training checkpoints (keep deliberately exported deployment policies elsewhere)
-checkpoint_*.pt
-model_*.pt
-best_policy.pt
+# Model checkpoints and exported policies
+*.pt
+*.pth
+*.onnx
+*.jit
 *.ckpt
+*.safetensors
+*.tflite
+deploy/**/policy/*.ts
+deploy/**/policy/*.engine
+deploy/**/policy/*.plan
+
+# Optional deployment recordings and visualization output
+deploy/**/frames/
+deploy/**/videos/
+deploy/**/recordings/
+deploy/**/screenshots/
+
+# Generated previews that are not loaded by MuJoCo
+deploy/deploy_mujoco/nezha/mjcf/assets/nezha_rough_slope.png
+deploy/deploy_mujoco/nezha/mjcf/assets/nezha_training_curriculum.png
 
 # Python and tool caches
 __pycache__/
@@ -22,6 +38,7 @@ __pycache__/
 .mypy_cache/
 .ruff_cache/
 .cache/
+.ipynb_checkpoints/
 
 # Python package/build artifacts
 *.egg-info/
@@ -36,6 +53,8 @@ dist/
 htmlcov/
 coverage.xml
 TEST*.xml
+*.prof
+*.trace.json
 
 # Editor settings and temporary files
 .vscode/

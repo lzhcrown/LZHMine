@@ -1,4 +1,4 @@
-"""MuJoCo sim-to-sim runner for an exported Nezha MINE policy.
+"""MuJoCo deployment runner for an exported Nezha MINE policy.
 
 The model must expose a free base and the 16 joints listed in the YAML file.
 Torques are written through ``qfrc_applied``, so dedicated MJCF actuators are
@@ -19,11 +19,12 @@ import torch
 import yaml
 
 
-REPO_ROOT = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
+DEPLOY_DIR = os.path.dirname(os.path.realpath(__file__))
+REPO_ROOT = os.path.dirname(os.path.dirname(DEPLOY_DIR))
 if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
-from deploy.nezha.policy_runtime import NezhaPolicyRuntime
+from deploy.deploy_mujoco.runtime import NezhaPolicyRuntime
 
 
 # Keep interactive commands inside the ranges used during training.
@@ -90,7 +91,18 @@ class KeyboardCommandController:
 def _resolve(path):
     if path is None:
         return None
-    return path if os.path.isabs(path) else os.path.join(REPO_ROOT, path)
+    return path if os.path.isabs(path) else os.path.normpath(
+        os.path.join(DEPLOY_DIR, path)
+    )
+
+
+def _resolve_config(path):
+    if os.path.isabs(path):
+        return path
+    if os.path.dirname(path):
+        return os.path.normpath(os.path.join(DEPLOY_DIR, path))
+    config_name = path if path.endswith(".yaml") else f"{path}.yaml"
+    return os.path.join(DEPLOY_DIR, "configs", config_name)
 
 
 def _resolve_policy(path):
@@ -130,7 +142,7 @@ def _require_file(path, description):
     if not os.path.isfile(path):
         raise FileNotFoundError(
             f"{description} does not exist: {path}\n"
-            "Paths may be absolute or relative to the LZHMine repository root."
+            "Paths may be absolute or relative to deploy/deploy_mujoco."
         )
 
 
@@ -147,7 +159,7 @@ def _terrain_course_spawn(mujoco, model, cfg, initial_base_height):
     if not metadata_path or not os.path.isfile(metadata_path):
         raise FileNotFoundError(
             "Terrain-course metadata is absent. Generate it with: "
-            "python mujoco/generate_terrain_course.py"
+            "python deploy/deploy_mujoco/tools/generate_terrain_course.py"
         )
     with open(metadata_path, "r", encoding="utf-8") as stream:
         metadata = json.load(stream)
@@ -173,7 +185,8 @@ def _terrain_course_spawn(mujoco, model, cfg, initial_base_height):
     if loaded_digest != metadata["binary_data_sha256"]:
         raise RuntimeError(
             "Loaded MuJoCo height samples differ from the exported training "
-            "terrain course; rerun python mujoco/generate_terrain_course.py"
+            "terrain course; rerun python "
+            "deploy/deploy_mujoco/tools/generate_terrain_course.py"
         )
 
     expected_size = np.asarray(metadata["hfield_size"], dtype=np.float64)
@@ -314,7 +327,9 @@ def run(args):
             "was imported as a namespace instead. Run: pip install mujoco"
         )
 
-    cfg = _load_config(args.config)
+    config_path = _resolve_config(args.config)
+    _require_file(config_path, "Deployment config")
+    cfg = _load_config(config_path)
     model_path = _resolve(args.model or cfg.get("model_path"))
     policy_path = _resolve_policy(args.policy or cfg.get("policy_path"))
     if not model_path:
@@ -538,8 +553,13 @@ def run(args):
 def parse_args():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
+        "-c",
         "--config",
-        default=os.path.join(REPO_ROOT, "mujoco", "nezha_config.yaml"),
+        default="nezha_mine.yaml",
+        help=(
+            "YAML file name in configs/ (default: nezha_mine.yaml), or a "
+            "path relative to deploy/deploy_mujoco."
+        ),
     )
     parser.add_argument("--model", help="Floating-base Nezha MJCF or MuJoCo-compatible URDF")
     parser.add_argument("--policy", help="Exported policy.pt")

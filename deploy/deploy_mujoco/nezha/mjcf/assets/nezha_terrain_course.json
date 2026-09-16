@@ -1,5 +1,5 @@
 {
-  "generator": "mujoco.generate_terrain_course",
+  "generator": "deploy.deploy_mujoco.tools.generate_terrain_course",
   "profile": "three_lane_visual_course",
   "horizontal_scale_m": 0.05,
   "binary_shape": [

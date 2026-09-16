@@ -1,6 +1,6 @@
 import torch
 
-from deploy.nezha.policy_runtime import NezhaObservationHistory
+from deploy.deploy_mujoco.runtime import NezhaObservationHistory
 from rsl_rl.algorithms import MINEPPO
 from rsl_rl.modules import MINEActorCritic, MINEEstimator, MINEPolicyExporter
 from rsl_rl.storage.mine_rollout_storage import MINERolloutStorage

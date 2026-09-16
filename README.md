@@ -11,8 +11,7 @@
 - `rsl_rl/rsl_rl/algorithms/mine_ppo.py`：保留原实现的 PPO 参数组和 estimator 独立优化器；策略路径会 detach estimator，因此不会在一次 mini-batch 中被 PPO 重复更新。
 - `rsl_rl/rsl_rl/runners/mine_on_policy_runner.py`：rollout、终止状态特权观测、日志、断点与 best policy。
 - `legged_gym/envs/nezha/`：Nezha 16 维动作、65 维单帧观测、混合腿关节位置/轮关节速度控制与训练配置。
-- `deploy/nezha/`：不依赖仿真器的观测历史和混合控制运行时，供真机 SDK 接入。
-- `mujoco/nezha_sim.py`：复用同一部署运行时的 sim-to-sim 入口。
+- `deploy/deploy_mujoco/`：统一的 MuJoCo sim-to-sim 部署目录，包含配置、入口、策略运行时、部署策略快照、Nezha MJCF/mesh/地形资产及地形工具。
 
 与原实验一致，所有新训练采用 `oldest-first` 历史顺序。Actor 历史为 `2 x 65 = 130`，critic 历史为 `3 x 375 = 1125`。原实现有一个必须保留的特殊约定：Actor 使用最后的最新帧，门控网络使用最前的最旧帧。`is_privileged_obs=False`，所以 target encoder 使用最新375维特权帧的前65维；四个监督目标仍是该帧最后的机体线速度和基座高度。
 
@@ -95,6 +94,16 @@ python legged_gym/scripts/play_nezha_mine.py \
 logs/nezha3_mine/exported/<运行目录名>/policy.pt
 ```
 
+`logs/` 保留训练运行、checkpoint/model 和原始导出记录。确认某个导出策略
+用于部署后，将它显式复制为部署快照：
+
+```bash
+cp logs/nezha3_mine/exported/<运行目录名>/policy.pt \
+  deploy/deploy_mujoco/nezha/policy/policy.pt
+```
+
+MuJoCo 默认只读取该部署快照，因此训练产物和当前部署版本不会混在一起。
+
 若使用 `--load_run -1`，导出目录名为 `latest`。导出模型输入形状为 `[batch, 130]`，输出为 `[batch, 16]`；`get_mode_probabilities()` 可用于诊断三个门控概率。
 
 ## MuJoCo Sim-to-Sim
@@ -108,7 +117,8 @@ source .venv/bin/activate
 uv pip install torch numpy pyyaml mujoco
 ```
 
-`mujoco/nezha_config.yaml` 默认使用 `mujoco/models/nezha_course_scene.xml`。
+`deploy/deploy_mujoco/configs/nezha_mine.yaml` 默认使用
+`deploy/deploy_mujoco/nezha/mjcf/scene_course.xml`。
 机器人固定出生在 `x=-5, y=0` 的公共平地区，前方是3条横向一字
 排开的评测路线：
 
@@ -125,7 +135,7 @@ uv pip install torch numpy pyyaml mujoco
 
 ```bash
 source .venv/bin/activate
-python mujoco/generate_terrain_course.py
+python deploy/deploy_mujoco/tools/generate_terrain_course.py
 ```
 
 横向路线中心坐标为：`y=-5` 楼梯、`y=0` 高台、`y=+5` 碎石路。
@@ -133,19 +143,18 @@ python mujoco/generate_terrain_course.py
 先执行无窗口 smoke test：
 
 ```bash
-python mujoco/nezha_sim.py \
-  --policy logs/nezha3_mine/exported/latest/policy.pt \
+python deploy/deploy_mujoco/deploy_mujoco.py \
   --headless --duration 3 --vx 0.5
 ```
 
 macOS 的交互式 viewer 必须通过 MuJoCo 安装的 `mjpython` 启动：
 
 ```bash
-.venv/bin/mjpython mujoco/nezha_sim.py \
-  --policy logs/nezha3_mine/exported/latest/policy.pt \
+.venv/bin/mjpython deploy/deploy_mujoco/deploy_mujoco.py \
   --duration 60
 ```
 
+配置和命令行中的相对资产路径都以 `deploy/deploy_mujoco/` 为基准。
 `--policy` 也可以直接传入某个导出目录，脚本会在其中查找
 `policy.pt`。如果 `latest` 不存在，脚本会自动选择 `exported/`
 下最新的策略。`--duration` 表示仿真时间，而不是 headless 运行的墙钟时间。
@@ -157,10 +166,10 @@ macOS 的交互式 viewer 必须通过 MuJoCo 安装的 `mjpython` 启动：
 真机侧只需把机器人 SDK 的状态读取和力矩发送接到 `NezhaPolicyRuntime`：
 
 ```python
-from deploy.nezha import NezhaPolicyRuntime
+from deploy.deploy_mujoco.runtime import NezhaPolicyRuntime
 
 runtime = NezhaPolicyRuntime(
-    policy_path="logs/nezha_mine/exported/latest/policy.pt",
+    policy_path="deploy/deploy_mujoco/nezha/policy/policy.pt",
     default_dof_pos=default_dof_pos,
     p_gains=p_gains,
     d_gains=d_gains,
@@ -177,7 +186,8 @@ actions, torques = runtime.step(
 # robot_sdk.send_torques(torques.cpu().numpy())
 ```
 
-参数模板在 `deploy/nezha/config.yaml`。上真机前必须再核对实际关节顺序、正方向、零位、减速比、力矩限制、急停与通信 watchdog；框架不会假定某一种厂商通信 SDK。
+参数模板与 MuJoCo 配置统一放在
+`deploy/deploy_mujoco/configs/nezha_mine.yaml`。上真机前必须再核对实际关节顺序、正方向、零位、减速比、力矩限制、急停与通信 watchdog；框架不会假定某一种厂商通信 SDK。
 
 ## 测试
 

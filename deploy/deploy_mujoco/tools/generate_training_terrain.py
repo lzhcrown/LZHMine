@@ -9,9 +9,14 @@ terrain configuration changes.
 import hashlib
 import json
 from pathlib import Path
+import sys
 
 import numpy as np
 from PIL import Image
+
+REPO_ROOT = Path(__file__).resolve().parents[3]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 
 from legged_gym.envs.nezha.nezha_mine_config import (
     NezhaMINECfg,
@@ -20,7 +25,8 @@ from legged_gym.envs.nezha.nezha_mine_config import (
 from legged_gym.utils.terrain import Terrain
 
 
-ASSET_DIR = Path(__file__).resolve().parent / "models" / "assets"
+DEPLOY_DIR = Path(__file__).resolve().parents[1]
+ASSET_DIR = DEPLOY_DIR / "nezha" / "mjcf" / "assets"
 IMAGE_PATH = ASSET_DIR / "nezha_training_curriculum.png"
 BINARY_PATH = ASSET_DIR / "nezha_training_curriculum.bin"
 METADATA_PATH = ASSET_DIR / "nezha_training_curriculum.json"
