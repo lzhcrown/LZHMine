@@ -96,6 +96,7 @@ class MINEPPO:
         totals = {
             "value": 0.0,
             "surrogate": 0.0,
+            "entropy": 0.0,
             "estimation": 0.0,
             "swap": 0.0,
             "mode": 0.0,
@@ -209,6 +210,7 @@ class MINEPPO:
 
             totals["value"] += value_loss.item()
             totals["surrogate"] += surrogate_loss.item()
+            totals["entropy"] += entropy_batch.mean().item()
             totals["estimation"] += estimation_loss
             totals["swap"] += swap_loss
             totals["mode"] += mode_loss

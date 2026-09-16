@@ -310,6 +310,14 @@ class NezhaMINECfgPPO(LeggedRobotCfgPPO):
         save_interval = 200
         experiment_name = "nezha3_mine"
         run_name = "trimesh_baseline_test"
+        wandb_enabled = True
+        wandb_project = "LZHMine"
+        # None uses the default account selected by `wandb login`.
+        wandb_entity = None
+        wandb_group = "nezha_mine"
+        wandb_tags = ["nezha", "mine", "isaac-gym"]
+        wandb_mode = "online"
+        wandb_notes = "Nezha gated-modal locomotion training"
         resume = False
         load_run = -1
         checkpoint = -1

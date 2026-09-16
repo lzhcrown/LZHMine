@@ -158,6 +158,14 @@ def update_cfg_from_args(env_cfg, cfg_train, args):
                 cfg_train.runner.checkpoint = int(args.checkpoint)
             except ValueError:
                 cfg_train.runner.checkpoint = args.checkpoint
+        if getattr(args, "no_wandb", False):
+            cfg_train.runner.wandb_enabled = False
+        if getattr(args, "wandb_project", None) is not None:
+            cfg_train.runner.wandb_project = args.wandb_project
+        if getattr(args, "wandb_entity", None) is not None:
+            cfg_train.runner.wandb_entity = args.wandb_entity
+        if getattr(args, "wandb_mode", None) is not None:
+            cfg_train.runner.wandb_mode = args.wandb_mode
 
     return env_cfg, cfg_train
 
@@ -174,6 +182,10 @@ def get_args(extra_custom_parameters=None):
         {"name": "--run_name", "type": str,  "help": "Name of the run. Overrides config file if provided."},
         {"name": "--load_run", "type": str,  "help": "Name of the run to load when resume=True. If -1: will load the last run. Overrides config file if provided."},
         {"name": "--checkpoint", "type": str, "help": "Saved model checkpoint number or 'best_policy'. If -1: will load the last checkpoint. Overrides config file if provided."},
+        {"name": "--no_wandb", "action": "store_true", "default": False, "help": "Disable Weights & Biases logging for this run."},
+        {"name": "--wandb_project", "type": str, "help": "Override the W&B project name."},
+        {"name": "--wandb_entity", "type": str, "help": "Override the W&B user or team entity."},
+        {"name": "--wandb_mode", "type": str, "help": "W&B mode: online, offline, or disabled."},
         
         {"name": "--headless", "action": "store_true", "default": False, "help": "Force display off at all times"},
         {"name": "--horovod", "action": "store_true", "default": False, "help": "Use horovod for multi-gpu training"},

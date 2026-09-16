@@ -30,6 +30,48 @@ source .venv/bin/activate
 `rsl_rl` 均以 editable 方式指向本仓库。WSZLoco 使用其自己仓库下的 `.venv`，
 两个环境彼此独立。
 
+### Weights & Biases
+
+训练默认同时记录 TensorBoard 和 W&B。首次在训练机配置时执行：
+
+```bash
+source .venv/bin/activate
+python -m pip install wandb tensorboard
+wandb login
+```
+
+`wandb login` 会将 API key 保存在训练机的用户配置中，不要把 key 写入代码、
+配置文件或 Git。默认 W&B 项目为 `LZHMine`，entity 使用当前登录账号，run
+名称与本地 `logs/nezha3_mine/<时间>_<run_name>/` 目录名一致。
+
+开始训练后，W&B 会记录：
+
+- PPO、估计器、swap、mode 和 semantic mode loss；
+- 平均 episode reward、episode 长度及各奖励分量；
+- wheel/leg/hybrid 门控概率和语义活动指标；
+- 学习率、动作噪声、FPS、采样时间和学习时间。
+
+临时关闭或覆盖项目设置：
+
+```bash
+python legged_gym/scripts/train_nezha_mine.py --headless --no_wandb
+
+python legged_gym/scripts/train_nezha_mine.py --headless \
+  --wandb_project LZHMine \
+  --wandb_entity <你的W&B用户名或团队名>
+```
+
+网络不稳定时可先离线记录，之后再同步：
+
+```bash
+python legged_gym/scripts/train_nezha_mine.py --headless --wandb_mode offline
+wandb sync logs/nezha3_mine/<运行目录>/wandb/offline-run-*
+```
+
+对应默认配置位于
+`legged_gym/envs/nezha/nezha_mine_config.py` 的 `runner` 部分。W&B 仅记录
+曲线和配置，不会自动上传 checkpoint 或部署策略。
+
 可用以下命令确认当前没有串用 WSZLoco：
 
 ```bash

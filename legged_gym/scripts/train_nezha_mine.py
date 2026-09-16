@@ -73,6 +73,12 @@ def train(args):
     print(f"actions:            {env.num_actions}")
     print(f"device:             {args.rl_device}")
     print(f"log directory:      {runner.log_dir}")
+    print(
+        "wandb:              "
+        f"{train_cfg.runner.wandb_enabled} / "
+        f"{train_cfg.runner.wandb_project} / "
+        f"{train_cfg.runner.wandb_mode}"
+    )
     print("=" * 72)
 
     runner.learn(

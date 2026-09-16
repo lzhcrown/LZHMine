@@ -11,6 +11,8 @@ setup(name='rsl_rl',
       install_requires=[
             "torch>=1.4.0",
             "torchvision>=0.5.0",
-            "numpy>=1.16.4"
+            "numpy>=1.16.4",
+            "tensorboard",
+            "wandb"
       ],
       )
