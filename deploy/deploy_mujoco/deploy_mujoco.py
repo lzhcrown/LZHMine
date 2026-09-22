@@ -591,8 +591,11 @@ def parse_args():
     parser.add_argument(
         "--duration",
         type=float,
-        default=10.0,
-        help="Simulated seconds to run; values <= 0 run until the viewer closes.",
+        default=0.0,
+        help=(
+            "Simulated seconds to run; by default the simulation runs until "
+            "the viewer closes. Headless mode requires a value greater than zero."
+        ),
     )
     parser.add_argument(
         "--run-zero-policy",

@@ -19,79 +19,55 @@
 
 ## 环境准备
 
-需要 NVIDIA Isaac Gym Preview 4、可用的 CUDA/PyTorch 环境以及 `ninja`（Isaac Gym 的 `gymtorch` 扩展首次导入时需要）：
+训练、play 和策略导出使用 Python 3.8 的 `.venv-train`；MuJoCo 使用 Python 3.11
+的 `.venv-sim`。安装 `uv`：
 
 ```bash
-cd /home/bit/LZHMine
-source .venv/bin/activate
+curl -LsSf https://astral.sh/uv/install.sh | sh
 ```
 
-本机专用环境为 `.venv`，其中 `legged_gym` 和
-`rsl_rl` 均以 editable 方式指向本仓库。WSZLoco 使用其自己仓库下的 `.venv`，
-两个环境彼此独立。
+### Python 3.8 训练环境
 
-### Weights & Biases
-
-训练默认同时记录 TensorBoard 和 W&B。首次在训练机配置时执行：
+Isaac Gym Preview 4 默认放在仓库同级的 `../isaacgym/`：
 
 ```bash
-source .venv/bin/activate
-python -m pip install wandb tensorboard
-wandb login
+uv python install 3.8
+uv venv .venv-train --python 3.8
+source .venv-train/bin/activate
+
+uv pip install \
+  torch==2.0.1 \
+  torchvision==0.15.2 \
+  --index-url https://download.pytorch.org/whl/cu118
+
+uv pip install \
+  numpy==1.23.5 \
+  scipy==1.10.1 \
+  matplotlib==3.7.5 \
+  tensorboard==2.14.0 \
+  wandb==0.24.2 \
+  pyyaml pillow imageio ninja setuptools
+
+uv pip install --no-deps --no-build-isolation \
+  -e ../isaacgym/python \
+  -e ./rsl_rl \
+  -e .
 ```
 
-`wandb login` 会将 API key 保存在训练机的用户配置中，不要把 key 写入代码、
-配置文件或 Git。默认 W&B 项目为 `LZHMine`，entity 使用当前登录账号，run
-名称与本地 `logs/nezha3_mine/<时间>_<run_name>/` 目录名一致。
-
-开始训练后，W&B 会记录：
-
-- PPO、估计器、swap、mode 和 semantic mode loss；
-- 平均 episode reward、episode 长度及各奖励分量；
-- wheel/leg/hybrid 门控概率和语义活动指标；
-- 学习率、动作噪声、FPS、采样时间和学习时间。
-
-临时关闭或覆盖项目设置：
+### Python 3.11 MuJoCo 环境
 
 ```bash
-python legged_gym/scripts/train_nezha_mine.py --headless --no_wandb
-
-python legged_gym/scripts/train_nezha_mine.py --headless \
-  --wandb_project LZHMine \
-  --wandb_entity <你的W&B用户名或团队名>
-```
-
-网络不稳定时可先离线记录，之后再同步：
-
-```bash
-python legged_gym/scripts/train_nezha_mine.py --headless --wandb_mode offline
-wandb sync logs/nezha3_mine/<运行目录>/wandb/offline-run-*
-```
-
-对应默认配置位于
-`legged_gym/envs/nezha/nezha_mine_config.py` 的 `runner` 部分。W&B 仅记录
-曲线和配置，不会自动上传 checkpoint 或部署策略。
-
-可用以下命令确认当前没有串用 WSZLoco：
-
-```bash
-python -m pip show legged-gym rsl-rl | grep -E 'Name|Editable project location'
-```
-
-仓库已经指向 Nezha URDF：
-
-```text
-resources/robots/urdf2.1/urdf/nezha3_description.urdf
+uv python install 3.11
+uv venv .venv-sim --python 3.11
+source .venv-sim/bin/activate
+uv pip install "mujoco==3.1.2" torch numpy pyyaml
 ```
 
 ## 训练
 
 ```bash
-cd /home/bit/LZHMine
-python legged_gym/scripts/train_nezha_mine.py \
-  --headless \
-  --num_envs 4096 \
-  --max_iterations 100000
+source .venv-train/bin/activate
+python legged_gym/scripts/train_nezha_mine.py --headless
 ```
 
 断点续训：
@@ -106,61 +82,37 @@ python legged_gym/scripts/train_nezha_mine.py \
 
 训练输出位于 `logs/nezha3_mine/<时间>_trimesh_baseline_test/`。
 
-本次对齐修正了历史帧顺序并恢复 `feet_air_time=1.0`。此前按 `newest-first` 训练的 LZHMine checkpoint 不能作为“完全一致”的实验续训，应从新实验开始训练。
-
 ## Isaac Gym Play 与导出
 
-只导出策略、不创建仿真和图片（推荐用于 sim-to-sim）：
+Play：
 
 ```bash
-python legged_gym/scripts/export_nezha_mine.py \
-  --run <运行目录名> \
-  --history-order oldest_first
-```
-
-该命令会自动选择运行目录中编号最大的 checkpoint。对本次修正前训练的旧 LZHMine checkpoint 使用 `--history-order newest_first`。
-
-```bash
+source .venv-train/bin/activate
 python legged_gym/scripts/play_nezha_mine.py \
   --load_run <运行目录名> \
-  --checkpoint best_policy \
-  --checkpoint_history_order oldest_first \
-  --command_x 1.0 \
-  --command_y 0.0 \
-  --command_yaw 0.0
+  --checkpoint best_policy
 ```
 
-这是独立于通用 `play.py` 的 Nezha-MINE 专用脚本。它会加载 checkpoint，使用固定速度指令，输出门控概率及速度/高度估计诊断，记录全部 16 个关节的位置、速度、力矩、动作与目标，并导出完整在线策略（source encoder、modal gate、modal prototypes 和 actor）。完整 play 日志写入 `logs/nezha3_mine/play/<时间>/nezha_mine_play.csv`。旧的 Sep01 LZHMine checkpoint 必须改用 `--checkpoint_history_order newest_first`。
-
-```text
-logs/nezha3_mine/exported/<运行目录名>/policy.pt
-```
-
-`logs/` 保留训练运行、checkpoint/model 和原始导出记录。确认某个导出策略
-用于部署后，将它显式复制为部署快照：
+导出策略：
 
 ```bash
+# 指定 logs/nezha3_mine/ 下的运行目录名
+python legged_gym/scripts/export_nezha_mine.py --run <运行目录名>
+
 cp logs/nezha3_mine/exported/<运行目录名>/policy.pt \
   deploy/deploy_mujoco/nezha/policy/policy.pt
 ```
 
-MuJoCo 默认只读取该部署快照，因此训练产物和当前部署版本不会混在一起。
+直接导出单个 checkpoint：
 
-若使用 `--load_run -1`，导出目录名为 `latest`。导出模型输入形状为 `[batch, 130]`，输出为 `[batch, 16]`；`get_mode_probabilities()` 可用于诊断三个门控概率。
+```bash
+python legged_gym/scripts/export_nezha_mine.py \
+  --checkpoint logs/model_20000.pt \
+  --output deploy/deploy_mujoco/nezha/policy/policy.pt
+```
 
 ## MuJoCo Sim-to-Sim
 
-在 macOS 项目根目录中用 `uv` 创建独立的仿真环境（无需也无法在 Mac
-上安装 Isaac Gym）：
-
-```bash
-uv venv --python 3.11
-source .venv/bin/activate
-uv pip install torch numpy pyyaml mujoco
-```
-
-`deploy/deploy_mujoco/configs/nezha_mine.yaml` 默认使用
-`deploy/deploy_mujoco/nezha/mjcf/scene_course.xml`。
 机器人固定出生在 `x=-5, y=0` 的公共平地区，前方是3条横向一字
 排开的评测路线：
 
@@ -168,40 +120,23 @@ uv pip install torch numpy pyyaml mujoco
 - `y=0 m`：高0.40 m、长6.0 m的矩形高台；
 - `y=+5 m`：170个随机凸起组成的确定性碎石路，最高12 cm。
 
-先用 `A/D` 在平地区横移对准路线，再用 `W` 前进即可。地形使用
-深蓝—浅蓝高对比棋盘格材质。MuJoCo 模型关闭机器人自碰撞、加入训练
-基准的关节摩擦，并在每个5 ms物理步重新计算 PD 力矩。这三种地形是
-评测用的压力测试场景，其中20 cm楼梯和40 cm高台超出当前训练地形分布。
-
-该评测赛道只依赖 NumPy，Mac 和 Linux 都可直接重新生成：
+Linux：
 
 ```bash
-source .venv/bin/activate
-python deploy/deploy_mujoco/tools/generate_terrain_course.py
+source .venv-sim/bin/activate
+python deploy/deploy_mujoco/deploy_mujoco.py
 ```
 
-横向路线中心坐标为：`y=-5` 楼梯、`y=0` 高台、`y=+5` 碎石路。
+默认持续运行，关闭仿真窗口后退出。
 
-先执行无窗口 smoke test：
+macOS：
 
 ```bash
-python deploy/deploy_mujoco/deploy_mujoco.py \
-  --headless --duration 3 --vx 0.5
+source .venv-sim/bin/activate
+mjpython deploy/deploy_mujoco/deploy_mujoco.py
 ```
 
-macOS 的交互式 viewer 必须通过 MuJoCo 安装的 `mjpython` 启动：
-
-```bash
-.venv/bin/mjpython deploy/deploy_mujoco/deploy_mujoco.py \
-  --duration 60
-```
-
-配置和命令行中的相对资产路径都以 `deploy/deploy_mujoco/` 为基准。
-`--policy` 也可以直接传入某个导出目录，脚本会在其中查找
-`policy.pt`。如果 `latest` 不存在，脚本会自动选择 `exported/`
-下最新的策略。`--duration` 表示仿真时间，而不是 headless 运行的墙钟时间。
-
-启动后机器人先隐藏预沉降，然后在零指令下冻结待机；按 `W/S` 调前后速度、`A/D` 调侧向速度、`Q/E` 调转向、空格停止、`R` 复位。要诊断策略本身在零指令下为何输出轮速，可加 `--run-zero-policy`。无窗口快速验证可加 `--headless --duration 10`。
+键盘控制：`W/S` 前后、`A/D` 横移、`Q/E` 转向、空格停止、`R` 复位。
 
 ## 真机部署接入
 
@@ -230,13 +165,3 @@ actions, torques = runtime.step(
 
 参数模板与 MuJoCo 配置统一放在
 `deploy/deploy_mujoco/configs/nezha_mine.yaml`。上真机前必须再核对实际关节顺序、正方向、零位、减速比、力矩限制、急停与通信 watchdog；框架不会假定某一种厂商通信 SDK。
-
-## 测试
-
-不启动 Isaac Gym 的网络结构、loss、门控概率、TorchScript 一致性和历史顺序测试：
-
-```bash
-PYTHONPATH=.:rsl_rl pytest -q legged_gym/tests/test_mine_policy.py
-```
-
-完整 Isaac Gym 环境仍需要带 GPU、正确 Isaac Gym/PyTorch 组合并成功编译 `gymtorch` 后再进行 smoke test。

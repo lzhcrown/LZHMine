@@ -60,21 +60,21 @@ class NezhaMINECfg(LeggedRobotCfg):
         rand_init_dof = False
         rand_init_dof_range = 0.0
         default_joint_angles = {
-            "FL_hip_joint": -0.10,
-            "FL_thigh_joint": 0.925,
-            "FL_calf_joint": -1.85,
+            "FL_hip_joint": 0.0,
+            "FL_thigh_joint": 0.8,
+            "FL_calf_joint": -1.6,
             "FL_foot_joint": 0.0,
-            "FR_hip_joint": 0.10,
-            "FR_thigh_joint": 0.925,
-            "FR_calf_joint": -1.85,
+            "FR_hip_joint": 0.0,
+            "FR_thigh_joint": 0.8,
+            "FR_calf_joint": -1.6,
             "FR_foot_joint": 0.0,
-            "RL_hip_joint": -0.10,
-            "RL_thigh_joint": 0.925,
-            "RL_calf_joint": -1.85,
+            "RL_hip_joint": 0.0,
+            "RL_thigh_joint": 0.8,
+            "RL_calf_joint": -1.6,
             "RL_foot_joint": 0.0,
-            "RR_hip_joint": 0.10,
-            "RR_thigh_joint": 0.925,
-            "RR_calf_joint": -1.85,
+            "RR_hip_joint": 0.0,
+            "RR_thigh_joint": 0.8,
+            "RR_calf_joint": -1.6,
             "RR_foot_joint": 0.0,
         }
 
