@@ -58,6 +58,7 @@ TEST*.xml
 *.trace.json
 
 # Editor settings and temporary files
+tmp/
 .vscode/
 .idea/
 .marscode/
