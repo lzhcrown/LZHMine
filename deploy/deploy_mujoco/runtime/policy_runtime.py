@@ -142,6 +142,7 @@ class NezhaPolicyRuntime:
         legacy_history_order: str = "newest_first",
         zero_wheel_velocity_observations: bool = True,
         observation_scales: Dict[str, float] = None,
+        mode_gate: str = "auto",
     ):
         for name, values in (
             ("default_dof_pos", default_dof_pos),
@@ -163,11 +164,25 @@ class NezhaPolicyRuntime:
             self.policy = torch.jit.load(
                 policy_path, map_location=self.device
             ).eval()
-        if not hasattr(self.policy, "get_mode_probabilities"):
+        if hasattr(self.policy, "get_use_mode_gate"):
+            self.use_mode_gate = bool(self.policy.get_use_mode_gate())
+        elif hasattr(self.policy, "get_mode_probabilities"):
+            self.use_mode_gate = True  # Archived gated exports have no mode metadata.
+        else:
             raise RuntimeError(
-                "The policy is not an integrated gated-modal export. "
-                "Re-export it with play_nezha_mine.py."
+                "The policy has no MINE architecture metadata. "
+                "Re-export it with export_nezha_mine.py."
             )
+        if mode_gate not in ("auto", "on", "off"):
+            raise ValueError("mode_gate must be 'auto', 'on' or 'off'")
+        if mode_gate != "auto" and (mode_gate == "on") != self.use_mode_gate:
+            raise ValueError("Requested mode_gate conflicts with exported policy; load a matching policy")
+        if self.use_mode_gate and not hasattr(self.policy, "get_mode_probabilities"):
+            raise ValueError("Gated policy is missing get_mode_probabilities")
+        if hasattr(self.policy, "get_num_actor_obs"):
+            expected = int(self.policy.get_num_actor_obs())
+            if history_steps * NUM_ONE_STEP_OBS != expected:
+                raise ValueError(f"history_steps produces {history_steps * NUM_ONE_STEP_OBS} observations; policy expects {expected}")
         if history_order == "auto":
             if hasattr(self.policy, "get_history_order_code"):
                 history_order = (
@@ -195,7 +210,9 @@ class NezhaPolicyRuntime:
         self.action_scale = action_scale
         self.wheel_velocity_scale = wheel_velocity_scale
         self.previous_actions = torch.zeros(NUM_ACTIONS, device=self.device)
-        self.last_mode_probabilities = torch.zeros(3, device=self.device)
+        self.last_mode_probabilities = torch.zeros(
+            3 if self.use_mode_gate else 0, device=self.device
+        )
         self.wheel_ids = torch.tensor(WHEEL_JOINT_IDS, device=self.device)
 
     def reset(self):
@@ -204,7 +221,7 @@ class NezhaPolicyRuntime:
         self.observations.reset()
 
     def mode_probabilities(self) -> torch.Tensor:
-        """Return the last [wheel, leg, hybrid] gate probabilities."""
+        """Return wheel/leg/hybrid probabilities, or an empty tensor without a gate."""
         return self.last_mode_probabilities.clone()
 
     def compute_torques(
@@ -256,12 +273,13 @@ class NezhaPolicyRuntime:
         )
         history = self.observations.push(one_step)
         actions = self.policy(history).squeeze(0).clamp(-100.0, 100.0)
-        probabilities = self.policy.get_mode_probabilities(history).squeeze(0)
-        if probabilities.shape != (3,):
-            raise RuntimeError(
-                f"Policy returned gate probabilities {probabilities.shape}; expected [3]"
-            )
-        self.last_mode_probabilities.copy_(probabilities)
+        if self.use_mode_gate:
+            probabilities = self.policy.get_mode_probabilities(history).squeeze(0)
+            if probabilities.shape != (3,):
+                raise RuntimeError(
+                    f"Policy returned gate probabilities {probabilities.shape}; expected [3]"
+                )
+            self.last_mode_probabilities.copy_(probabilities)
         if actions.shape != (NUM_ACTIONS,):
             raise RuntimeError(f"Policy returned {actions.shape}; expected [16]")
 

@@ -35,6 +35,7 @@ class MINEActorCritic(nn.Module):
         num_actions: int,
         history_order: str = "oldest_first",
         is_privileged_obs: bool = True,
+        use_mode_gate: bool = True,
         actor_hidden_dims: List[int] = [512, 256, 128],
         critic_hidden_dims: List[int] = [512, 256, 128],
         enc_hidden_dims: List[int] = [256, 128, 64],
@@ -66,6 +67,7 @@ class MINEActorCritic(nn.Module):
         self.num_actions = num_actions
         self.num_est_prob = len(estimation_target_indices)
         self.latent_dim = latent_dim
+        self.use_mode_gate = bool(use_mode_gate)
 
         self.estimator = MINEEstimator(
             temporal_steps=self.history_size,
@@ -74,6 +76,7 @@ class MINEActorCritic(nn.Module):
             num_one_step_privileged_obs=num_one_step_privileged_obs,
             estimation_target_indices=estimation_target_indices,
             is_privileged_obs=is_privileged_obs,
+            use_mode_gate=self.use_mode_gate,
             enc_hidden_dims=enc_hidden_dims,
             tar_hidden_dims=tar_hidden_dims,
             latent_dim=latent_dim,
@@ -149,10 +152,14 @@ class MINEActorCritic(nn.Module):
 class MINEPolicyExporter(nn.Module):
     """Self-contained online policy used by play, sim-to-sim and deployment."""
 
+    __constants__ = ["use_mode_gate"]
+
     def __init__(self, actor_critic: MINEActorCritic):
         super().__init__()
         self.actor = copy.deepcopy(actor_critic.actor).cpu()
         estimator = actor_critic.estimator
+        self.use_mode_gate = estimator.use_mode_gate
+        self.num_actor_obs = actor_critic.num_actor_obs
         self.encoder = copy.deepcopy(estimator.encoder).cpu()
         self.mode_gate = copy.deepcopy(estimator.mode_gate).cpu()
         self.num_one_step_obs = estimator.num_one_step_obs
@@ -162,7 +169,8 @@ class MINEPolicyExporter(nn.Module):
         )
         self.register_buffer(
             "mode_prototypes",
-            estimator.mode_prototypes.detach().clone().cpu(),
+            estimator.mode_prototypes.detach().clone().cpu()
+            if self.use_mode_gate else torch.empty(0, estimator.num_latent),
         )
 
     def forward(self, obs_history: torch.Tensor) -> torch.Tensor:
@@ -174,20 +182,31 @@ class MINEPolicyExporter(nn.Module):
             if self.history_order_code == 1
             else obs_history[..., : self.num_one_step_obs]
         )
-        gate_obs = obs_history[..., : self.num_one_step_obs]
-        mode_probs = F.softmax(self.mode_gate(gate_obs), dim=-1)
-        # Online source inference uses raw modal prototypes. Normalization is
-        # used only by the estimator's training update.
-        modal_scale = torch.matmul(mode_probs, self.mode_prototypes)
-        latent = F.normalize(latent * modal_scale, dim=-1, p=2.0)
+        if self.use_mode_gate:
+            gate_obs = obs_history[..., : self.num_one_step_obs]
+            mode_probs = F.softmax(self.mode_gate(gate_obs), dim=-1)
+            # Preserve the archived policy's raw modal prototype path.
+            modal_scale = torch.matmul(mode_probs, self.mode_prototypes)
+            latent = latent * modal_scale
+        latent = F.normalize(latent, dim=-1, p=2.0)
         return self.actor(torch.cat((current_obs, estimate, latent), dim=-1))
 
     @torch.jit.export
     def get_mode_probabilities(self, obs_history: torch.Tensor) -> torch.Tensor:
+        if not self.use_mode_gate:
+            return obs_history.new_empty((obs_history.shape[0], 0))
         # Preserve the original gate contract: despite the chronological
         # history, the gate consumes the oldest frame.
         current_obs = obs_history[..., : self.num_one_step_obs]
         return F.softmax(self.mode_gate(current_obs), dim=-1)
+
+    @torch.jit.export
+    def get_use_mode_gate(self) -> bool:
+        return self.use_mode_gate
+
+    @torch.jit.export
+    def get_num_actor_obs(self) -> int:
+        return self.num_actor_obs
 
     @torch.jit.export
     def get_history_order_code(self) -> int:

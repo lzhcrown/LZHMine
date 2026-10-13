@@ -46,7 +46,7 @@ PLAY_ARGUMENTS = [
     {"name": "--enable_domain_rand", "action": "store_true", "default": False, "help": "Keep training domain randomization enabled."},
     {"name": "--no_noise", "action": "store_true", "default": False, "help": "Disable observation noise (LZHMine play keeps it enabled)."},
     {"name": "--no_export", "action": "store_true", "default": False, "help": "Do not export the integrated TorchScript policy."},
-    {"name": "--checkpoint_history_order", "type": str, "default": "oldest_first", "help": "History layout used when this checkpoint was trained: oldest_first (Apr10-compatible) or newest_first (legacy LZHMine)."},
+    {"name": "--checkpoint_history_order", "type": str, "help": "Override saved history layout: oldest_first or newest_first. Omit to use checkpoint metadata."},
     {"name": "--gate_log_interval", "type": int, "default": 100, "help": "Print gate/estimator diagnostics every N steps; 0 disables it."},
     {"name": "--record_frames", "action": "store_true", "default": False, "help": "Write viewer frames under the experiment log."},
     {"name": "--move_camera", "action": "store_true", "default": False, "help": "Make the viewer camera follow Nezha."},
@@ -140,7 +140,10 @@ class NezhaPlayRecorder:
 def _diagnostics(actor_critic, obs, env):
     with torch.inference_mode():
         estimate_scaled, _ = actor_critic.estimator.get_latent(obs)
-        gate_probs = actor_critic.estimator.mode_probabilities(obs)
+        gate_probs = (
+            actor_critic.estimator.mode_probabilities(obs)
+            if actor_critic.use_mode_gate else None
+        )
     estimate = estimate_scaled.clone()
     estimate[:, :3] /= env.obs_scales.lin_vel
     estimate[:, 3] /= env.obs_scales.height_measurements
@@ -189,14 +192,15 @@ def play(args):
         raise ValueError("play_num_envs and play_steps must be positive")
     if args.terrain not in ("plane", "heightfield", "trimesh"):
         raise ValueError("terrain must be plane, heightfield or trimesh")
-    if args.checkpoint_history_order not in ("oldest_first", "newest_first"):
+    if args.checkpoint_history_order not in (None, "oldest_first", "newest_first"):
         raise ValueError(
             "checkpoint_history_order must be oldest_first or newest_first"
         )
 
     env_cfg.env.num_envs = args.play_num_envs
-    env_cfg.env.history_order = args.checkpoint_history_order
-    train_cfg.policy.history_order = args.checkpoint_history_order
+    if args.checkpoint_history_order is not None:
+        env_cfg.env.history_order = args.checkpoint_history_order
+        train_cfg.policy.history_order = args.checkpoint_history_order
     env_cfg.env.episode_length_s = max(env_cfg.env.episode_length_s, 30)
     env_cfg.sim.max_gpu_contact_pairs = max(2**10, args.play_num_envs * 256)
     env_cfg.noise.add_noise = not args.no_noise
@@ -263,11 +267,12 @@ def play(args):
         os.makedirs(frame_dir, exist_ok=True)
 
     print("=" * 72)
-    print("Nezha gated-modal dual-encoder play")
+    print("Nezha dual-encoder play")
+    print(f"mode gate:          {'on' if actor_critic.use_mode_gate else 'off'}")
     print(f"checkpoint run:     {export_label}")
     print(f"command [vx,vy,wz]:{command}")
     print(f"terrain/noise:      {args.terrain} / {env_cfg.noise.add_noise}")
-    print(f"history order:      {args.checkpoint_history_order}")
+    print(f"history order:      {actor_critic.history_order}")
     print(f"domain randomization: {args.enable_domain_rand}")
     print(f"steps/environments: {args.play_steps} / {env.num_envs}")
     print("=" * 72)
@@ -282,13 +287,18 @@ def play(args):
         obs = _set_fixed_commands(env, command)
 
         if args.gate_log_interval > 0 and step % args.gate_log_interval == 0:
-            mode_mean = gate_probs.mean(dim=0).detach().cpu().numpy()
+            gate_description = "mode_gate=off "
+            if gate_probs is not None:
+                mode_mean = gate_probs.mean(dim=0).detach().cpu().numpy()
+                gate_description = (
+                    f"mode={MODE_NAMES[int(np.argmax(mode_mean))]} "
+                    f"gate[w/l/h]={np.array2string(mode_mean, precision=3)} "
+                )
             estimated = estimate[0].detach().cpu().numpy()
             true_velocity = env.base_lin_vel[0].detach().cpu().numpy()
             true_height = env._get_base_heights()[0].item()
             print(
-                f"step {step:5d} | mode={MODE_NAMES[int(np.argmax(mode_mean))]} "
-                f"gate[w/l/h]={np.array2string(mode_mean, precision=3)} "
+                f"step {step:5d} | {gate_description}"
                 f"| v_est={np.array2string(estimated[:3], precision=3)} "
                 f"v_true={np.array2string(true_velocity, precision=3)} "
                 f"| h_est={estimated[3]:.3f} h_true={true_height:.3f}"

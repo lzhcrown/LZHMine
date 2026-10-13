@@ -36,6 +36,7 @@ import numpy as np
 
 from rsl_rl.env import VecEnv
 from rsl_rl.runners import OnPolicyRunner, HIMOnPolicyRunner, MINEOnPolicyRunner
+from rsl_rl.utils.mine_checkpoint import OBSERVATION_KEYS, policy_config_from_checkpoint
 
 from legged_gym import LEGGED_GYM_ROOT_DIR, LEGGED_GYM_ENVS_DIR
 from .helpers import get_args, update_cfg_from_args, class_to_dict, get_load_path, set_seed, parse_sim_params
@@ -135,13 +136,54 @@ class TaskRegistry():
         # override cfg from args (if specified)
         _, train_cfg = update_cfg_from_args(None, train_cfg, args)
 
-        if log_root=="default":
+        if log_root == "default":
             log_root = os.path.join(LEGGED_GYM_ROOT_DIR, 'logs', train_cfg.runner.experiment_name)
-            log_dir = os.path.join(log_root, datetime.now().strftime('%b%d_%H-%M-%S') + '_' + train_cfg.runner.run_name)
-        elif log_root is None:
-            log_dir = None
-        else:
-            log_dir = os.path.join(log_root, datetime.now().strftime('%b%d_%H-%M-%S') + '_' + train_cfg.runner.run_name)
+
+        resume_path = None
+        if train_cfg.runner.resume:
+            resume_path = get_load_path(
+                log_root, load_run=train_cfg.runner.load_run,
+                checkpoint=train_cfg.runner.checkpoint,
+            )
+            if train_cfg.runner_class_name == "MINEOnPolicyRunner":
+                saved = policy_config_from_checkpoint(
+                    torch.load(resume_path, map_location="cpu", weights_only=False)
+                )
+                requested = getattr(args, "mode_gate", None)
+                if requested is not None and (requested == "on") != saved["use_mode_gate"]:
+                    raise ValueError(
+                        "--mode_gate conflicts with checkpoint. Start a new run "
+                        "without --resume to change the architecture."
+                    )
+                dimensions = {
+                    "num_actor_obs": env.num_obs,
+                    "num_critic_obs": env.num_privileged_obs or env.num_obs,
+                    "num_one_step_obs": env.num_one_step_obs,
+                    "num_one_step_privileged_obs": env.num_one_step_privileged_obs,
+                    "estimation_target_indices": list(env.cfg.env.estimation_target_indices),
+                    "num_actions": env.num_actions,
+                }
+                for key, value in saved.items():
+                    if key in OBSERVATION_KEYS:
+                        if dimensions[key] != value:
+                            raise ValueError(f"Environment {key} differs from checkpoint")
+                    else:
+                        setattr(train_cfg.policy, key, value)
+                # Play's explicit legacy history override takes precedence.
+                history_order = getattr(args, "checkpoint_history_order", None)
+                if history_order is not None:
+                    train_cfg.policy.history_order = history_order
+                env.cfg.env.history_order = train_cfg.policy.history_order
+
+        run_name = train_cfg.runner.run_name
+        if train_cfg.runner_class_name == "MINEOnPolicyRunner":
+            mode = "gated" if train_cfg.policy.use_mode_gate else "ungated"
+            target_width = (env.num_one_step_privileged_obs
+                            if train_cfg.policy.is_privileged_obs else env.num_one_step_obs)
+            run_name += f"_{mode}_target{target_width}"
+        log_dir = None if log_root is None else os.path.join(
+            log_root, datetime.now().strftime('%b%d_%H-%M-%S') + '_' + run_name
+        )
         
         train_cfg_dict = class_to_dict(train_cfg)
         runner_name = train_cfg.runner_class_name
@@ -157,10 +199,7 @@ class TaskRegistry():
         else:
             raise ValueError(f"Unsupported runner class: {runner_name}")
         #save resume path before creating a new log_dir
-        resume = train_cfg.runner.resume
-        if resume:
-            # load previously trained model
-            resume_path = get_load_path(log_root, load_run=train_cfg.runner.load_run, checkpoint=train_cfg.runner.checkpoint)
+        if resume_path is not None:
             print(f"Loading model from: {resume_path}")
             runner.load(resume_path)
         return runner, train_cfg

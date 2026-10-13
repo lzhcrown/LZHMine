@@ -255,10 +255,11 @@ class NezhaMINECfgPPO(LeggedRobotCfgPPO):
         # 130 -> 256 -> 128 -> 64 -> (4 estimates + 16 latent).
         enc_hidden_dims = [256, 128, 64]
         tar_hidden_dims = [256, 128, 64]
-        # The original Apr10 experiment left is_privileged_obs at False, so
-        # the target encoder consumes the actor-equivalent 65-D prefix rather
-        # than the complete 375-D privileged frame.
-        is_privileged_obs = False
+        # Train the target encoder on the complete 375-D privileged frame:
+        # 65 proprioceptive + 306 extra privileged + 4 estimation targets.
+        is_privileged_obs = True
+        # CLI override: --mode_gate on/off. Both modes use the same 375-D target.
+        use_mode_gate = True
         latent_dim = 16
         num_modes = 3
         gate_hidden_dim = 64

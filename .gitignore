@@ -2,6 +2,12 @@
 .venv/
 .venv-train/
 .venv-sim/
+.venv-mujoco/
+
+# Local agent/account state
+/.agents/
+/.codex/
+/.aws/
 
 # Training logs and experiment trackers
 logs/
@@ -74,3 +80,9 @@ tmp/
 # Operating-system metadata
 .DS_Store
 Thumbs.db
+
+# Keep robot descriptions and their mesh/material dependencies versioned.
+# Do not add blanket rules for resources/, URDF, MJCF/XML, STL, OBJ or BIN:
+# the simulation scenes load the tracked terrain heightfields as well.
+!*.urdf
+!*.xacro

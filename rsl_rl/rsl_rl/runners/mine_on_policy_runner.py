@@ -1,6 +1,7 @@
 """On-policy runner for the Nezha gated-modal training pipeline."""
 
 import os
+import copy
 import statistics
 import time
 from collections import deque
@@ -11,6 +12,7 @@ from torch.utils.tensorboard import SummaryWriter
 from rsl_rl.algorithms.mine_ppo import MINEPPO
 from rsl_rl.env import VecEnv
 from rsl_rl.modules.mine_actor_critic import MINEActorCritic
+from rsl_rl.utils.mine_checkpoint import policy_config_from_checkpoint
 
 
 class MINEOnPolicyRunner:
@@ -38,6 +40,18 @@ class MINEOnPolicyRunner:
             **self.policy_cfg,
         ).to(device)
         self.alg = MINEPPO(actor_critic, device=device, **self.alg_cfg)
+        self.checkpoint_policy_config = copy.deepcopy(self.policy_cfg)
+        self.checkpoint_policy_config.update(
+            num_actor_obs=env.num_obs,
+            num_critic_obs=num_critic_obs,
+            num_one_step_obs=env.num_one_step_obs,
+            num_one_step_privileged_obs=env.num_one_step_privileged_obs,
+            estimation_target_indices=list(env.cfg.env.estimation_target_indices),
+            num_actions=env.num_actions,
+            use_mode_gate=actor_critic.use_mode_gate,
+            is_privileged_obs=actor_critic.estimator.is_privileged_obs,
+            history_order=actor_critic.history_order,
+        )
         self.num_steps_per_env = self.cfg["num_steps_per_env"]
         self.save_interval = self.cfg["save_interval"]
         self.alg.init_storage(
@@ -130,6 +144,7 @@ class MINEOnPolicyRunner:
 
             learning_start = time.time()
             losses = self.alg.update()
+            self.current_learning_iteration = iteration + 1
             learning_time = time.time() - learning_start
             if self.log_dir is not None:
                 self._log(
@@ -152,7 +167,7 @@ class MINEOnPolicyRunner:
                     )
             ep_infos.clear()
 
-        self.current_learning_iteration += num_learning_iterations
+        self.current_learning_iteration = final_iteration
         if self.log_dir is not None:
             self.save(
                 os.path.join(
@@ -283,6 +298,12 @@ class MINEOnPolicyRunner:
             "hybrid_gate_probability",
         ):
             metrics[f"ModeGate/{name}"] = self._scalar(losses[name])
+        if not self.alg.actor_critic.use_mode_gate:
+            metrics = {
+                name: value for name, value in metrics.items()
+                if not name.startswith(("ModeSemantic/", "ModeGate/"))
+                and name not in ("Loss/mode", "Loss/semantic_mode")
+            }
         metrics.update(
             {
                 "Loss/learning_rate": float(self.alg.learning_rate),
@@ -333,35 +354,40 @@ class MINEOnPolicyRunner:
             f"{'Policy entropy:':>{pad}} {losses['entropy']:.4f}",
             f"{'Estimator loss:':>{pad}} {losses['estimation']:.4f}",
             f"{'Swap loss:':>{pad}} {losses['swap']:.4f}",
-            f"{'Mode loss:':>{pad}} {losses['mode']:.4f}",
-            f"{'Semantic mode loss:':>{pad}} {losses['semantic_mode']:.4f}",
-            (
-                f"{'Semantic valid ratio:':>{pad}} "
-                f"{losses['semantic_valid_ratio']:.4f}"
-            ),
-            (
-                f"{'Target ratio (wheel/leg/hybrid):':>{pad}} "
-                f"{losses['wheel_target_ratio']:.3f} / "
-                f"{losses['leg_target_ratio']:.3f} / "
-                f"{losses['hybrid_target_ratio']:.3f}"
-            ),
-            (
-                f"{'Gate probability (wheel/leg/hybrid):':>{pad}} "
-                f"{losses['wheel_gate_probability']:.3f} / "
-                f"{losses['leg_gate_probability']:.3f} / "
-                f"{losses['hybrid_gate_probability']:.3f}"
-            ),
-            (
-                f"{'Activity (wheel/leg):':>{pad}} "
-                f"{losses['wheel_activity']:.4f} / "
-                f"{losses['leg_activity']:.4f}"
-            ),
             (
                 f"{'Mean action noise std:':>{pad}} "
                 f"{self.alg.actor_critic.std.detach().mean().item():.2f}"
             ),
             f"{'Learning rate:':>{pad}} {self.alg.learning_rate:.6f}",
         ]
+        if self.alg.actor_critic.use_mode_gate:
+            log_lines.extend(
+                [
+                    f"{'Mode loss:':>{pad}} {losses['mode']:.4f}",
+                    f"{'Semantic mode loss:':>{pad}} {losses['semantic_mode']:.4f}",
+                    (
+                        f"{'Semantic valid ratio:':>{pad}} "
+                        f"{losses['semantic_valid_ratio']:.4f}"
+                    ),
+                    (
+                        f"{'Target ratio (wheel/leg/hybrid):':>{pad}} "
+                        f"{losses['wheel_target_ratio']:.3f} / "
+                        f"{losses['leg_target_ratio']:.3f} / "
+                        f"{losses['hybrid_target_ratio']:.3f}"
+                    ),
+                    (
+                        f"{'Gate probability (wheel/leg/hybrid):':>{pad}} "
+                        f"{losses['wheel_gate_probability']:.3f} / "
+                        f"{losses['leg_gate_probability']:.3f} / "
+                        f"{losses['hybrid_gate_probability']:.3f}"
+                    ),
+                    (
+                        f"{'Activity (wheel/leg):':>{pad}} "
+                        f"{losses['wheel_activity']:.4f} / "
+                        f"{losses['leg_activity']:.4f}"
+                    ),
+                ]
+            )
         if rewbuffer:
             log_lines.extend(
                 [
@@ -396,6 +422,7 @@ class MINEOnPolicyRunner:
         torch.save(
             {
                 "model_state_dict": self.alg.actor_critic.state_dict(),
+                "policy_config": self.checkpoint_policy_config,
                 "optimizer_state_dict": self.alg.optimizer.state_dict(),
                 "estimator_optimizer_state_dict": (
                     self.alg.actor_critic.estimator.optimizer.state_dict()
@@ -407,7 +434,10 @@ class MINEOnPolicyRunner:
         )
 
     def load(self, path, load_optimizer=True):
-        checkpoint = torch.load(path, map_location=self.device)
+        checkpoint = torch.load(path, map_location=self.device, weights_only=False)
+        config = policy_config_from_checkpoint(checkpoint)
+        if config["use_mode_gate"] != self.alg.actor_critic.use_mode_gate:
+            raise ValueError("Gate mode differs from checkpoint; start a new run to change it")
         self.alg.actor_critic.load_state_dict(checkpoint["model_state_dict"])
         if load_optimizer:
             self.alg.optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
