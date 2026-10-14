@@ -4,6 +4,8 @@
 model_path: "nezha/mjcf/scene_course.xml"
 terrain_metadata_path: "nezha/mjcf/assets/nezha_terrain_course.json"
 policy_path: "nezha/policy/policy.pt"
+# Read gate mode from policy.pt. on/off can assert an expected architecture.
+mode_gate: auto
 control_frequency_hz: 50
 initial_base_height: 0.60
 gate_log_interval: 100
@@ -38,7 +40,7 @@ joint_names:
   - RR_thigh_joint
   - RR_calf_joint
   - RR_foot_joint
-default_dof_pos: [-0.10, 0.925, -1.85, 0.0, 0.10, 0.925, -1.85, 0.0, -0.10, 0.925, -1.85, 0.0, 0.10, 0.925, -1.85, 0.0]
+default_dof_pos: [0.0, 0.8, -1.6, 0.0, 0.0, 0.8, -1.6, 0.0, 0.0, 0.8, -1.6, 0.0, 0.0, 0.8, -1.6, 0.0]
 p_gains: [150.0, 150.0, 300.0, 0.0, 150.0, 150.0, 300.0, 0.0, 150.0, 150.0, 300.0, 0.0, 150.0, 150.0, 300.0, 0.0]
 d_gains: [4.0, 4.0, 4.0, 1.2, 4.0, 4.0, 4.0, 1.2, 4.0, 4.0, 4.0, 1.2, 4.0, 4.0, 4.0, 1.2]
 torque_limits: [150.0, 150.0, 225.0, 56.0, 150.0, 150.0, 225.0, 56.0, 150.0, 150.0, 225.0, 56.0, 150.0, 150.0, 225.0, 56.0]

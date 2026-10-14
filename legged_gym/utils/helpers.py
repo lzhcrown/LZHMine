@@ -138,6 +138,11 @@ def update_cfg_from_args(env_cfg, cfg_train, args):
         if args.seed is not None:
             env_cfg.seed = args.seed
     if cfg_train is not None:
+        mode_gate = getattr(args, "mode_gate", None)
+        if mode_gate is not None:
+            if mode_gate not in ("on", "off"):
+                raise ValueError("--mode_gate must be 'on' or 'off'")
+            cfg_train.policy.use_mode_gate = mode_gate == "on"
         if args.seed is not None:
             cfg_train.seed = args.seed
         # alg runner parameters
@@ -176,6 +181,7 @@ def get_args(extra_custom_parameters=None):
     the CLI without adding their controls to every training/play script.
     """
     custom_parameters = [
+        {"name": "--mode_gate", "type": str, "help": "MINE gate: on/off. Omit to use config for new runs or checkpoint mode for resume/play."},
         {"name": "--task", "type": str, "default": "nezha_mine", "help": "Registered task to train or play."},
         {"name": "--resume", "action": "store_true", "default": False,  "help": "Resume training from a checkpoint"},
         {"name": "--experiment_name", "type": str,  "help": "Name of the experiment to run or load. Overrides config file if provided."},

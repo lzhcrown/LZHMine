@@ -1,7 +1,14 @@
 # Local Python environments
 .venv/
+.venv-train/
 .venv-sim/
 .venv_export/
+.venv-mujoco/
+
+# Local agent/account state
+/.agents/
+/.codex/
+/.aws/
 
 # Training logs and experiment trackers
 logs/
@@ -58,6 +65,7 @@ TEST*.xml
 *.trace.json
 
 # Editor settings and temporary files
+tmp/
 .vscode/
 .idea/
 .marscode/
@@ -73,3 +81,9 @@ TEST*.xml
 # Operating-system metadata
 .DS_Store
 Thumbs.db
+
+# Keep robot descriptions and their mesh/material dependencies versioned.
+# Do not add blanket rules for resources/, URDF, MJCF/XML, STL, OBJ or BIN:
+# the simulation scenes load the tracked terrain heightfields as well.
+!*.urdf
+!*.xacro

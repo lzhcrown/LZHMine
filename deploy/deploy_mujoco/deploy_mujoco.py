@@ -367,7 +367,9 @@ def run(args):
         observation_scales=cfg.get("observation_scales"),
         torque_limits=cfg["torque_limits"],
         device=args.device,
+        mode_gate=args.mode_gate or cfg.get("mode_gate", "auto"),
     )
+    print(f"Policy mode gate: {'on' if runtime.use_mode_gate else 'off'} (from model)")
     initial_base_height = float(cfg.get("initial_base_height", 0.60))
     initial_base_position, terrain_description = _terrain_course_spawn(
         mujoco, model, cfg, initial_base_height
@@ -434,7 +436,7 @@ def run(args):
         else int(cfg.get("gate_log_interval", 100))
     )
     mode_names = tuple(cfg.get("mode_names", ["wheel", "leg", "hybrid"]))
-    if len(mode_names) != 3:
+    if runtime.use_mode_gate and len(mode_names) != 3:
         raise ValueError("mode_names must contain wheel, leg and hybrid labels")
     standby_enabled = bool(cfg.get("standby_at_zero_command", True)) and not (
         args.run_zero_policy
@@ -510,7 +512,7 @@ def run(args):
                 dof_pos,
                 dof_vel,
             )
-            if gate_log_interval > 0 and policy_step % gate_log_interval == 0:
+            if runtime.use_mode_gate and gate_log_interval > 0 and policy_step % gate_log_interval == 0:
                 mode_probs = runtime.mode_probabilities().cpu().numpy()
                 selected_mode = mode_names[int(np.argmax(mode_probs))]
                 print(
@@ -565,6 +567,10 @@ def parse_args():
     parser.add_argument("--policy", help="Exported policy.pt")
     parser.add_argument("--device", default="cpu")
     parser.add_argument(
+        "--mode-gate", choices=("auto", "on", "off"),
+        help="Validate gate mode against the model; auto detects it. Does not alter model computation.",
+    )
+    parser.add_argument(
         "--history-order",
         choices=("auto", "oldest_first", "newest_first"),
         help=(
@@ -591,8 +597,11 @@ def parse_args():
     parser.add_argument(
         "--duration",
         type=float,
-        default=10.0,
-        help="Simulated seconds to run; values <= 0 run until the viewer closes.",
+        default=0.0,
+        help=(
+            "Simulated seconds to run; by default the simulation runs until "
+            "the viewer closes. Headless mode requires a value greater than zero."
+        ),
     )
     parser.add_argument(
         "--run-zero-policy",

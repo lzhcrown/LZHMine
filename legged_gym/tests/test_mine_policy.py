@@ -1,6 +1,11 @@
+from argparse import Namespace
+from pathlib import Path
+from tempfile import TemporaryDirectory
+
 import torch
 
 from deploy.deploy_mujoco.runtime import NezhaObservationHistory
+from legged_gym.scripts.export_nezha_mine import _build_policy, export
 from rsl_rl.algorithms import MINEPPO
 from rsl_rl.modules import MINEActorCritic, MINEEstimator, MINEPolicyExporter
 from rsl_rl.storage.mine_rollout_storage import MINERolloutStorage
@@ -56,6 +61,69 @@ def test_wheel_gym_cq_target_encoder_uses_actor_observation_width():
     assert estimator.target[0].in_features == 65
     losses = estimator.update(torch.randn(4, 130), torch.randn(4, 1125))
     assert all(torch.isfinite(torch.tensor(losses)))
+
+
+def test_nezha_target_encoder_trains_on_complete_latest_privileged_frame():
+    torch.manual_seed(10)
+    policy = _build_policy("oldest_first")
+    estimator = policy.estimator
+    assert estimator.target[0].in_features == 375
+    observations = torch.randn(8, 130)
+    privileged_history = torch.randn(8, 1125)
+    latest = privileged_history[:, -375:]
+    with torch.no_grad():
+        predictions = estimator.encoder(observations)[:, :4]
+        expected_mse = torch.nn.functional.mse_loss(
+            predictions, latest[:, 371:375]
+        )
+    received = []
+    handle = estimator.target.register_forward_pre_hook(
+        lambda module, inputs: received.append(inputs[0].detach().clone())
+    )
+    before = estimator.target[0].weight.detach().clone()
+    try:
+        losses = estimator.update(observations, privileged_history)
+    finally:
+        handle.remove()
+
+    assert len(received) == 1
+    assert torch.equal(received[0], latest)
+    assert abs(losses[0] - expected_mse.item()) < 1e-6
+    assert all(torch.isfinite(torch.tensor(losses)))
+    after = estimator.target[0].weight.detach()
+    # Extra privileged features and the four supervised quantities must
+    # participate in target training, rather than being padded or sliced off.
+    assert not torch.equal(before[:, 65:371], after[:, 65:371])
+    assert not torch.equal(before[:, 371:375], after[:, 371:375])
+
+
+def test_nezha_export_accepts_65_and_375_dimensional_target_checkpoints():
+    with TemporaryDirectory() as directory:
+        for width in (65, 375):
+            policy = _build_policy(
+                "oldest_first", is_privileged_obs=(width == 375)
+            )
+            checkpoint_path = Path(directory) / f"model_target{width}.pt"
+            output_path = Path(directory) / f"policy_target{width}.pt"
+            torch.save({"model_state_dict": policy.state_dict()}, checkpoint_path)
+            export(Namespace(
+                checkpoint=str(checkpoint_path),
+                output=str(output_path),
+                history_order="oldest_first",
+            ))
+            scripted = torch.jit.load(str(output_path))
+            observations = torch.randn(8, 130)
+            with torch.inference_mode():
+                assert torch.allclose(
+                    scripted(observations),
+                    policy.act_inference(observations),
+                    atol=1e-6,
+                )
+                assert torch.allclose(
+                    scripted.get_mode_probabilities(observations),
+                    policy.estimator.mode_probabilities(observations),
+                    atol=1e-6,
+                )
 
 
 def test_scripted_export_matches_online_raw_modal_prototype_path():

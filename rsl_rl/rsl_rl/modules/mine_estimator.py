@@ -60,6 +60,7 @@ class MINEEstimator(nn.Module):
         estimation_target_indices: List[int],
         history_order: str = "oldest_first",
         is_privileged_obs: bool = True,
+        use_mode_gate: bool = True,
         enc_hidden_dims: List[int] = [256, 128, 64],
         tar_hidden_dims: List[int] = [256, 128, 64],
         latent_dim: int = 16,
@@ -92,6 +93,9 @@ class MINEEstimator(nn.Module):
         self.num_one_step_obs = num_one_step_obs
         self.num_one_step_privileged_obs = num_one_step_privileged_obs
         self.is_privileged_obs = bool(is_privileged_obs)
+        self.use_mode_gate = bool(use_mode_gate)
+        if self.use_mode_gate and num_modes != 3:
+            raise ValueError("The gated MINE policy requires three modes")
         self.num_est_prob = len(estimation_target_indices)
         self.num_latent = latent_dim
         self.num_modes = num_modes
@@ -101,7 +105,9 @@ class MINEEstimator(nn.Module):
         self.learning_rate = learning_rate
         self.max_grad_norm = max_grad_norm
         semantic_cfg = mode_semantic_cfg or {}
-        self.mode_semantic_enabled = bool(semantic_cfg.get("enabled", False))
+        self.mode_semantic_enabled = self.use_mode_gate and bool(
+            semantic_cfg.get("enabled", False)
+        )
         self.mode_semantic_loss_coef = float(semantic_cfg.get("loss_coef", 0.0))
         self.mode_loss_coef = float(
             semantic_cfg.get("mode_loss_coef", mode_loss_coef)
@@ -187,8 +193,12 @@ class MINEEstimator(nn.Module):
             latent_dim,
             activation,
         )
-        self.mode_gate = _mlp(num_one_step_obs, [gate_hidden_dim], num_modes, activation)
-        self.mode_prototypes = nn.Parameter(torch.randn(num_modes, latent_dim))
+        if self.use_mode_gate:
+            self.mode_gate = _mlp(num_one_step_obs, [gate_hidden_dim], num_modes, activation)
+            self.mode_prototypes = nn.Parameter(torch.randn(num_modes, latent_dim))
+        else:
+            self.mode_gate = nn.Identity()
+            self.register_parameter("mode_prototypes", None)
         self.proto = nn.Embedding(num_prototypes, latent_dim)
         self.optimizer = torch.optim.Adam(self.parameters(), lr=learning_rate)
 
@@ -211,6 +221,10 @@ class MINEEstimator(nn.Module):
         parts = self.encoder(history.detach())
         estimate = parts[..., : self.num_est_prob]
         source_latent = parts[..., self.num_est_prob :]
+
+        if not self.use_mode_gate:
+            empty = source_latent.new_empty((history.shape[0], 0))
+            return estimate, F.normalize(source_latent, dim=-1, p=2.0), empty, empty
 
         current_obs = history[..., : self.num_one_step_obs]
         mode_logits = self.mode_gate(current_obs)
@@ -345,14 +359,14 @@ class MINEEstimator(nn.Module):
         source_parts = self.encoder(history)
         predicted_values = source_parts[..., : self.num_est_prob]
         source_latent = source_parts[..., self.num_est_prob :]
-        current_obs = history[..., : self.num_one_step_obs].detach()
-        mode_logits = self.mode_gate(current_obs)
-        mode_probs = F.softmax(mode_logits, dim=-1)
-        normalized_modes = F.normalize(self.mode_prototypes, dim=-1, p=2.0)
-        modal_scale = torch.matmul(mode_probs, normalized_modes)
-        source_latent = F.normalize(
-            source_latent * modal_scale, dim=-1, p=2.0
-        )
+        if self.use_mode_gate:
+            current_obs = history[..., : self.num_one_step_obs].detach()
+            mode_logits = self.mode_gate(current_obs)
+            mode_probs = F.softmax(mode_logits, dim=-1)
+            normalized_modes = F.normalize(self.mode_prototypes, dim=-1, p=2.0)
+            modal_scale = torch.matmul(mode_probs, normalized_modes)
+            source_latent = source_latent * modal_scale
+        source_latent = F.normalize(source_latent, dim=-1, p=2.0)
 
         privileged = (
             next_critic_obs[..., -self.num_one_step_privileged_obs :]
@@ -384,8 +398,10 @@ class MINEEstimator(nn.Module):
         ).mean()
         estimation_loss = F.mse_loss(predicted_values, target_values)
 
-        similarity = source_latent.detach() @ normalized_modes.T
-        mode_loss = F.cross_entropy(similarity, torch.argmax(mode_probs, dim=-1))
+        mode_loss = source_latent.new_zeros(())
+        if self.use_mode_gate:
+            similarity = source_latent.detach() @ normalized_modes.T
+            mode_loss = F.cross_entropy(similarity, torch.argmax(mode_probs, dim=-1))
 
         semantic_loss = source_latent.new_zeros(())
         semantic_valid_ratio = source_latent.new_zeros(())
@@ -427,7 +443,12 @@ class MINEEstimator(nn.Module):
         nn.utils.clip_grad_norm_(self.parameters(), self.max_grad_norm)
         self.optimizer.step()
 
-        mean_mode_probs = mode_probs.detach().mean(dim=0)
+        # Keep the internal loss tuple compatible with PPO. Ungated runs
+        # do not compute probabilities; gate-only metrics are not logged.
+        mean_mode_probs = (
+            mode_probs.detach().mean(dim=0)
+            if self.use_mode_gate else source_latent.new_zeros(3)
+        )
         return (
             estimation_loss.item(),
             swap_loss.item(),

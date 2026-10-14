@@ -8,6 +8,7 @@ import re
 import torch
 
 from rsl_rl.modules import MINEActorCritic, MINEPolicyExporter
+from rsl_rl.utils.mine_checkpoint import policy_config_from_checkpoint
 
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
@@ -25,8 +26,8 @@ def _latest_checkpoint(run_dir):
     return max(candidates)[1]
 
 
-def _build_policy(history_order):
-    return MINEActorCritic(
+def _build_policy(history_order, is_privileged_obs=True, use_mode_gate=True, **overrides):
+    config = dict(
         num_actor_obs=130,
         num_critic_obs=1125,
         num_one_step_obs=65,
@@ -34,7 +35,8 @@ def _build_policy(history_order):
         estimation_target_indices=[371, 372, 373, 374],
         num_actions=16,
         history_order=history_order,
-        is_privileged_obs=False,
+        is_privileged_obs=is_privileged_obs,
+        use_mode_gate=use_mode_gate,
         actor_hidden_dims=[512, 256, 128],
         critic_hidden_dims=[512, 256, 128],
         enc_hidden_dims=[256, 128, 64],
@@ -48,7 +50,9 @@ def _build_policy(history_order):
         estimator_max_grad_norm=10.0,
         mode_loss_coef=0.5,
         mode_semantic_cfg={"enabled": False},
-    ).eval()
+    )
+    config.update(overrides)
+    return MINEActorCritic(**config).eval()
 
 
 def export(args):
@@ -71,22 +75,31 @@ def export(args):
     checkpoint = torch.load(
         checkpoint_path, map_location="cpu", weights_only=False
     )
-    policy = _build_policy(args.history_order)
-    policy.load_state_dict(checkpoint["model_state_dict"], strict=True)
+    state_dict = checkpoint["model_state_dict"]
+    target_width = state_dict["estimator.target.0.weight"].shape[1]
+    config = policy_config_from_checkpoint(checkpoint)
+    if args.history_order is not None:
+        config["history_order"] = args.history_order
+    policy = _build_policy(**config)
+    policy.load_state_dict(state_dict, strict=True)
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
     MINEPolicyExporter(policy).export(output_path)
 
     scripted = torch.jit.load(output_path, map_location="cpu").eval()
     with torch.inference_mode():
-        probe = torch.zeros(1, 130)
+        probe = torch.zeros(1, policy.num_actor_obs)
         actions = scripted(probe)
         gate = scripted.get_mode_probabilities(probe)
-    if actions.shape != (1, 16) or gate.shape != (1, 3):
+    num_modes = policy.estimator.num_modes if policy.use_mode_gate else 0
+    if actions.shape != (1, policy.num_actions) or gate.shape != (1, num_modes):
         raise RuntimeError("Exported policy failed its shape validation")
     print(f"checkpoint:    {checkpoint_path}")
-    print(f"history order:{args.history_order}")
+    print(f"target width:  {target_width}")
+    print(f"mode gate:     {'on' if policy.use_mode_gate else 'off'}")
+    print(f"history order: {policy.history_order}")
     print(f"policy:        {output_path}")
-    print("validated:     input [1,130], action [1,16], gate [1,3]")
+    print(f"validated:     input [1,{policy.num_actor_obs}], "
+          f"action [1,{policy.num_actions}], gate [1,{num_modes}]")
 
 
 def parse_args():
@@ -97,8 +110,8 @@ def parse_args():
     parser.add_argument(
         "--history-order",
         choices=("oldest_first", "newest_first"),
-        default="oldest_first",
-        help="Use newest_first only for pre-alignment LZHMine checkpoints.",
+        default=None,
+        help="Override checkpoint metadata; archived runs default to oldest_first.",
     )
     return parser.parse_args()
 

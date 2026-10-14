@@ -60,21 +60,21 @@ class NezhaMINECfg(LeggedRobotCfg):
         rand_init_dof = False
         rand_init_dof_range = 0.0
         default_joint_angles = {
-            "FL_hip_joint": -0.10,
-            "FL_thigh_joint": 0.925,
-            "FL_calf_joint": -1.85,
+            "FL_hip_joint": 0.0,
+            "FL_thigh_joint": 0.8,
+            "FL_calf_joint": -1.6,
             "FL_foot_joint": 0.0,
-            "FR_hip_joint": 0.10,
-            "FR_thigh_joint": 0.925,
-            "FR_calf_joint": -1.85,
+            "FR_hip_joint": 0.0,
+            "FR_thigh_joint": 0.8,
+            "FR_calf_joint": -1.6,
             "FR_foot_joint": 0.0,
-            "RL_hip_joint": -0.10,
-            "RL_thigh_joint": 0.925,
-            "RL_calf_joint": -1.85,
+            "RL_hip_joint": 0.0,
+            "RL_thigh_joint": 0.8,
+            "RL_calf_joint": -1.6,
             "RL_foot_joint": 0.0,
-            "RR_hip_joint": 0.10,
-            "RR_thigh_joint": 0.925,
-            "RR_calf_joint": -1.85,
+            "RR_hip_joint": 0.0,
+            "RR_thigh_joint": 0.8,
+            "RR_calf_joint": -1.6,
             "RR_foot_joint": 0.0,
         }
 
@@ -255,10 +255,11 @@ class NezhaMINECfgPPO(LeggedRobotCfgPPO):
         # 130 -> 256 -> 128 -> 64 -> (4 estimates + 16 latent).
         enc_hidden_dims = [256, 128, 64]
         tar_hidden_dims = [256, 128, 64]
-        # The original Apr10 experiment left is_privileged_obs at False, so
-        # the target encoder consumes the actor-equivalent 65-D prefix rather
-        # than the complete 375-D privileged frame.
-        is_privileged_obs = False
+        # Train the target encoder on the complete 375-D privileged frame:
+        # 65 proprioceptive + 306 extra privileged + 4 estimation targets.
+        is_privileged_obs = True
+        # CLI override: --mode_gate on/off. Both modes use the same 375-D target.
+        use_mode_gate = True
         latent_dim = 16
         num_modes = 3
         gate_hidden_dim = 64

@@ -54,7 +54,8 @@ def train(args):
     )
 
     print("=" * 72)
-    print("Nezha gated-modal dual-encoder training")
+    print("Nezha dual-encoder training")
+    print(f"mode gate:          {'on' if runner.alg.actor_critic.use_mode_gate else 'off'}")
     print(f"task:               {TASK_NAME}")
     print(f"runner/algorithm:   {EXPECTED_RUNNER} / {EXPECTED_ALGORITHM}")
     print(f"environments:       {env.num_envs}")
@@ -68,7 +69,7 @@ def train(args):
     print(f"target encoder obs: {target_width}")
     print(
         "semantic gate loss: "
-        f"{train_cfg.policy.mode_semantic_cfg['enabled']}"
+        f"{runner.alg.actor_critic.estimator.mode_semantic_enabled}"
     )
     print(f"actions:            {env.num_actions}")
     print(f"device:             {args.rl_device}")
