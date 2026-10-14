@@ -159,6 +159,28 @@ python legged_gym/scripts/train_nezha_mine.py \
 
 改用 `--mode_gate on` 可检查有门控模式。旧的 65 维 target checkpoint 也可自动识别，并按原有结构续训/导出；将旧的 65 维实验改为 375 维需要重新训练。没有配置元数据的旧 checkpoint 默认按历史 Nezha 网络构造，历史顺序默认 `oldest_first`；更早的 `newest_first` 模型需使用显式历史顺序参数。
 
+### 训练诊断指标
+
+每次迭代额外记录以下指标（TensorBoard/W&B 与终端输出）：
+
+| 指标 | 含义 | 健康范围 |
+|---|---|---|
+| `Diagnostics/kl_first` | 第一个 mini-batch（参数尚未更新）的 KL，用于检查 rollout 存储是否与动作所用输入一致 | ≈ 1.6e-4（KL 公式中 `+1e-5` 项的下限）；明显偏大说明存储被污染 |
+| `Diagnostics/kl_mean` / `kl_max` | 各 mini-batch KL 的均值/最大值 | 自适应学习率下应在 `desired_kl=0.01` 附近 |
+| `Diagnostics/kl_estimator_shift` | 单次估计器更新本身引起的 actor 输出 KL | 远小于 0.01；若接近 0.02 会持续压低学习率 |
+| `Latent/latent_std`、`latent_cos_to_mean` | actor 实际接收的 latent 在 batch 内的离散程度 | `cos_to_mean` → 1、`std` → 0 表示 latent 塌缩为常量 |
+| `Latent/swap_vs_uniform` | swap loss 与"均匀预测" `log(K)/K` 之比 | → 1 表示对比学习不再提供信息 |
+| `Latent/swav_perplexity` | 32 个原型的实际使用数（困惑度） | → 1 表示所有样本落入同一原型 |
+| `ModeGate/gate_entropy`、`gate_batch_entropy`、`mode_proto_max_cos` | 门控逐样本熵、batch 平均分布的熵、模态原型间最大 \|cos\|（仅门控模式） | 逐样本熵低而 batch 熵高才说明门控在区分状态；`max_cos` → 1 表示原型共线塌缩 |
+
+每个运行目录还会保存：
+
+- `run_info.json`：启动命令、git commit/分支/是否有未提交修改、完整训练与环境配置；
+- `git_diff.patch`：仅当启动时存在未提交修改时生成，记录相对 HEAD 的改动；
+- `best_policy.pt`：最近 100 个 episode 平均回报最高时保存（至少完成 `best_policy_min_episodes` 个 episode 后才开始比较）。地形课程会影响回报，部署前仍需单独评估。
+
+所有 checkpoint 均包含 `train_cfg`、`env_cfg`、`git` 与 `best_mean_reward`，续训时恢复最佳回报记录。
+
 ## Isaac Gym Play 与导出
 
 Play：
@@ -266,6 +288,12 @@ actions, torques = runtime.step(
 
 ```bash
 python -m unittest legged_gym.tests.test_mine_modes -v
+```
+
+训练管线回归测试（rollout 存储与动作输入一致、首个 mini-batch KL 为零、latent/门控诊断、`best_policy.pt` 与配置/git 记录），不需要 Isaac Gym：
+
+```bash
+PYTHONPATH=.:rsl_rl python -m unittest legged_gym.tests.test_mine_training_pipeline -v
 ```
 
 `.gitignore` 忽略虚拟环境（包括 `.venv-mujoco`）、训练日志、checkpoint/导出权重、录像截图、缓存、构建产物和本机账户/代理状态。权重留在本地，通过运行目录和文件名选择。

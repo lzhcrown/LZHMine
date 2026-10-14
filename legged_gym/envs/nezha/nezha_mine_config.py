@@ -309,6 +309,9 @@ class NezhaMINECfgPPO(LeggedRobotCfgPPO):
         num_steps_per_env = 24
         max_iterations = 100000
         save_interval = 200
+        # best_policy.pt tracks the best mean reward over the last 100
+        # episodes, judged only once this many episodes have finished.
+        best_policy_min_episodes = 100
         experiment_name = "nezha3_mine"
         run_name = "trimesh_baseline_test"
         wandb_enabled = True

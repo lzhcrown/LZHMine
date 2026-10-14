@@ -6,6 +6,7 @@ view.  A soft modality gate blends learnable modal prototypes before the
 source latent is passed to the policy.
 """
 
+import math
 from typing import Dict, List, Tuple
 
 import torch
@@ -201,6 +202,8 @@ class MINEEstimator(nn.Module):
             self.register_parameter("mode_prototypes", None)
         self.proto = nn.Embedding(num_prototypes, latent_dim)
         self.optimizer = torch.optim.Adam(self.parameters(), lr=learning_rate)
+        # Representation-health statistics from the latest update().
+        self.last_diagnostics: Dict[str, float] = {}
 
     def _flatten_history(self, obs_history: torch.Tensor) -> torch.Tensor:
         if obs_history.dim() == 3:
@@ -437,6 +440,12 @@ class MINEEstimator(nn.Module):
             + self.mode_loss_coef * mode_loss
             + self.mode_semantic_loss_coef * semantic_loss
         )
+        self.last_diagnostics = self._diagnostics(
+            history,
+            source_scores,
+            swap_loss,
+            mode_probs if self.use_mode_gate else None,
+        )
 
         self.optimizer.zero_grad()
         total_loss.backward()
@@ -464,6 +473,58 @@ class MINEEstimator(nn.Module):
             mean_mode_probs[self.LEG_MODE].item(),
             mean_mode_probs[self.HYBRID_MODE].item(),
         )
+
+    @torch.no_grad()
+    def _diagnostics(
+        self,
+        history: torch.Tensor,
+        source_scores: torch.Tensor,
+        swap_loss: torch.Tensor,
+        mode_probs: torch.Tensor = None,
+    ) -> Dict[str, float]:
+        """Representation-health statistics for logging; no effect on training.
+
+        Latent statistics use the policy-path latent the actor receives.
+        Collapse shows as latent_cos_to_mean -> 1, latent_std -> 0,
+        swav_perplexity -> 1 (one prototype used) and swap_vs_uniform -> 1
+        (swap loss no better than uniform predictions, log(K)/K).
+        """
+        _, latent, _, _ = self._source(history)
+        mean_direction = F.normalize(latent.mean(dim=0, keepdim=True), dim=-1)
+        num_prototypes = source_scores.shape[-1]
+        usage = torch.bincount(
+            source_scores.argmax(dim=-1), minlength=num_prototypes
+        ).float()
+        usage /= usage.sum()
+        diagnostics = {
+            "latent_std": latent.std(dim=0).mean().item(),
+            "latent_cos_to_mean": (latent @ mean_direction.T).mean().item(),
+            "swav_perplexity": torch.exp(
+                -(usage * usage.clamp_min(1e-12).log()).sum()
+            ).item(),
+            "swap_vs_uniform": (
+                swap_loss.item() * num_prototypes / math.log(num_prototypes)
+            ),
+        }
+        if mode_probs is not None:
+            probs = mode_probs.detach()
+            batch_probs = probs.mean(dim=0)
+            prototypes = F.normalize(self.mode_prototypes, dim=-1, p=2.0)
+            cosine = prototypes @ prototypes.T
+            off_diagonal = ~torch.eye(
+                self.num_modes, dtype=torch.bool, device=cosine.device
+            )
+            diagnostics.update(
+                gate_entropy=-(probs * probs.clamp_min(1e-12).log())
+                .sum(dim=-1)
+                .mean()
+                .item(),
+                gate_batch_entropy=-(
+                    batch_probs * batch_probs.clamp_min(1e-12).log()
+                ).sum().item(),
+                mode_proto_max_cos=cosine[off_diagonal].abs().max().item(),
+            )
+        return diagnostics
 
     @torch.no_grad()
     def _sinkhorn(self, scores: torch.Tensor) -> torch.Tensor:

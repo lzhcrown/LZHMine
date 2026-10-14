@@ -207,10 +207,14 @@ class NezhaMINEEnv(LeggedRobot):
         if self.cfg.env.send_timeouts:
             self.extras["time_outs"] = self.time_out_buf
 
-        # wheel_gym_CQ clears every history frame on reset.
-        self.obs_buf[env_ids] = 0.0
+        # wheel_gym_CQ clears every history frame on reset. Do it out of
+        # place: the tensors returned by the previous step are still held by
+        # the runner as the inputs of the action that was just applied.
+        self.obs_buf = self.obs_buf.index_fill(0, env_ids, 0.0)
         if self.privileged_obs_buf is not None:
-            self.privileged_obs_buf[env_ids] = 0.0
+            self.privileged_obs_buf = self.privileged_obs_buf.index_fill(
+                0, env_ids, 0.0
+            )
 
     def _reset_dofs(self, env_ids):
         self.dof_pos[env_ids] = self.default_dof_pos

@@ -2,9 +2,12 @@
 
 import os
 import copy
+import json
 import statistics
+import sys
 import time
 from collections import deque
+from datetime import datetime
 
 import torch
 from torch.utils.tensorboard import SummaryWriter
@@ -12,7 +15,14 @@ from torch.utils.tensorboard import SummaryWriter
 from rsl_rl.algorithms.mine_ppo import MINEPPO
 from rsl_rl.env import VecEnv
 from rsl_rl.modules.mine_actor_critic import MINEActorCritic
-from rsl_rl.utils.mine_checkpoint import policy_config_from_checkpoint
+from rsl_rl.utils.mine_checkpoint import (
+    config_to_dict,
+    git_diff,
+    git_state,
+    policy_config_from_checkpoint,
+)
+
+SOURCE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 
 class MINEOnPolicyRunner:
@@ -52,8 +62,16 @@ class MINEOnPolicyRunner:
             is_privileged_obs=actor_critic.estimator.is_privileged_obs,
             history_order=actor_critic.history_order,
         )
+        # Provenance stored in every checkpoint: the code and configuration
+        # the run was launched with.
+        self.git_state = git_state(SOURCE_DIR)
+        self.env_cfg_dict = config_to_dict(env.cfg)
         self.num_steps_per_env = self.cfg["num_steps_per_env"]
         self.save_interval = self.cfg["save_interval"]
+        self.best_policy_min_episodes = int(
+            self.cfg.get("best_policy_min_episodes", 100)
+        )
+        self.best_mean_reward = -float("inf")
         self.alg.init_storage(
             env.num_envs,
             self.num_steps_per_env,
@@ -74,6 +92,7 @@ class MINEOnPolicyRunner:
         if self.log_dir is not None and self.writer is None:
             os.makedirs(self.log_dir, exist_ok=True)
             self.writer = SummaryWriter(log_dir=self.log_dir, flush_secs=10)
+            self._write_run_info()
         if self.log_dir is not None and self.wandb_run is None:
             self._init_wandb()
         if init_at_random_ep_len:
@@ -165,6 +184,7 @@ class MINEOnPolicyRunner:
                             f"model_{iteration}.pt",
                         )
                     )
+                self._save_best_policy(iteration, rewbuffer, lenbuffer)
             ep_infos.clear()
 
         self.current_learning_iteration = final_iteration
@@ -179,6 +199,44 @@ class MINEOnPolicyRunner:
         if self.wandb_run is not None:
             self.wandb_run.finish()
             self.wandb_run = None
+
+    def _write_run_info(self):
+        """Record how the run was launched; uncommitted changes go to a patch."""
+        run_info = {
+            "start_time": datetime.now().isoformat(timespec="seconds"),
+            "command": sys.argv,
+            "git": self.git_state,
+            "train_cfg": self.train_cfg,
+            "env_cfg": self.env_cfg_dict,
+        }
+        with open(os.path.join(self.log_dir, "run_info.json"), "w") as stream:
+            json.dump(run_info, stream, indent=2, default=str)
+        if self.git_state.get("dirty"):
+            with open(os.path.join(self.log_dir, "git_diff.patch"), "w") as stream:
+                stream.write(git_diff(SOURCE_DIR))
+
+    def _save_best_policy(self, iteration, rewbuffer, lenbuffer):
+        """Keep best_policy.pt at the highest mean reward over recent episodes.
+
+        Judged only once rewbuffer holds best_policy_min_episodes episodes, so
+        early high-variance means cannot claim it. Under the terrain
+        curriculum the mean reward also depends on the assigned terrain, so
+        evaluate best_policy.pt before deploying it.
+        """
+        if len(rewbuffer) < min(self.best_policy_min_episodes, rewbuffer.maxlen):
+            return
+        mean_reward = statistics.mean(rewbuffer)
+        if mean_reward <= self.best_mean_reward:
+            return
+        self.best_mean_reward = mean_reward
+        self.save(
+            os.path.join(self.log_dir, "best_policy.pt"),
+            infos={
+                "iteration": iteration,
+                "mean_reward": mean_reward,
+                "mean_episode_length": statistics.mean(lenbuffer),
+            },
+        )
 
     def _init_wandb(self):
         if not self.cfg.get("wandb_enabled", False):
@@ -232,6 +290,7 @@ class MINEOnPolicyRunner:
                 config={
                     "training": self.train_cfg,
                     "environment": environment_cfg,
+                    "git": self.git_state,
                 },
             )
         except Exception as exc:
@@ -298,6 +357,18 @@ class MINEOnPolicyRunner:
             "hybrid_gate_probability",
         ):
             metrics[f"ModeGate/{name}"] = self._scalar(losses[name])
+        for name in ("gate_entropy", "gate_batch_entropy", "mode_proto_max_cos"):
+            if name in losses:
+                metrics[f"ModeGate/{name}"] = self._scalar(losses[name])
+        for name in ("kl_mean", "kl_max", "kl_first", "kl_estimator_shift"):
+            metrics[f"Diagnostics/{name}"] = self._scalar(losses[name])
+        for name in (
+            "latent_std",
+            "latent_cos_to_mean",
+            "swap_vs_uniform",
+            "swav_perplexity",
+        ):
+            metrics[f"Latent/{name}"] = self._scalar(losses[name])
         if not self.alg.actor_critic.use_mode_gate:
             metrics = {
                 name: value for name, value in metrics.items()
@@ -359,10 +430,33 @@ class MINEOnPolicyRunner:
                 f"{self.alg.actor_critic.std.detach().mean().item():.2f}"
             ),
             f"{'Learning rate:':>{pad}} {self.alg.learning_rate:.6f}",
+            (
+                f"{'KL mean / max / first minibatch:':>{pad}} "
+                f"{losses['kl_mean']:.4f} / {losses['kl_max']:.4f} / "
+                f"{losses['kl_first']:.2e}"
+            ),
+            f"{'KL from estimator step:':>{pad}} {losses['kl_estimator_shift']:.4f}",
+            (
+                f"{'Latent std / cos to mean:':>{pad}} "
+                f"{losses['latent_std']:.4f} / {losses['latent_cos_to_mean']:.4f}"
+            ),
+            (
+                f"{'Swap vs uniform / SwAV perplexity:':>{pad}} "
+                f"{losses['swap_vs_uniform']:.3f} / {losses['swav_perplexity']:.1f}"
+            ),
         ]
         if self.alg.actor_critic.use_mode_gate:
             log_lines.extend(
                 [
+                    (
+                        f"{'Gate entropy (sample / batch):':>{pad}} "
+                        f"{losses['gate_entropy']:.3f} / "
+                        f"{losses['gate_batch_entropy']:.3f}"
+                    ),
+                    (
+                        f"{'Mode prototype max |cos|:':>{pad}} "
+                        f"{losses['mode_proto_max_cos']:.3f}"
+                    ),
                     f"{'Mode loss:':>{pad}} {losses['mode']:.4f}",
                     f"{'Semantic mode loss:':>{pad}} {losses['semantic_mode']:.4f}",
                     (
@@ -428,7 +522,11 @@ class MINEOnPolicyRunner:
                     self.alg.actor_critic.estimator.optimizer.state_dict()
                 ),
                 "iter": self.current_learning_iteration,
+                "best_mean_reward": self.best_mean_reward,
                 "infos": infos,
+                "train_cfg": self.train_cfg,
+                "env_cfg": self.env_cfg_dict,
+                "git": self.git_state,
             },
             path,
         )
@@ -447,6 +545,7 @@ class MINEOnPolicyRunner:
                     estimator_state
                 )
         self.current_learning_iteration = checkpoint.get("iter", 0)
+        self.best_mean_reward = checkpoint.get("best_mean_reward", -float("inf"))
         return checkpoint.get("infos")
 
     def get_inference_policy(self, device=None):

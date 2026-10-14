@@ -1,6 +1,7 @@
 """Shared architecture metadata for MINE resume, play and export."""
 
 import copy
+import subprocess
 
 
 OBSERVATION_KEYS = (
@@ -32,3 +33,56 @@ def policy_config_from_checkpoint(checkpoint):
     config["is_privileged_obs"] = is_privileged
     config.setdefault("history_order", "oldest_first")
     return config
+
+
+def config_to_dict(obj):
+    """Plain nested dict of a legged_gym-style config (classes of attributes)."""
+    if obj is None or isinstance(obj, (bool, int, float, str)):
+        return obj
+    if isinstance(obj, dict):
+        return {key: config_to_dict(value) for key, value in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [config_to_dict(value) for value in obj]
+    if hasattr(obj, "tolist"):
+        return obj.tolist()
+    if not hasattr(obj, "__dict__"):
+        return repr(obj)
+    result = {}
+    for key in dir(obj):
+        if key.startswith("_"):
+            continue
+        value = getattr(obj, key)
+        if callable(value) and not isinstance(value, type):
+            continue
+        result[key] = config_to_dict(value)
+    return result
+
+
+def _git(path, *args):
+    return subprocess.run(
+        ["git", "-C", path, *args],
+        capture_output=True, text=True, check=True, timeout=10,
+    ).stdout
+
+
+def git_state(path):
+    """Commit, branch and dirty flag of the git checkout containing ``path``.
+
+    ``dirty`` covers tracked files only; untracked files are not recorded.
+    """
+    try:
+        return {
+            "commit": _git(path, "rev-parse", "HEAD").strip(),
+            "branch": _git(path, "rev-parse", "--abbrev-ref", "HEAD").strip(),
+            "dirty": bool(_git(path, "status", "--porcelain", "--untracked-files=no").strip()),
+        }
+    except (OSError, subprocess.SubprocessError):
+        return {"commit": None, "branch": None, "dirty": None}
+
+
+def git_diff(path):
+    """Uncommitted changes to tracked files, as a patch against HEAD."""
+    try:
+        return _git(path, "diff", "HEAD")
+    except (OSError, subprocess.SubprocessError):
+        return ""

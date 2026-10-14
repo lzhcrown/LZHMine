@@ -71,8 +71,12 @@ class MINEPPO:
         ).detach()
         self.transition.action_mean = self.actor_critic.action_mean.detach()
         self.transition.action_sigma = self.actor_critic.action_std.detach()
-        self.transition.observations = obs
-        self.transition.critic_observations = critic_obs
+        # Copy now: storage only receives the transition after env.step(), and
+        # an environment may modify the buffers it returned (e.g. clearing the
+        # histories of reset envs). The stored inputs must be the ones the
+        # action was computed from, or PPO sees a spurious KL at every reset.
+        self.transition.observations = obs.clone()
+        self.transition.critic_observations = critic_obs.clone()
         return self.transition.actions
 
     def process_env_step(self, rewards, dones, infos, next_critic_obs):
@@ -110,7 +114,15 @@ class MINEPPO:
             "wheel_gate_probability": 0.0,
             "leg_gate_probability": 0.0,
             "hybrid_gate_probability": 0.0,
+            "kl_mean": 0.0,
+            "kl_estimator_shift": 0.0,
         }
+        # kl_first is measured before any parameter changes, so it must be
+        # ~0 for a consistent rollout; kl_estimator_shift is the KL that one
+        # estimator step alone induces in the actor's action mean.
+        kl_first = None
+        kl_max = 0.0
+        estimator_diagnostics = {}
         updates = 0
         generator = self.storage.mini_batch_generator(
             self.num_mini_batches, self.num_learning_epochs
@@ -137,24 +149,27 @@ class MINEPPO:
             sigma_batch = self.actor_critic.action_std
             entropy_batch = self.actor_critic.entropy
 
+            with torch.inference_mode():
+                kl = torch.sum(
+                    torch.log(sigma_batch / old_sigma_batch + 1e-5)
+                    + (
+                        torch.square(old_sigma_batch)
+                        + torch.square(old_mu_batch - mu_batch)
+                    )
+                    / (2.0 * torch.square(sigma_batch))
+                    - 0.5,
+                    dim=-1,
+                ).mean().item()
+            if kl_first is None:
+                kl_first = kl
+            kl_max = max(kl_max, kl)
             if self.desired_kl is not None and self.schedule == "adaptive":
-                with torch.inference_mode():
-                    kl = torch.sum(
-                        torch.log(sigma_batch / old_sigma_batch + 1e-5)
-                        + (
-                            torch.square(old_sigma_batch)
-                            + torch.square(old_mu_batch - mu_batch)
-                        )
-                        / (2.0 * torch.square(sigma_batch))
-                        - 0.5,
-                        dim=-1,
-                    ).mean()
-                    if kl > self.desired_kl * 2.0:
-                        self.learning_rate = max(1e-5, self.learning_rate / 1.5)
-                    elif 0.0 < kl < self.desired_kl / 2.0:
-                        self.learning_rate = min(1e-2, self.learning_rate * 1.5)
-                    for group in self.optimizer.param_groups:
-                        group["lr"] = self.learning_rate
+                if kl > self.desired_kl * 2.0:
+                    self.learning_rate = max(1e-5, self.learning_rate / 1.5)
+                elif 0.0 < kl < self.desired_kl / 2.0:
+                    self.learning_rate = min(1e-2, self.learning_rate * 1.5)
+                for group in self.optimizer.param_groups:
+                    group["lr"] = self.learning_rate
 
             (
                 estimation_loss,
@@ -175,6 +190,19 @@ class MINEPPO:
                 next_critic_obs_batch,
                 learning_rate=self.learning_rate,
             )
+            with torch.inference_mode():
+                # The actor is unchanged here, so this difference comes only
+                # from the estimator step just taken.
+                shifted_mean = self.actor_critic.act_inference(obs_batch)
+                kl_estimator_shift = torch.sum(
+                    torch.square(shifted_mean - mu_batch)
+                    / (2.0 * torch.square(sigma_batch)),
+                    dim=-1,
+                ).mean().item()
+            for name, value in self.actor_critic.estimator.last_diagnostics.items():
+                estimator_diagnostics[name] = (
+                    estimator_diagnostics.get(name, 0.0) + value
+                )
 
             ratio = torch.exp(
                 actions_log_prob_batch - old_actions_log_prob_batch.squeeze(-1)
@@ -224,9 +252,14 @@ class MINEPPO:
             totals["wheel_gate_probability"] += wheel_gate_probability
             totals["leg_gate_probability"] += leg_gate_probability
             totals["hybrid_gate_probability"] += hybrid_gate_probability
+            totals["kl_mean"] += kl
+            totals["kl_estimator_shift"] += kl_estimator_shift
             updates += 1
 
         self.storage.clear()
         if updates == 0:
             raise RuntimeError("MINEPPO received no mini-batches")
-        return {name: value / updates for name, value in totals.items()}
+        totals.update(estimator_diagnostics)
+        means = {name: value / updates for name, value in totals.items()}
+        means.update(kl_first=kl_first, kl_max=kl_max)
+        return means
