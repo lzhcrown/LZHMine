@@ -1,5 +1,53 @@
 # Nezha Gated-Modal Locomotion
 
+## 常用命令速查
+
+以下命令均在仓库根目录执行，并假定已经激活对应的 Python 环境。
+
+无界面训练：
+
+```bash
+python legged_gym/scripts/train_nezha_mine.py \
+  --headless \
+  --num_envs 4096 \
+  --max_iterations 100000
+```
+
+使用指定 checkpoint 进行 Isaac Gym Play；Play 启动时默认同时导出完整的
+TorchScript 策略文件：
+
+```bash
+python legged_gym/scripts/play_nezha_mine.py \
+  --load_run <运行目录名> \
+  --checkpoint best_policy \
+  --checkpoint_history_order oldest_first \
+  --command_x 1.0 \
+  --command_y 0.0 \
+  --command_yaw 0.0
+```
+
+导出的策略位于
+`logs/nezha3_mine/exported/<运行目录名>/policy.pt`。如果只需要导出策略、
+不启动 Isaac Gym 仿真：
+
+```bash
+python legged_gym/scripts/export_nezha_mine.py \
+  --run <运行目录名> \
+  --history-order oldest_first
+```
+
+使用刚导出的策略启动带界面的 MuJoCo sim-to-sim 仿真（macOS）：
+
+```bash
+.venv/bin/mjpython deploy/deploy_mujoco/deploy_mujoco.py \
+  --policy logs/nezha3_mine/exported/<运行目录名>/policy.pt \
+  --duration 60
+```
+
+Linux 可将上述 `.venv/bin/mjpython` 替换为 `python`。MuJoCo 窗口中使用
+`W/S` 调节前后速度、`A/D` 调节横向速度、`Q/E` 调节转向，空格停止，
+`R` 复位。
+
 本仓库是面向 Nezha 轮腿机器人的训练、Isaac Gym play、策略导出、MuJoCo sim-to-sim 与真机接入框架。默认任务为 `nezha_mine`，不注册也不依赖其他机器人任务。
 
 ## 方法与代码结构

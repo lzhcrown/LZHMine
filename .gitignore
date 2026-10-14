@@ -1,6 +1,7 @@
 # Local Python environments
 .venv/
 .venv-sim/
+.venv_export/
 
 # Training logs and experiment trackers
 logs/
