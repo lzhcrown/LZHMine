@@ -6,6 +6,8 @@ Run with: PYTHONPATH=.:rsl_rl pytest -q legged_gym/tests/test_mine_training_pipe
 
 import json
 import os
+import subprocess
+import sys
 import unittest
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
@@ -14,6 +16,7 @@ import torch
 
 from rsl_rl.modules import MINEEstimator
 from rsl_rl.runners.mine_on_policy_runner import MINEOnPolicyRunner
+from legged_gym.scripts.summarize_training_diagnostics import summarize
 
 
 class InPlaceResetEnv:
@@ -117,14 +120,14 @@ def make_runner(env, use_mode_gate=True, log_dir=None, **runner_overrides):
             algorithm_class_name="MINEPPO",
             num_steps_per_env=6,
             save_interval=1000,
-            **runner_overrides,
         ),
     )
+    config["runner"].update(runner_overrides)
     return MINEOnPolicyRunner(env, config, log_dir=log_dir)
 
 
 class TestRolloutIntegrity(unittest.TestCase):
-    def _collect(self, env):
+    def _collect(self, env, expect_resets=True):
         runner = make_runner(env)
         acted, stored, results = [], {}, {}
         act, update = runner.alg.act, runner.alg.update
@@ -143,7 +146,8 @@ class TestRolloutIntegrity(unittest.TestCase):
         runner.alg.act = recording_act
         runner.alg.update = snapshot_update
         runner.learn(1)
-        self.assertGreater(env.num_resets, 0, "the rollout must contain resets")
+        if expect_resets:
+            self.assertGreater(env.num_resets, 0, "the rollout must contain resets")
         return acted, stored, results["losses"]
 
     def test_storage_keeps_the_observations_each_action_used(self):
@@ -165,8 +169,67 @@ class TestRolloutIntegrity(unittest.TestCase):
                     self.assertTrue(torch.isfinite(torch.tensor(losses[name])), name)
                 self.assertGreaterEqual(losses["kl_max"], losses["kl_mean"])
 
+    def test_whole_rollout_kl_covers_both_groups(self):
+        _, _, losses = self._collect(InPlaceResetEnv())
+        self.assertEqual(losses["pre_update_reset_count"], 16)
+        self.assertEqual(losses["pre_update_non_reset_count"], 32)
+        for name in ("pre_update_kl", "pre_update_kl_reset", "pre_update_kl_non_reset"):
+            self.assertLess(losses[name], 1e-3)
+        self.assertLess(losses["pre_update_value_max_abs_error"], 1e-6)
+        self.assertEqual(losses["update_reset_count"], 32)  # two PPO epochs
+        self.assertEqual(losses["update_non_reset_count"], 64)
+        self.assertIn("post_update_kl_reset", losses)
+
+    def test_absent_groups_are_omitted_not_nan_or_zero(self):
+        for length, absent in ((100, "reset"), (1, "non_reset")):
+            _, _, losses = self._collect(InPlaceResetEnv(episode_length=length), False)
+            self.assertEqual(losses["pre_update_" + absent + "_count"], 0)
+            self.assertNotIn("pre_update_kl_" + absent, losses)
+            self.assertNotIn("kl_" + absent, losses)
+            self.assertTrue(all(torch.isfinite(torch.tensor(v)) for v in losses.values()))
+
+    def test_audit_detects_reset_corruption_without_consuming_rng(self):
+        runner = make_runner(InPlaceResetEnv())
+        def audit_instead_of_update():
+            state = torch.get_rng_state().clone()
+            before = runner.alg.rollout_diagnostics("pre", True, chunk_size=7)
+            self.assertTrue(torch.equal(state, torch.get_rng_state()))
+            storage = runner.alg.storage
+            reset = storage.dones.squeeze(-1).bool()
+            storage.mu[reset] += 3.0
+            after = runner.alg.rollout_diagnostics("pre", True, chunk_size=7)
+            self.assertGreater(after["pre_kl_reset"], 1.0)
+            self.assertAlmostEqual(before["pre_kl_non_reset"], after["pre_kl_non_reset"])
+            storage.clear()
+            return {}
+        runner.alg.update = audit_instead_of_update
+        runner.learn(1)
+
+    def test_shuffle_keeps_reset_labels_aligned(self):
+        runner = make_runner(InPlaceResetEnv())
+        storage = runner.alg.storage
+        ids = torch.arange(48).reshape(6, 8)
+        storage.observations[:, :, 0] = ids
+        storage.dones[:, :, 0] = ids % 3 == 0
+        batches = list(storage.mini_batch_generator(2, 2, include_dones=True))
+        self.assertEqual(len(batches), 4)
+        for batch in batches:
+            self.assertTrue(torch.equal(batch[0][:, 0].long() % 3 == 0, batch[-1].flatten().bool()))
+        self.assertEqual(len(next(storage.mini_batch_generator(2))), 10)
+
 
 class TestEstimatorDiagnostics(unittest.TestCase):
+    def test_per_dimension_and_median_statistics(self):
+        latent = torch.tensor([[1., 0., 0.], [1., 2., 0.], [1., 0., 3.]])
+        metrics = MINEEstimator.latent_statistics(latent)
+        for i, value in enumerate(latent.std(dim=0, unbiased=False)):
+            self.assertAlmostEqual(metrics[f"latent_std_dim_{i:02d}"], value.item())
+        self.assertEqual(metrics["latent_std_min"], 0.)
+        direction = torch.nn.functional.normalize(latent.mean(0), dim=0)
+        self.assertAlmostEqual(metrics["latent_cos_to_mean_median"], (latent @ direction).median().item())
+        single = MINEEstimator.latent_statistics(latent[:1])
+        self.assertTrue(all(torch.isfinite(torch.tensor(v)) for v in single.values()))
+
     def _estimator(self, use_mode_gate):
         torch.manual_seed(0)
         return MINEEstimator(
@@ -216,6 +279,94 @@ class TestEstimatorDiagnostics(unittest.TestCase):
 
 
 class TestCheckpoints(unittest.TestCase):
+    def test_provenance_handles_ascii_locale(self):
+        # The actual GPU launcher uses a C locale; Chinese README diffs must
+        # remain readable and writable without depending on Python UTF-8 mode.
+        code = (
+            "from tempfile import TemporaryDirectory; "
+            "from unittest.mock import patch; "
+            "from legged_gym.tests.test_mine_training_pipeline import make_runner, InPlaceResetEnv; "
+            "from rsl_rl.utils.mine_checkpoint import git_diff; "
+            "git_diff('.'); "
+            "directory = TemporaryDirectory(); "
+            "runner = make_runner(InPlaceResetEnv(), log_dir=directory.name); "
+            "runner.git_state['dirty'] = True; "
+            "mock = patch('rsl_rl.runners.mine_on_policy_runner.git_diff', return_value='\\u4e2d\\u6587'); "
+            "mock.start(); runner._write_run_info(); mock.stop(); directory.cleanup()"
+        )
+        result = subprocess.run(
+            [sys.executable, "-c", code], capture_output=True,
+            env=dict(os.environ, LC_ALL="C", PYTHONUTF8="0", PYTHONCOERCECLOCALE="0"),
+        )
+        self.assertEqual(result.returncode, 0, result.stderr.decode("utf-8", errors="replace"))
+
+    def test_resume_restores_scheduler_and_estimator_learning_rates(self):
+        with TemporaryDirectory() as directory:
+            runner = make_runner(InPlaceResetEnv())
+            runner.alg.learning_rate = 1e-5
+            runner.alg.optimizer.param_groups[0]["lr"] = 1e-5
+            estimator = runner.alg.actor_critic.estimator
+            estimator.learning_rate = 2e-5
+            estimator.optimizer.param_groups[0]["lr"] = 2e-5
+            runner.current_learning_iteration = 7
+            path = os.path.join(directory, "model_7.pt")
+            runner.save(path)
+            restored = make_runner(InPlaceResetEnv())
+            restored.load(path)
+            self.assertEqual(restored.alg.learning_rate, 1e-5)
+            self.assertEqual(restored.alg.actor_critic.estimator.learning_rate, 2e-5)
+            restored.alg.schedule = "adaptive"
+            restored.alg.desired_kl = 0.01
+            restored.learn(1)
+            self.assertEqual(restored.current_learning_iteration, 8)
+            # A consistent first mini-batch raises 1e-5 by 1.5, not 1e-3.
+            self.assertAlmostEqual(restored.alg.last_minibatch_diagnostics[0]["learning_rate"], 1.5e-5)
+            fresh = make_runner(InPlaceResetEnv())
+            fresh.load(path, load_optimizer=False)
+            self.assertEqual(fresh.alg.learning_rate, 1e-3)
+            self.assertEqual(fresh.alg.optimizer.param_groups[0]["lr"], 1e-3)
+
+    def test_iteration_numbers_logs_and_minibatch_metrics_agree(self):
+        with TemporaryDirectory() as directory:
+            runner = make_runner(InPlaceResetEnv(), log_dir=directory,
+                                 save_interval=2, best_policy_min_episodes=1)
+            # Exercise floor fractions without changing the optimization schedule.
+            runner.alg.learning_rate = 1e-5
+            runner.alg.optimizer.param_groups[0]["lr"] = 1e-5
+            runner.learn(3)
+            self.assertFalse(os.path.exists(os.path.join(directory, "model_0.pt")))
+            for iteration in (2, 3):
+                saved = torch.load(os.path.join(directory, f"model_{iteration}.pt"), weights_only=False)
+                self.assertEqual(saved["iter"], iteration)
+            best = torch.load(os.path.join(directory, "best_policy.pt"), weights_only=False)
+            self.assertEqual(best["iter"], best["infos"]["iteration"])
+            with open(os.path.join(directory, "training_diagnostics.jsonl")) as stream:
+                records = [json.loads(line) for line in stream]
+            self.assertEqual([row["iteration"] for row in records], [1, 2, 3])
+            for record in records:
+                rows, metrics = record["minibatches"], record["metrics"]
+                self.assertEqual(len(rows), 4)
+                self.assertEqual(metrics["LearningRate/floor_fraction"], 1.)
+                self.assertEqual(sum(row["reset_count"] for row in rows), 32)
+                weighted = sum(row.get("kl_reset", 0.) * row["reset_count"] for row in rows) / 32
+                self.assertAlmostEqual(metrics["Diagnostics/kl_reset"], weighted)
+                self.assertIn("Latent/latent_std_dim_05", metrics)
+            diagnostic_file = os.path.join(directory, "training_diagnostics.jsonl")
+            summary = summarize(diagnostic_file, start=2, end=3)
+            self.assertTrue(summary["integrity_pass"])
+            self.assertEqual(summary["lr_floor_iteration_fraction"], 1.)
+            self.assertEqual(summary["lr_floor_minibatch_fraction"], 1.)
+            self.assertFalse(summary["lr_target_pass"])
+            with self.assertRaisesRegex(ValueError, "complete"):
+                summarize(diagnostic_file, start=2, end=4)
+            resumed = make_runner(InPlaceResetEnv(), log_dir=directory, save_interval=2)
+            resumed.load(os.path.join(directory, "model_3.pt"))
+            resumed.learn(1)
+            with open(os.path.join(directory, "training_diagnostics.jsonl")) as stream:
+                self.assertEqual([json.loads(line)["iteration"] for line in stream], [1, 2, 3, 4])
+            final = torch.load(os.path.join(directory, "model_4.pt"), weights_only=False)
+            self.assertEqual(final["tot_timesteps"], 4 * 48)
+
     def test_best_policy_and_provenance_are_saved(self):
         with TemporaryDirectory() as directory:
             env = InPlaceResetEnv(in_place_reset=False)

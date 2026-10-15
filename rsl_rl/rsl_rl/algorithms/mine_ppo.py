@@ -33,6 +33,7 @@ class MINEPPO:
         self.desired_kl = desired_kl
         self.schedule = schedule
         self.learning_rate = learning_rate
+        self.last_minibatch_diagnostics = []
         self.actor_critic = actor_critic.to(device)
         self.storage = None
         # Match wheel_gym_CQ's checkpoint and optimizer parameter group.  The
@@ -96,7 +97,73 @@ class MINEPPO:
         last_values = self.actor_critic.evaluate(last_critic_obs).detach()
         self.storage.compute_returns(last_values, self.gamma, self.lam)
 
+    @staticmethod
+    def _kl_per_sample(mu, sigma, old_mu, old_sigma):
+        # Preserve the scheduler's historical formula and numerical offset.
+        return torch.sum(
+            torch.log(sigma / old_sigma + 1e-5)
+            + (old_sigma.square() + (old_mu - mu).square()) / (2 * sigma.square())
+            - 0.5,
+            dim=-1,
+        )
+
+    @staticmethod
+    def _grouped_kl(kl, dones):
+        reset = dones.flatten().bool()
+        metrics = {"kl": kl.mean().item()}
+        for name, mask in (("reset", reset), ("non_reset", ~reset)):
+            count = int(mask.sum().item())
+            metrics[name + "_count"] = count
+            # Absent groups are omitted, never reported as a misleading zero.
+            if count:
+                metrics["kl_" + name] = kl[mask].mean().item()
+        return metrics
+
+    @torch.no_grad()
+    def rollout_diagnostics(self, prefix, include_latent=False, chunk_size=4096):
+        """Evaluate the complete rollout without sampling actions/changing RNG.
+
+        Chunking bounds GPU memory. Only the small KL/latent tensors are kept
+        for exact whole-rollout reductions, including the latent median.
+        """
+        if self.storage.step != self.storage.num_transitions_per_env:
+            raise RuntimeError("Diagnostics require a complete rollout")
+        obs = self.storage.observations.flatten(0, 1)
+        critic = self.storage.privileged_observations
+        critic = obs if critic is None else critic.flatten(0, 1)
+        old_mu = self.storage.mu.flatten(0, 1)
+        old_sigma = self.storage.sigma.flatten(0, 1)
+        old_values = self.storage.values.flatten(0, 1)
+        kls, latents = [], []
+        value_error = obs.new_zeros(())
+        for start in range(0, obs.shape[0], chunk_size):
+            stop = start + chunk_size
+            mean = self.actor_critic.act_inference(obs[start:stop])
+            kls.append(self._kl_per_sample(
+                mean, self.actor_critic.std, old_mu[start:stop], old_sigma[start:stop]
+            ))
+            if include_latent:
+                values = self.actor_critic.evaluate(critic[start:stop])
+                value_error = torch.maximum(
+                    value_error, (values - old_values[start:stop]).abs().max()
+                )
+                _, latent = self.actor_critic.estimator.get_latent(obs[start:stop])
+                latents.append(latent)
+        kl = torch.cat(kls)
+        metrics = {
+            prefix + "_" + name: value
+            for name, value in self._grouped_kl(kl, self.storage.dones).items()
+        }
+        metrics[prefix + "_kl_sample_max"] = kl.max().item()
+        if include_latent:
+            metrics[prefix + "_value_max_abs_error"] = value_error.item()
+            metrics.update(self.actor_critic.estimator.latent_statistics(torch.cat(latents)))
+        return metrics
+
     def update(self):
+        # This audit happens before *any* estimator/PPO update, resets included.
+        rollout_metrics = self.rollout_diagnostics("pre_update", include_latent=True)
+        self.last_minibatch_diagnostics = []
         totals = {
             "value": 0.0,
             "surrogate": 0.0,
@@ -125,7 +192,7 @@ class MINEPPO:
         estimator_diagnostics = {}
         updates = 0
         generator = self.storage.mini_batch_generator(
-            self.num_mini_batches, self.num_learning_epochs
+            self.num_mini_batches, self.num_learning_epochs, include_dones=True
         )
 
         for batch in generator:
@@ -140,6 +207,7 @@ class MINEPPO:
                 old_actions_log_prob_batch,
                 old_mu_batch,
                 old_sigma_batch,
+                dones_batch,
             ) = batch
 
             self.actor_critic.act(obs_batch)
@@ -150,16 +218,11 @@ class MINEPPO:
             entropy_batch = self.actor_critic.entropy
 
             with torch.inference_mode():
-                kl = torch.sum(
-                    torch.log(sigma_batch / old_sigma_batch + 1e-5)
-                    + (
-                        torch.square(old_sigma_batch)
-                        + torch.square(old_mu_batch - mu_batch)
-                    )
-                    / (2.0 * torch.square(sigma_batch))
-                    - 0.5,
-                    dim=-1,
-                ).mean().item()
+                kl_samples = self._kl_per_sample(
+                    mu_batch, sigma_batch, old_mu_batch, old_sigma_batch
+                )
+                batch_metrics = self._grouped_kl(kl_samples, dones_batch)
+                kl = batch_metrics["kl"]
             if kl_first is None:
                 kl_first = kl
             kl_max = max(kl_max, kl)
@@ -170,6 +233,15 @@ class MINEPPO:
                     self.learning_rate = min(1e-2, self.learning_rate * 1.5)
                 for group in self.optimizer.param_groups:
                     group["lr"] = self.learning_rate
+
+            batch_metrics.update(
+                update=updates + 1,
+                epoch=updates // self.num_mini_batches + 1,
+                learning_rate=float(self.optimizer.param_groups[0]["lr"]),
+            )
+            batch_metrics["lr_at_floor"] = int(
+                batch_metrics["learning_rate"] <= 1e-5 * (1.0 + 1e-6)
+            )
 
             (
                 estimation_loss,
@@ -199,6 +271,8 @@ class MINEPPO:
                     / (2.0 * torch.square(sigma_batch)),
                     dim=-1,
                 ).mean().item()
+            batch_metrics["kl_estimator_shift"] = kl_estimator_shift
+            self.last_minibatch_diagnostics.append(batch_metrics)
             for name, value in self.actor_critic.estimator.last_diagnostics.items():
                 estimator_diagnostics[name] = (
                     estimator_diagnostics.get(name, 0.0) + value
@@ -256,10 +330,31 @@ class MINEPPO:
             totals["kl_estimator_shift"] += kl_estimator_shift
             updates += 1
 
-        self.storage.clear()
         if updates == 0:
             raise RuntimeError("MINEPPO received no mini-batches")
+        rollout_metrics.update(self.rollout_diagnostics("post_update"))
+        self.storage.clear()
         totals.update(estimator_diagnostics)
         means = {name: value / updates for name, value in totals.items()}
         means.update(kl_first=kl_first, kl_max=kl_max)
+        for name in ("reset", "non_reset"):
+            count = sum(row[name + "_count"] for row in self.last_minibatch_diagnostics)
+            means["update_" + name + "_count"] = count
+            if count:
+                means["kl_" + name] = sum(
+                    row.get("kl_" + name, 0.0) * row[name + "_count"]
+                    for row in self.last_minibatch_diagnostics
+                ) / count
+        rates = [row["learning_rate"] for row in self.last_minibatch_diagnostics]
+        means.update(
+            learning_rate_min=min(rates),
+            learning_rate_max=max(rates),
+            learning_rate_mean=sum(rates) / updates,
+            learning_rate_floor_fraction=sum(
+                row["lr_at_floor"] for row in self.last_minibatch_diagnostics
+            ) / updates,
+        )
+        # Latent health is measured on the whole rollout before learning, not
+        # by averaging mini-batch medians or per-dimension standard deviations.
+        means.update(rollout_metrics)
         return means

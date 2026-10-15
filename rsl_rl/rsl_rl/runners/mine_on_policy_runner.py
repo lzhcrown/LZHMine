@@ -86,7 +86,10 @@ class MINEOnPolicyRunner:
         self.tot_timesteps = 0
         self.tot_time = 0.0
         self.current_learning_iteration = 0
-        self.env.reset()
+        # Reusing an environment after rollout also resets tensors allocated
+        # by step() under inference_mode. Match the collection context.
+        with torch.inference_mode():
+            self.env.reset()
 
     def learn(self, num_learning_iterations, init_at_random_ep_len=False):
         if self.log_dir is not None and self.writer is None:
@@ -114,8 +117,10 @@ class MINEOnPolicyRunner:
         current_lengths = torch.zeros(self.env.num_envs, device=self.device)
 
         first_iteration = self.current_learning_iteration
+        self._learn_start_time = self.tot_time
         final_iteration = first_iteration + num_learning_iterations
-        for iteration in range(first_iteration, final_iteration):
+        # All externally recorded iterations count completed PPO updates.
+        for iteration in range(first_iteration + 1, final_iteration + 1):
             collection_start = time.time()
             with torch.inference_mode():
                 for _ in range(self.num_steps_per_env):
@@ -163,7 +168,7 @@ class MINEOnPolicyRunner:
 
             learning_start = time.time()
             losses = self.alg.update()
-            self.current_learning_iteration = iteration + 1
+            self.current_learning_iteration = iteration
             learning_time = time.time() - learning_start
             if self.log_dir is not None:
                 self._log(
@@ -177,6 +182,7 @@ class MINEOnPolicyRunner:
                     rewbuffer,
                     lenbuffer,
                 )
+                self._save_best_policy(iteration, rewbuffer, lenbuffer)
                 if iteration % self.save_interval == 0:
                     self.save(
                         os.path.join(
@@ -184,7 +190,6 @@ class MINEOnPolicyRunner:
                             f"model_{iteration}.pt",
                         )
                     )
-                self._save_best_policy(iteration, rewbuffer, lenbuffer)
             ep_infos.clear()
 
         self.current_learning_iteration = final_iteration
@@ -209,10 +214,10 @@ class MINEOnPolicyRunner:
             "train_cfg": self.train_cfg,
             "env_cfg": self.env_cfg_dict,
         }
-        with open(os.path.join(self.log_dir, "run_info.json"), "w") as stream:
+        with open(os.path.join(self.log_dir, "run_info.json"), "w", encoding="utf-8") as stream:
             json.dump(run_info, stream, indent=2, default=str)
         if self.git_state.get("dirty"):
-            with open(os.path.join(self.log_dir, "git_diff.patch"), "w") as stream:
+            with open(os.path.join(self.log_dir, "git_diff.patch"), "w", encoding="utf-8") as stream:
                 stream.write(git_diff(SOURCE_DIR))
 
     def _save_best_policy(self, iteration, rewbuffer, lenbuffer):
@@ -360,15 +365,13 @@ class MINEOnPolicyRunner:
         for name in ("gate_entropy", "gate_batch_entropy", "mode_proto_max_cos"):
             if name in losses:
                 metrics[f"ModeGate/{name}"] = self._scalar(losses[name])
-        for name in ("kl_mean", "kl_max", "kl_first", "kl_estimator_shift"):
-            metrics[f"Diagnostics/{name}"] = self._scalar(losses[name])
-        for name in (
-            "latent_std",
-            "latent_cos_to_mean",
-            "swap_vs_uniform",
-            "swav_perplexity",
-        ):
-            metrics[f"Latent/{name}"] = self._scalar(losses[name])
+        for name, value in losses.items():
+            if name.startswith(("kl_", "pre_update_", "post_update_", "update_")):
+                metrics[f"Diagnostics/{name}"] = self._scalar(value)
+            elif name.startswith("learning_rate_"):
+                metrics[f"LearningRate/{name[len('learning_rate_'):]}"] = self._scalar(value)
+            elif name.startswith("latent_") or name in ("swap_vs_uniform", "swav_perplexity"):
+                metrics[f"Latent/{name}"] = self._scalar(value)
         if not self.alg.actor_critic.use_mode_gate:
             metrics = {
                 name: value for name, value in metrics.items()
@@ -395,6 +398,16 @@ class MINEOnPolicyRunner:
         episode_metrics = self._episode_metrics(ep_infos)
         metrics.update(episode_metrics)
 
+        # One append per iteration, with every mini-batch retained for audits.
+        # Missing reset/non-reset groups have count=0 and no corresponding KL.
+        record = {
+            "iteration": iteration,
+            "metrics": metrics,
+            "minibatches": self.alg.last_minibatch_diagnostics,
+        }
+        with open(os.path.join(self.log_dir, "training_diagnostics.jsonl"), "a", encoding="utf-8") as stream:
+            stream.write(json.dumps(record, allow_nan=False) + "\n")
+
         if self.writer is not None:
             for name, value in metrics.items():
                 self.writer.add_scalar(name, value, iteration)
@@ -405,10 +418,11 @@ class MINEOnPolicyRunner:
 
         width = 92
         pad = 44
-        completed_iterations = iteration - first_iteration + 1
-        remaining_iterations = max(final_iteration - iteration - 1, 0)
+        completed_iterations = iteration - first_iteration
+        remaining_iterations = max(final_iteration - iteration, 0)
         eta = (
-            self.tot_time / max(completed_iterations, 1) * remaining_iterations
+            (self.tot_time - self._learn_start_time)
+            / max(completed_iterations, 1) * remaining_iterations
         )
         title = f" Learning iteration {iteration}/{final_iteration} "
         log_lines = [
@@ -436,6 +450,11 @@ class MINEOnPolicyRunner:
                 f"{losses['kl_first']:.2e}"
             ),
             f"{'KL from estimator step:':>{pad}} {losses['kl_estimator_shift']:.4f}",
+            (
+                f"{'Pre-update KL / reset samples:':>{pad}} "
+                f"{losses['pre_update_kl']:.2e} / {losses['pre_update_reset_count']}"
+            ),
+            f"{'Minibatch LR floor fraction:':>{pad}} {losses['learning_rate_floor_fraction']:.1%}",
             (
                 f"{'Latent std / cos to mean:':>{pad}} "
                 f"{losses['latent_std']:.4f} / {losses['latent_cos_to_mean']:.4f}"
@@ -522,6 +541,9 @@ class MINEOnPolicyRunner:
                     self.alg.actor_critic.estimator.optimizer.state_dict()
                 ),
                 "iter": self.current_learning_iteration,
+                "iteration_semantics": "completed_updates",
+                "tot_timesteps": self.tot_timesteps,
+                "tot_time": self.tot_time,
                 "best_mean_reward": self.best_mean_reward,
                 "infos": infos,
                 "train_cfg": self.train_cfg,
@@ -539,13 +561,21 @@ class MINEOnPolicyRunner:
         self.alg.actor_critic.load_state_dict(checkpoint["model_state_dict"])
         if load_optimizer:
             self.alg.optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+            # The scheduler reads this attribute and overwrites optimizer lr
+            # on its next step. Restore it from the optimizer, including for
+            # legacy checkpoints which have no explicit learning-rate field.
+            self.alg.learning_rate = float(self.alg.optimizer.param_groups[0]["lr"])
             estimator_state = checkpoint.get("estimator_optimizer_state_dict")
             if estimator_state is not None:
                 self.alg.actor_critic.estimator.optimizer.load_state_dict(
                     estimator_state
                 )
+            estimator = self.alg.actor_critic.estimator
+            estimator.learning_rate = float(estimator.optimizer.param_groups[0]["lr"])
         self.current_learning_iteration = checkpoint.get("iter", 0)
         self.best_mean_reward = checkpoint.get("best_mean_reward", -float("inf"))
+        self.tot_timesteps = checkpoint.get("tot_timesteps", 0)
+        self.tot_time = checkpoint.get("tot_time", 0.0)
         return checkpoint.get("infos")
 
     def get_inference_policy(self, device=None):

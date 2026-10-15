@@ -474,6 +474,25 @@ class MINEEstimator(nn.Module):
             mean_mode_probs[self.HYBRID_MODE].item(),
         )
 
+    @staticmethod
+    @torch.no_grad()
+    def latent_statistics(latent: torch.Tensor) -> Dict[str, float]:
+        """Population statistics on the actual policy latent, also for batch size 1."""
+        std = latent.std(dim=0, unbiased=False)
+        mean_direction = F.normalize(latent.mean(dim=0, keepdim=True), dim=-1)
+        cosine = (latent @ mean_direction.T).flatten()
+        metrics = {
+            "latent_std": std.mean().item(),
+            "latent_std_min": std.min().item(),
+            "latent_cos_to_mean": cosine.mean().item(),
+            "latent_cos_to_mean_median": cosine.quantile(0.5).item(),
+        }
+        metrics.update({
+            f"latent_std_dim_{index:02d}": value
+            for index, value in enumerate(std.cpu().tolist())
+        })
+        return metrics
+
     @torch.no_grad()
     def _diagnostics(
         self,
@@ -490,15 +509,13 @@ class MINEEstimator(nn.Module):
         (swap loss no better than uniform predictions, log(K)/K).
         """
         _, latent, _, _ = self._source(history)
-        mean_direction = F.normalize(latent.mean(dim=0, keepdim=True), dim=-1)
         num_prototypes = source_scores.shape[-1]
         usage = torch.bincount(
             source_scores.argmax(dim=-1), minlength=num_prototypes
         ).float()
         usage /= usage.sum()
         diagnostics = {
-            "latent_std": latent.std(dim=0).mean().item(),
-            "latent_cos_to_mean": (latent @ mean_direction.T).mean().item(),
+            **self.latent_statistics(latent),
             "swav_perplexity": torch.exp(
                 -(usage * usage.clamp_min(1e-12).log()).sum()
             ).item(),

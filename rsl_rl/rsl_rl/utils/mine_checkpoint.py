@@ -61,7 +61,8 @@ def config_to_dict(obj):
 def _git(path, *args):
     return subprocess.run(
         ["git", "-C", path, *args],
-        capture_output=True, text=True, check=True, timeout=10,
+        capture_output=True, text=True, encoding="utf-8", errors="replace",
+        check=True, timeout=10,
     ).stdout
 
 
