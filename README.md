@@ -1,225 +1,119 @@
-# Nezha Dual-Encoder Locomotion
+# Nezha MoE-CTS · Isaac Gym
 
-本仓库是面向 Nezha 轮腿机器人的训练、Isaac Gym play、策略导出、MuJoCo sim-to-sim 与真机接入框架。默认任务为 `nezha_mine`，不注册也不依赖其他机器人任务。
+本分支的唯一机器人训练任务是 `nezha_moe_cts`。教师–学生网络与 MoE 门控采用 `legbot_lab` 的 `WF-CTS-MOE` 设计（参考提交 `daff9fbe3d3eed222b9e39e1dcefa1996f690834`），运行平台为 Isaac Gym。旧 MINE 任务、模型、训练／play／导出入口和部署 runtime 已删除；已有训练日志和模型文件不作删除，新架构需要重新训练。
 
-## 方法与代码结构
+## 网络与训练
 
-门控模态双编码器以 `wheel_gym_CQ/logs/nezha3_mine/Apr10_11-39-09_trimesh_baseline_门控——三类` 保存的实际训练源码为基准，并按 `LZHMine` 分层：
+- 教师：295 维特权观测 → MLP [512, 256] → 32 维 L2 归一化 latent。
+- 学生：228 维本体历史 → 8 个专家与 Softmax gate → 加权求和 → 32 维 L2 归一化 latent。专家共享特征主干，后接分组线性输出；隐藏层配置为 [512, 256, 256]。
+- 共享 Actor：当前本体观测 57 + latent 32 = 89 维，隐藏层 [512, 256, 128]，输出 16 维动作。
+- 共享 Critic：当前特权观测 295 + detached latent 32 = 327 维，隐藏层 [512, 256, 128]。
+- 默认 75% 环境由教师控制，25% 由学生控制。两组都采样训练共享 Actor/Critic，PPO 更新教师编码器但不更新学生编码器，价值损失不回传编码器。
+- 每轮先完成全部 PPO 更新，再用学生控制环境中保存的**同一时刻**本体／特权观测进行 latent MSE 蒸馏，另加系数 0.01 的专家使用均衡损失。两个优化器分别保存和恢复。
+- PPO 的教师与学生 surrogate loss 分别取均值后相加；value/entropy 对合并批次取均值。默认 rollout 24 步、5 epochs、4 mini-batches、gamma 0.99、lambda 0.95。
+- gate 输出 `expert_0…expert_7` 的权重，专家没有预设的轮式／腿式／混合模式标签。
 
-- `rsl_rl/rsl_rl/modules/mine_estimator.py`：历史观测 source encoder、训练期 target encoder、可选三模态 soft gate、模态原型和 prototype swap loss。
-- `rsl_rl/rsl_rl/modules/mine_actor_critic.py`：估计值和 latent 与最新一帧本体观测融合后送入 actor；包含与在线推理完全一致的 TorchScript exporter。
-- `rsl_rl/rsl_rl/algorithms/mine_ppo.py`：保留原实现的 PPO 参数组和 estimator 独立优化器；策略路径会 detach estimator，因此不会在一次 mini-batch 中被 PPO 重复更新。
-- `rsl_rl/rsl_rl/runners/mine_on_policy_runner.py`：rollout、终止状态特权观测、日志和带网络配置的 checkpoint。
-- `rsl_rl/rsl_rl/utils/mine_checkpoint.py`：训练续训、play、导出共用的模型配置读取与旧 checkpoint 识别。
-- `legged_gym/envs/nezha/`：Nezha 16 维动作、65 维单帧观测、混合腿关节位置/轮关节速度控制与训练配置。
-- `deploy/deploy_mujoco/`：统一的 MuJoCo sim-to-sim 部署目录，包含配置、入口、策略运行时、部署策略快照、Nezha MJCF/mesh/地形资产及地形工具。
+## 默认观测：完全使用 WF 输入维数
 
-与原实验一致，所有新训练采用 `oldest-first` 历史顺序。Actor 历史为 `2 x 65 = 130`，critic 历史为 `3 x 375 = 1125`。Actor 使用最后的最新帧，门控网络使用最前的最旧帧。新训练设置 `is_privileged_obs=True`，target encoder 使用下一时刻 critic 历史中最新的完整 375 维特权帧，网络为 `375 → 256 → 128 → 64 → 16`。
+下面顺序即网络输入顺序。scale 在原始值加噪声、裁剪后使用。
 
-特权帧保留原有排列：`[0:65]` 为无噪声本体观测，`[65:371]` 为 306 维额外特权观测，`[371:375]` 为 4 维估计监督真值（机体线速度 3 维、基座高度 1 维）。306 维包括关节加速度 16、力矩 16、基座质量 1、质心 3、KP 16、KD 16、全身接触力 51、地形高度 187。Target 使用仿真真值；source encoder 仍从 130 维本体历史中预测这 4 个量。
+| 输入项 | 本体单帧 | 特权单帧 | 本体 scale | 特权 scale |
+|---|---:|---:|---|---|
+| 机体线速度 | — | 3 | — | 2 |
+| 机体角速度 | 3 | 3 | 0.25 | 0.25 |
+| 机体系重力投影 | 3 | 3 | 1 | 1 |
+| x/y/yaw 速度指令 | 3 | 3 | [2, 2, 0.25] | 1 |
+| 相对默认姿态的关节位置 | 16 | 16 | 1 | 1 |
+| 关节速度 | 16 | 16 | 0.05 | 0.05 |
+| 上一次动作（控制缩放前） | 16 | 16 | 1 | 1 |
+| 关节加速度 | — | 16 | — | 0.0001 |
+| 施加的关节力矩 | — | 16 | — | 0.01 |
+| 轮接触力历史特征 | — | 16 | — | 0.001 |
+| 地形高度 | — | 187 | — | 2.5 |
+| **合计** | **57** | **295** | | |
 
-三种模态的固定编号为 `0=wheel`、`1=leg`、`2=hybrid`。Apr10 基准使用自标注门控损失，额外的语义锚定默认关闭。该基准还会在 `_reward_dof_vel` 中把四个轮速写为零，因此部署与 MuJoCo 的策略观测也会屏蔽这四个轮速；真实轮速仍用于轮电机 PD 力矩。
+学生使用 4 帧历史，共 **228** 维。采用 WF 的 **term-major、oldest-first** 顺序：先放某一观测项的 4 帧，再放下一项；不是把 4 个完整的 57 维帧直接串起来。Actor 当前帧从相同历史中提取，保证噪声一致；环境 reset 后用新 episode 的第一帧填满历史。
 
-`NezhaMINECfgPPO.policy.use_mode_gate` 控制门控，默认 `True`。无门控模式不创建门控网络参数或三模态原型，source latent 直接归一化后进入 Actor；模态损失与模态日志关闭，4 维估计监督和双编码器 prototype swap loss 继续训练。用于双编码器对齐的 32 个原型与三模态原型用途不同，会保留。两种模式都使用 375 维 target，部署时都只输入 130 维本体历史、输出 16 维动作。
+轮关节索引为 [3, 7, 11, 15]。这 4 个关节的位置观测恒为 0，轮速保留真实值。默认本体原始均匀噪声幅度：角速度 ±0.2、重力 ±0.05、关节位置 ±0.03、关节速度 ±2；轮位置仍为 0。特权输入不加噪声。
 
-## 环境准备
+接触特征为四轮接触力范数的 [最近三次最大值、当前、前一次、前两次]，共 16 维，按每个 0.005 s 物理步采样。高度使用 17×11 个 yaw 对齐点（x -0.8…0.8 m，y -0.5…0.5 m），按 WF 的 xy 网格顺序展开；值为机体高度减地面高度再减 0.5 m。高度原始值裁剪到 ±1，其余项默认 ±100，之后乘 scale。
 
-训练、play 和策略导出使用 Python 3.8 的 `.venv-train`；MuJoCo 使用 Python 3.11
-的 `.venv-sim`。安装 `uv`：
+Isaac Gym 的高度来自原有 heightfield 邻点采样，接触来自 PhysX net contact tensor；它们与 Isaac Lab 的射线／接触传感器并非完全相同的数值实现。这里对齐输入定义、维数、顺序和预处理，保留 Nezha 的 URDF、地形课程、奖励与动力学随机化。腿部动作尺度为 0.25，轮速尺度为 **10**，控制频率 50 Hz。
 
-```bash
-curl -LsSf https://astral.sh/uv/install.sh | sh
-```
+## 训练、续训、play 和导出
 
-当前工作机已有的环境名为 `.venv`（训练/导出）和 `.venv-mujoco`（MuJoCo）；可直接激活对应环境，下面的安装流程用于新建环境。
-
-### Python 3.8 训练环境
-
-Isaac Gym Preview 4 默认放在仓库同级的 `../isaacgym/`：
-
-```bash
-uv python install 3.8
-uv venv .venv-train --python 3.8
-source .venv-train/bin/activate
-
-uv pip install \
-  torch==2.0.1 \
-  torchvision==0.15.2 \
-  --index-url https://download.pytorch.org/whl/cu118
-
-uv pip install \
-  numpy==1.23.5 \
-  scipy==1.10.1 \
-  matplotlib==3.7.5 \
-  tensorboard==2.14.0 \
-  wandb==0.24.2 \
-  pyyaml pillow imageio ninja setuptools
-
-uv pip install --no-deps --no-build-isolation \
-  -e ../isaacgym/python \
-  -e ./rsl_rl \
-  -e .
-```
-
-### Python 3.11 MuJoCo 环境
+在仓库根目录、已安装 Isaac Gym 的训练环境执行。本机可使用 `.venv-train/bin/python`，并设置：
 
 ```bash
-uv python install 3.11
-uv venv .venv-sim --python 3.11
-source .venv-sim/bin/activate
-uv pip install "mujoco==3.1.2" torch numpy pyyaml
+export PYTHONPATH="$PWD/rsl_rl:$PWD"
+export PATH="$PWD/.venv-train/bin:$PATH"
 ```
 
-## 训练
+训练与续训：
 
 ```bash
-source .venv-train/bin/activate
-python legged_gym/scripts/train_nezha_mine.py --headless
+python legged_gym/scripts/train_nezha_moe_cts.py --headless --no_wandb
+
+python legged_gym/scripts/train_nezha_moe_cts.py --headless --no_wandb \
+  --resume --load_run <运行目录名> --checkpoint -1
 ```
 
-同一个入口可随时选择新实验的门控模式，命令行优先于配置文件：
+默认日志目录为 `logs/nezha_moe_cts/<时间>_<run_name>/`。默认配置启用 W&B；`--no_wandb` 使用本地 TensorBoard。日志包含教师／学生回报、PPO 损失、蒸馏损失、均衡损失、gate entropy 和各专家使用率。训练需至少两个环境；当前 runner 面向单设备训练。
+
+Checkpoint 保存网络与观测 schema、环境配置、控制参数、两个优化器和训练计数。续训先恢复观测配置再创建环境，可以用 `--num_envs` 调整并行数量；物理状态和历史重新初始化，不是逐物理步确定性恢复。旧架构 checkpoint 会明确报错。
+
+学生 play（默认一个环境）与独立导出：
 
 ```bash
-# 有门控
-python legged_gym/scripts/train_nezha_mine.py --headless --mode_gate on
+python legged_gym/scripts/play_nezha_moe_cts.py \
+  --load_run <运行目录名> --checkpoint -1 --play_num_envs 1
 
-# 无门控
-python legged_gym/scripts/train_nezha_mine.py --headless --mode_gate off
+python legged_gym/scripts/export_nezha_moe_cts.py \
+  --run <运行目录名>
+
+# 也可指定 checkpoint 和输出路径；此导出入口不需要 Isaac Gym/GPU
+python legged_gym/scripts/export_nezha_moe_cts.py \
+  --checkpoint /absolute/path/model_200.pt --output /absolute/path/policy.pt
 ```
 
-不传 `--mode_gate` 时，新训练使用配置中的 `use_mode_gate`；续训和 play 自动采用 checkpoint 的模式。改变结构需要启动新训练；对旧 checkpoint 指定相反的模式会明确报错，不会静默跳过门控。
+导出的 `policy.pt` 只包含学生 MoE、共享 Actor 及必要元数据，输入 [N, 228]、输出 [N, 16]。历史由 runtime 管理；教师、Critic 和优化器不进入部署模型。导出会检查 TorchScript 与 checkpoint 学生输出一致，同时写出便于查看的 `policy.json`。
 
-断点续训：
+MuJoCo：
 
 ```bash
-python legged_gym/scripts/train_nezha_mine.py \
-  --resume \
-  --load_run <运行目录名> \
-  --checkpoint -1 \
-  --headless
+.venv-sim/bin/python deploy/deploy_mujoco/deploy_mujoco.py \
+  -c nezha_moe_cts.yaml --policy /absolute/path/exported/policy.pt \
+  --headless --duration 3 --vx 0.5
 ```
 
-新训练输出位于 `logs/nezha3_mine/<时间>_<run_name>_gated_target375/` 或 `..._ungated_target375/`，方便区分实验。Checkpoint 保存完整策略配置，续训/导出会恢复门控、target 输入宽度、网络隐藏层和历史顺序。
+传感器观测、裁剪、缩放和历史顺序由模型中的 schema 驱动。部署 runtime 校验模型附带的名义姿态、PD 增益、关节顺序、控制周期和动作尺度等控制参数。详细说明见 [deploy/readme.md](deploy/readme.md)。
 
-修改维度后的短训练检查（2 次完整 rollout/PPO 更新）：
+## 后续修改入口
+
+| 内容 | 文件 |
+|---|---|
+| 观测项、scale、noise、clip、历史排列的统一定义 | `rsl_rl/rsl_rl/utils/cts_observations.py` |
+| Isaac Gym 原始观测采集、接触历史、reset | `legged_gym/envs/nezha/nezha_moe_cts_env.py` |
+| 历史帧数、专家数、latent、网络层宽、训练参数 | `legged_gym/envs/nezha/nezha_moe_cts_config.py` |
+| Nezha 控制、奖励、随机化与资产配置 | `legged_gym/envs/nezha/nezha_robot_config.py` |
+| MoE 与教师／学生 Actor-Critic | `rsl_rl/rsl_rl/modules/moe.py`、`actor_critic_moe_cts.py` |
+| 两阶段训练与 rollout | `rsl_rl/rsl_rl/algorithms/moe_cts.py`、`storage/rollout_storage_cts.py` |
+
+调整历史长度用 `NezhaMoECTSCfg.env.frame_stack`；调整观测项可修改 `default_observation_config()`，或在 `cfg.env.observation_config` 提供完整 schema。维数从 schema 自动推导。新增传感量时，需同时实现环境和部署的原始量采集；不要只修改维数常量。CTS 实际预处理不读取旧基类的 `normalization.obs_scales`。
+
+## 验证
 
 ```bash
-python legged_gym/scripts/train_nezha_mine.py \
-  --headless --num_envs 16 --max_iterations 2 --no_wandb \
-  --mode_gate off --run_name startup_check
+OMP_NUM_THREADS=1 PYTHONPATH="$PWD/rsl_rl:$PWD" \
+  .venv-train/bin/python -m pytest legged_gym/tests tests -q
 ```
 
-改用 `--mode_gate on` 可检查有门控模式。旧的 65 维 target checkpoint 也可自动识别，并按原有结构续训/导出；将旧的 65 维实验改为 375 维需要重新训练。没有配置元数据的旧 checkpoint 默认按历史 Nezha 网络构造，历史顺序默认 `oldest_first`；更早的 `newest_first` 模型需使用显式历史顺序参数。
+自动化验证覆盖输入维数、逐项预处理、轮速、历史／reset、梯度隔离、同刻蒸馏、尾批次完整采样、checkpoint 续训、TorchScript 一致性和部署控制参数校验。短时仿真仅验证接口与数值运行，策略运动表现需要正式训练与评估。
 
-## Isaac Gym Play 与导出
-
-Play：
+实际 Isaac Gym 短时物理回归（需训练环境，默认 16 个环境和小地形）：
 
 ```bash
-source .venv-train/bin/activate
-python legged_gym/scripts/play_nezha_mine.py \
-  --load_run <运行目录名> \
-  --checkpoint -1
+TORCH_EXTENSIONS_DIR=/tmp/cts_torch_extensions python legged_gym/tests/test_env.py --headless --rl_device cpu --sim_device cpu --pipeline cpu --smoke_terrain trimesh
 ```
 
-Play 自动识别门控；无门控时继续显示速度/高度估计，不生成模态分类和权重。仅在旧模型历史顺序不同的情况下使用 `--checkpoint_history_order newest_first`。
-
-导出策略：
-
-```bash
-# 指定 logs/nezha3_mine/ 下的运行目录名
-python legged_gym/scripts/export_nezha_mine.py --run <运行目录名>
-
-cp logs/nezha3_mine/exported/<运行目录名>/policy.pt \
-  deploy/deploy_mujoco/nezha/policy/policy.pt
-```
-
-直接导出单个 checkpoint：
-
-```bash
-python legged_gym/scripts/export_nezha_mine.py \
-  --checkpoint logs/model_20000.pt \
-  --output deploy/deploy_mujoco/nezha/policy/policy.pt
-```
-
-导出自动识别门控模式和 65/375 维 target。新导出模型携带门控状态、本体输入维度和历史顺序；旧模型仍受支持。要并存两个实验，可分别导出到 `policy_gated.pt` 和 `policy_ungated.pt`，无需改动导出代码。
-
-## MuJoCo Sim-to-Sim
-
-机器人固定出生在 `x=-5, y=0` 的公共平地区，前方是3条横向一字
-排开的评测路线：
-
-- `y=-5 m`：5级20 cm楼梯，踏面70 cm，最高1.0 m；
-- `y=0 m`：高0.40 m、长6.0 m的矩形高台；
-- `y=+5 m`：170个随机凸起组成的确定性碎石路，最高12 cm。
-
-Linux：
-
-```bash
-source .venv-sim/bin/activate
-python deploy/deploy_mujoco/deploy_mujoco.py
-```
-
-默认持续运行，关闭仿真窗口后退出。
-
-默认配置加载 `nezha/policy/policy.pt`，`mode_gate: auto` 从模型读取模式。切换实验只需选择对应文件（相对路径以 `deploy/deploy_mujoco/` 为基准）：
-
-```bash
-python deploy/deploy_mujoco/deploy_mujoco.py --policy nezha/policy/policy_gated.pt
-python deploy/deploy_mujoco/deploy_mujoco.py --policy nezha/policy/policy_ungated.pt
-
-# 无窗口验证：非零速度命令会真正运行策略，而非停留在零指令待机状态
-python deploy/deploy_mujoco/deploy_mujoco.py \
-  --policy nezha/policy/policy_ungated.pt --headless --duration 2 --vx 0.3
-```
-
-也可以通过 `--mode-gate on/off` 或 YAML 的 `mode_gate: on/off` 验证所加载的模型是否符合预期；该选项只校验模式，不修改模型内部计算。YAML 中请使用字符串 `"on"` / `"off"`，避免解析成布尔值。模式不匹配会报错。无门控时跳过门控调用及日志；关节控制、观测缩放和动作维度采用同一套实现。`history_steps: 2` 与 `history_order: auto` 适用于这两种默认模型。
-
-macOS：
-
-```bash
-source .venv-sim/bin/activate
-mjpython deploy/deploy_mujoco/deploy_mujoco.py
-```
-
-键盘控制：`W/S` 前后、`A/D` 横移、`Q/E` 转向、空格停止、`R` 复位。
-
-## 真机部署接入
-
-真机侧只需把机器人 SDK 的状态读取和力矩发送接到 `NezhaPolicyRuntime`：
-
-```python
-from deploy.deploy_mujoco.runtime import NezhaPolicyRuntime
-
-runtime = NezhaPolicyRuntime(
-    policy_path="deploy/deploy_mujoco/nezha/policy/policy.pt",
-    default_dof_pos=default_dof_pos,
-    p_gains=p_gains,
-    d_gains=d_gains,
-    torque_limits=torque_limits,
-)
-
-actions, torques = runtime.step(
-    base_ang_vel=imu_gyro_body,
-    projected_gravity=gravity_body,
-    commands=[vx, vy, yaw_rate],
-    dof_pos=joint_positions,
-    dof_vel=joint_velocities,
-)
-# robot_sdk.send_torques(torques.cpu().numpy())
-```
-
-参数模板与 MuJoCo 配置统一放在
-`deploy/deploy_mujoco/configs/nezha_mine.yaml`。上真机前必须再核对实际关节顺序、正方向、零位、减速比、力矩限制、急停与通信 watchdog；框架不会假定某一种厂商通信 SDK。
-
-## 回归测试与 Git 文件管理
-
-在训练环境运行门控/无门控的 PPO 更新、TorchScript 导出、旧模型兼容、元数据与优化器恢复、部署推理检查：
-
-```bash
-python -m unittest legged_gym.tests.test_mine_modes -v
-```
-
-`.gitignore` 忽略虚拟环境（包括 `.venv-mujoco`）、训练日志、checkpoint/导出权重、录像截图、缓存、构建产物和本机账户/代理状态。权重留在本地，通过运行目录和文件名选择。
-
-URDF/Xacro、配套 STL/OBJ 网格、MJCF/XML、配置文件、地形生成脚本，以及仿真场景实际引用的地形 `.bin` / `.json` 继续纳入 Git。不要整体忽略 `resources/` 或机器人资源目录，否则新机器无法加载机器人和地形。
+通用入口 `legged_gym/scripts/train.py` 和 `play.py` 也分别转入上述 CTS 训练与学生评估流程。

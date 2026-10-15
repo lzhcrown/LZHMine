@@ -33,6 +33,7 @@ import copy
 import torch
 import numpy as np
 import random
+import re
 from isaacgym import gymapi
 from isaacgym import gymutil
 import torch.nn.functional as F
@@ -56,10 +57,10 @@ def class_to_dict(obj) -> dict:
         result[key] = element
     return result
 
-def update_class_from_dict(obj, dict):
-    for key, val in dict.items():
+def update_class_from_dict(obj, values):
+    for key, val in values.items():
         attr = getattr(obj, key, None)
-        if isinstance(attr, type):
+        if isinstance(val, dict) and hasattr(attr, "__dict__"):
             update_class_from_dict(attr, val)
         else:
             setattr(obj, key, val)
@@ -102,32 +103,27 @@ def parse_sim_params(args, cfg):
     return sim_params
 
 def get_load_path(root, load_run=-1, checkpoint=-1):
-    try:
-        runs = os.listdir(root)
-        #TODO sort by date to handle change of month
-        runs.sort()
-        if 'exported' in runs: runs.remove('exported')
-        last_run = os.path.join(root, runs[-1])
-    except:
-        raise ValueError("No runs in this directory: " + root)
-    if load_run==-1:
-        load_run = last_run
+    if load_run in (-1, "-1", None):
+        if not os.path.isdir(root):
+            raise ValueError("No runs in this directory: " + str(root))
+        runs = [os.path.join(root, name) for name in os.listdir(root)
+                if name not in ("exported", "play") and os.path.isdir(os.path.join(root, name))]
+        runs.sort(key=os.path.getmtime, reverse=True)
     else:
-        load_run = os.path.join(root, load_run)
-
-    if checkpoint == -1:
-        models = [file for file in os.listdir(load_run) if 'model' in file]
-        models.sort(key=lambda m: '{0:0>15}'.format(m))
-        model = models[-1]
-    elif checkpoint == "best_policy":
-        model = "best_policy.pt"
-    elif isinstance(checkpoint, str) and checkpoint.startswith("checkpoint_"):
-        model = f"{checkpoint}.pt"
-    else:
-        model = "model_{}.pt".format(checkpoint) 
-
-    load_path = os.path.join(load_run, model)
-    return load_path
+        runs = [os.path.join(root, str(load_run))]
+    for run in runs:
+        if checkpoint in (-1, "-1"):
+            candidates = [(int(match.group(1)), name) for name in os.listdir(run)
+                          for match in [re.fullmatch(r"model_(\d+)\.pt", name)] if match]
+            if not candidates:
+                continue
+            model = max(candidates)[1]
+        else:
+            model = "best_policy.pt" if checkpoint == "best_policy" else "model_{}.pt".format(checkpoint)
+        path = os.path.join(run, model)
+        if os.path.isfile(path):
+            return path
+    raise ValueError("No matching model checkpoint in " + str(root))
 
 def update_cfg_from_args(env_cfg, cfg_train, args):
     # seed
@@ -138,11 +134,6 @@ def update_cfg_from_args(env_cfg, cfg_train, args):
         if args.seed is not None:
             env_cfg.seed = args.seed
     if cfg_train is not None:
-        mode_gate = getattr(args, "mode_gate", None)
-        if mode_gate is not None:
-            if mode_gate not in ("on", "off"):
-                raise ValueError("--mode_gate must be 'on' or 'off'")
-            cfg_train.policy.use_mode_gate = mode_gate == "on"
         if args.seed is not None:
             cfg_train.seed = args.seed
         # alg runner parameters
@@ -177,12 +168,11 @@ def update_cfg_from_args(env_cfg, cfg_train, args):
 def get_args(extra_custom_parameters=None):
     """Parse the common CLI and optional script-specific arguments.
 
-    Algorithm-specific entry points (for example Nezha-MINE play) can extend
+    Algorithm-specific entry points (for example Nezha CTS play) can extend
     the CLI without adding their controls to every training/play script.
     """
     custom_parameters = [
-        {"name": "--mode_gate", "type": str, "help": "MINE gate: on/off. Omit to use config for new runs or checkpoint mode for resume/play."},
-        {"name": "--task", "type": str, "default": "nezha_mine", "help": "Registered task to train or play."},
+        {"name": "--task", "type": str, "default": "nezha_moe_cts", "help": "Registered task to train or play."},
         {"name": "--resume", "action": "store_true", "default": False,  "help": "Resume training from a checkpoint"},
         {"name": "--experiment_name", "type": str,  "help": "Name of the experiment to run or load. Overrides config file if provided."},
         {"name": "--run_name", "type": str,  "help": "Name of the run. Overrides config file if provided."},
@@ -215,10 +205,10 @@ def get_args(extra_custom_parameters=None):
     return args
 
 def export_policy_as_jit(actor_critic, path):
-    if actor_critic.__class__.__name__ == 'MINEActorCritic':
-        from rsl_rl.modules import MINEPolicyExporter
+    if actor_critic.__class__.__name__ == 'ActorCriticMoECTS':
+        from rsl_rl.utils.cts_export import CTSStudentExporter
         os.makedirs(path, exist_ok=True)
-        exporter = MINEPolicyExporter(actor_critic).cpu()
+        exporter = CTSStudentExporter(actor_critic).cpu()
         exporter.export(os.path.join(path, 'policy.pt'))
     elif hasattr(actor_critic, 'estimator'):
         # assumes LSTM: TODO add GRU

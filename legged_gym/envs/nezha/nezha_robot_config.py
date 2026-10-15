@@ -1,26 +1,13 @@
-"""Training configuration for the Nezha gated-modal policy."""
+"""Robot, terrain, control and reward configuration for Nezha."""
 
 from legged_gym import LEGGED_GYM_ROOT_DIR
-from legged_gym.envs.base.legged_robot_config import LeggedRobotCfg, LeggedRobotCfgPPO
+from legged_gym.envs.base.legged_robot_config import LeggedRobotCfg
 
 
-class NezhaMINECfg(LeggedRobotCfg):
+class NezhaRobotCfg(LeggedRobotCfg):
     class env(LeggedRobotCfg.env):
         num_envs = 4096
         num_actions = 16
-        frame_stack = 2
-        critic_frame_stack = 3
-        history_order = "oldest_first"
-        num_one_step_observations = 65
-        num_observations = frame_stack * num_one_step_observations
-        num_height_observations = 187
-        # Complete privileged frame, aligned with wheel_gym_CQ:
-        # actor(65) + dof_acc(16) + torques(16) + base_mass(1)
-        # + base_com(3) + kp(16) + kd(16) + all-body contact forces(51)
-        # + terrain heights(187) + velocity/height estimation targets(4).
-        num_one_step_privileged_obs = 375
-        num_privileged_obs = critic_frame_stack * num_one_step_privileged_obs
-        estimation_target_indices = [371, 372, 373, 374]
         episode_length_s = 20
         fail_to_terminal_time_s = 0.6
 
@@ -53,10 +40,7 @@ class NezhaMINECfg(LeggedRobotCfg):
 
     class init_state(LeggedRobotCfg.init_state):
         pos = [0.0, 0.0, 0.60]
-        # The wheel_gym_CQ snapshot stores a zero quaternion.  Its reset path
-        # immediately replaces this with the yaw quaternion (identity for the
-        # configured zero yaw range); NezhaMINEEnv reproduces that behavior.
-        rot = [0.0, 0.0, 0.0, 0.0]
+        rot = [0.0, 0.0, 0.0, 1.0]
         rand_init_dof = False
         rand_init_dof_range = 0.0
         default_joint_angles = {
@@ -240,86 +224,3 @@ class NezhaMINECfg(LeggedRobotCfg):
             max_gpu_contact_pairs = 2**23
             default_buffer_size_multiplier = 5
             contact_collection = 2
-
-
-class NezhaMINECfgPPO(LeggedRobotCfgPPO):
-    seed = 10
-    runner_class_name = "MINEOnPolicyRunner"
-
-    class policy:
-        history_order = "oldest_first"
-        init_noise_std = 1.0
-        actor_hidden_dims = [512, 256, 128]
-        critic_hidden_dims = [512, 256, 128]
-        # Match wheel_gym_CQ's effective source network:
-        # 130 -> 256 -> 128 -> 64 -> (4 estimates + 16 latent).
-        enc_hidden_dims = [256, 128, 64]
-        tar_hidden_dims = [256, 128, 64]
-        # Train the target encoder on the complete 375-D privileged frame:
-        # 65 proprioceptive + 306 extra privileged + 4 estimation targets.
-        is_privileged_obs = True
-        # CLI override: --mode_gate on/off. Both modes use the same 375-D target.
-        use_mode_gate = True
-        latent_dim = 16
-        num_modes = 3
-        gate_hidden_dim = 64
-        num_prototypes = 32
-        temperature = 3.0
-        estimator_learning_rate = 1e-3
-        estimator_max_grad_norm = 10.0
-        mode_loss_coef = 0.5
-        # Disable LZHMine's later semantic anchoring to reproduce the original
-        # self-labelled three-way gate objective.
-        mode_semantic_cfg = {
-            "enabled": False,
-            "loss_coef": 0.0,
-            "mode_loss_coef": 0.50,
-            "command_slice": [6, 9],
-            "dof_vel_slice": [21, 37],
-            "action_slice": [49, 65],
-            "wheel_dof_indices": [3, 7, 11, 15],
-            "leg_dof_indices": [0, 1, 2, 4, 5, 6, 8, 9, 10, 12, 13, 14],
-            "wheel_activity_low": 0.05,
-            "wheel_activity_high": 0.20,
-            "leg_activity_low": 0.03,
-            "leg_activity_high": 0.12,
-            "static_command_threshold": 0.05,
-            "leg_action_delta_weight": 0.70,
-            "leg_velocity_weight": 0.30,
-        }
-        activation = "elu"
-
-    class algorithm(LeggedRobotCfgPPO.algorithm):
-        value_loss_coef = 1.0
-        use_clipped_value_loss = True
-        clip_param = 0.2
-        entropy_coef = 0.01
-        num_learning_epochs = 5
-        num_mini_batches = 4
-        learning_rate = 1e-3
-        schedule = "adaptive"
-        gamma = 0.99
-        lam = 0.95
-        desired_kl = 0.01
-        max_grad_norm = 1.0
-
-    class runner:
-        policy_class_name = "MINEActorCritic"
-        algorithm_class_name = "MINEPPO"
-        num_steps_per_env = 24
-        max_iterations = 100000
-        save_interval = 200
-        experiment_name = "nezha3_mine"
-        run_name = "trimesh_baseline_test"
-        wandb_enabled = True
-        wandb_project = "LZHMine"
-        # None uses the default account selected by `wandb login`.
-        wandb_entity = None
-        wandb_group = "nezha_mine"
-        wandb_tags = ["nezha", "mine", "isaac-gym"]
-        wandb_mode = "online"
-        wandb_notes = "Nezha gated-modal locomotion training"
-        resume = False
-        load_run = -1
-        checkpoint = -1
-        resume_path = None

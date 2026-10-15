@@ -1,4 +1,4 @@
-from .nezha_mine_config import NezhaMINECfg, NezhaMINECfgPPO
-from .nezha_mine_env import NezhaMINEEnv
+from .nezha_moe_cts_config import NezhaMoECTSCfg, NezhaMoECTSCfgPPO
+from .nezha_moe_cts_env import NezhaMoECTSEnv
 
-__all__ = ["NezhaMINECfg", "NezhaMINECfgPPO", "NezhaMINEEnv"]
+__all__ = ["NezhaMoECTSCfg", "NezhaMoECTSCfgPPO", "NezhaMoECTSEnv"]

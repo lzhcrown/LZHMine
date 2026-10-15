@@ -30,4 +30,4 @@
 
 from .ppo import PPO
 from .him_ppo import HIMPPO
-from .mine_ppo import MINEPPO
+from .moe_cts import MoECTS

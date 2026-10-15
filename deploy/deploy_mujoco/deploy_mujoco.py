@@ -1,4 +1,4 @@
-"""MuJoCo deployment runner for an exported Nezha MINE policy.
+"""MuJoCo deployment runner for an exported Nezha WF-CTS student.
 
 The model must expose a free base and the 16 joints listed in the YAML file.
 Torques are written through ``qfrc_applied``, so dedicated MJCF actuators are
@@ -24,7 +24,7 @@ REPO_ROOT = os.path.dirname(os.path.dirname(DEPLOY_DIR))
 if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
-from deploy.deploy_mujoco.runtime import NezhaPolicyRuntime
+from deploy.deploy_mujoco.runtime import NezhaCTSPolicyRuntime
 
 
 # Keep interactive commands inside the ranges used during training.
@@ -349,27 +349,20 @@ def run(args):
     )
     gyro_slice = _sensor_slice(mujoco, model, "base_gyro", 3)
 
-    runtime = NezhaPolicyRuntime(
+    runtime = NezhaCTSPolicyRuntime(
         policy_path=policy_path,
         default_dof_pos=cfg["default_dof_pos"],
         p_gains=cfg["p_gains"],
         d_gains=cfg["d_gains"],
         action_scale=cfg["action_scale"],
         wheel_velocity_scale=cfg["wheel_velocity_scale"],
-        history_steps=int(cfg.get("history_steps", 2)),
-        history_order=args.history_order or cfg.get("history_order", "auto"),
-        legacy_history_order=cfg.get(
-            "legacy_history_order", "newest_first"
-        ),
-        zero_wheel_velocity_observations=bool(
-            cfg.get("zero_wheel_velocity_observations", True)
-        ),
-        observation_scales=cfg.get("observation_scales"),
+        history_steps=cfg.get("history_steps"),
+        control_dt=1.0 / float(cfg.get("control_frequency_hz", 50)),
+        joint_names=cfg["joint_names"],
         torque_limits=cfg["torque_limits"],
         device=args.device,
-        mode_gate=args.mode_gate or cfg.get("mode_gate", "auto"),
     )
-    print(f"Policy mode gate: {'on' if runtime.use_mode_gate else 'off'} (from model)")
+    print(f"CTS student: {runtime.num_experts} experts, observation schema loaded from model")
     initial_base_height = float(cfg.get("initial_base_height", 0.60))
     initial_base_position, terrain_description = _terrain_course_spawn(
         mujoco, model, cfg, initial_base_height
@@ -397,6 +390,8 @@ def run(args):
 
     policy_dt = 1.0 / float(cfg.get("control_frequency_hz", 50))
     sim_steps_per_policy = max(1, int(round(policy_dt / model.opt.timestep)))
+    if not np.isclose(sim_steps_per_policy * model.opt.timestep, policy_dt, atol=1e-9):
+        raise ValueError("Control period must be an integer multiple of the MuJoCo timestep")
     command_controller = KeyboardCommandController(
         initial=[args.vx, args.vy, args.yaw],
         linear_step=args.linear_step,
@@ -435,9 +430,6 @@ def run(args):
         if args.gate_log_interval is not None
         else int(cfg.get("gate_log_interval", 100))
     )
-    mode_names = tuple(cfg.get("mode_names", ["wheel", "leg", "hybrid"]))
-    if runtime.use_mode_gate and len(mode_names) != 3:
-        raise ValueError("mode_names must contain wheel, leg and hybrid labels")
     standby_enabled = bool(cfg.get("standby_at_zero_command", True)) and not (
         args.run_zero_policy
     )
@@ -512,12 +504,12 @@ def run(args):
                 dof_pos,
                 dof_vel,
             )
-            if runtime.use_mode_gate and gate_log_interval > 0 and policy_step % gate_log_interval == 0:
-                mode_probs = runtime.mode_probabilities().cpu().numpy()
-                selected_mode = mode_names[int(np.argmax(mode_probs))]
+            if gate_log_interval > 0 and policy_step % gate_log_interval == 0:
+                expert_probs = runtime.expert_probabilities().cpu().numpy()
+                selected_expert = runtime.expert_names[int(np.argmax(expert_probs))]
                 print(
-                    f"step {policy_step:6d} | mode={selected_mode} "
-                    f"gate[w/l/h]={np.array2string(mode_probs, precision=3)}"
+                    f"step {policy_step:6d} | highest_weight={selected_expert} "
+                    f"expert_weights={np.array2string(expert_probs, precision=3)}"
                 )
             step_start = time.time()
             for _ in range(sim_steps_per_policy):
@@ -557,27 +549,15 @@ def parse_args():
     parser.add_argument(
         "-c",
         "--config",
-        default="nezha_mine.yaml",
+        default="nezha_moe_cts.yaml",
         help=(
-            "YAML file name in configs/ (default: nezha_mine.yaml), or a "
+            "YAML file name in configs/ (default: nezha_moe_cts.yaml), or a "
             "path relative to deploy/deploy_mujoco."
         ),
     )
     parser.add_argument("--model", help="Floating-base Nezha MJCF or MuJoCo-compatible URDF")
     parser.add_argument("--policy", help="Exported policy.pt")
     parser.add_argument("--device", default="cpu")
-    parser.add_argument(
-        "--mode-gate", choices=("auto", "on", "off"),
-        help="Validate gate mode against the model; auto detects it. Does not alter model computation.",
-    )
-    parser.add_argument(
-        "--history-order",
-        choices=("auto", "oldest_first", "newest_first"),
-        help=(
-            "Override history layout. 'auto' reads new export metadata and "
-            "falls back to legacy_history_order for old exports."
-        ),
-    )
     parser.add_argument("--vx", type=float, default=0.0)
     parser.add_argument("--vy", type=float, default=0.0)
     parser.add_argument("--yaw", type=float, default=0.0)
@@ -612,7 +592,7 @@ def parse_args():
         "--gate-log-interval",
         type=int,
         default=None,
-        help="Print wheel/leg/hybrid gate probabilities every N policy steps; 0 disables it.",
+        help="Print MoE expert weights every N policy steps; 0 disables it.",
     )
     return parser.parse_args()
 

@@ -1,6 +1,6 @@
 """Export the exact Nezha training curriculum heightfield for MuJoCo.
 
-This script imports ``NezhaMINECfg`` and the same ``Terrain`` class used by
+This script imports ``NezhaMoECTSCfg`` and the same ``Terrain`` class used by
 Isaac Gym. It does not maintain a second hand-written terrain definition.
 Run it with LZHMine's training virtual environment whenever the training
 terrain configuration changes.
@@ -18,9 +18,9 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from legged_gym.envs.nezha.nezha_mine_config import (
-    NezhaMINECfg,
-    NezhaMINECfgPPO,
+from legged_gym.envs.nezha.nezha_moe_cts_config import (
+    NezhaMoECTSCfg,
+    NezhaMoECTSCfgPPO,
 )
 from legged_gym.utils.terrain import Terrain
 
@@ -53,7 +53,7 @@ def _column_labels(cfg):
 
 
 def main():
-    env_cfg = NezhaMINECfg()
+    env_cfg = NezhaMoECTSCfg()
     terrain_cfg = env_cfg.terrain
     if terrain_cfg.mesh_type != "trimesh":
         raise ValueError("Nezha training terrain must be configured as trimesh")
@@ -62,7 +62,7 @@ def main():
 
     # task_registry.set_seed() runs before Terrain during training. Terrain
     # generation consumes NumPy's legacy global RNG, so reproduce that state.
-    np.random.seed(NezhaMINECfgPPO.seed)
+    np.random.seed(NezhaMoECTSCfgPPO.seed)
     terrain = Terrain(terrain_cfg, env_cfg.env.num_envs)
     heights_m = terrain.height_field_raw.astype(np.float64) * terrain_cfg.vertical_scale
     minimum = float(heights_m.min())
@@ -89,7 +89,7 @@ def main():
     metadata = {
         "generator": "legged_gym.utils.terrain.Terrain",
         "profile": terrain_cfg.generator_profile,
-        "seed": NezhaMINECfgPPO.seed,
+        "seed": NezhaMoECTSCfgPPO.seed,
         "mesh_type_training": terrain_cfg.mesh_type,
         "curriculum": terrain_cfg.curriculum,
         "num_rows": terrain_cfg.num_rows,

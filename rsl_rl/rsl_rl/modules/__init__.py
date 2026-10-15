@@ -32,5 +32,4 @@ from .actor_critic import ActorCritic
 from .actor_critic_recurrent import ActorCriticRecurrent
 from .him_actor_critic import HIMActorCritic
 from .him_estimator import HIMEstimator
-from .mine_actor_critic import MINEActorCritic, MINEPolicyExporter
-from .mine_estimator import MINEEstimator
+from .actor_critic_moe_cts import ActorCriticMoECTS

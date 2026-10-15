@@ -28,181 +28,108 @@
 #
 # Copyright (c) 2021 ETH Zurich, Nikita Rudin
 
+import copy
 import os
 from datetime import datetime
-from typing import Tuple
-import torch
-import numpy as np
 
-from rsl_rl.env import VecEnv
-from rsl_rl.runners import OnPolicyRunner, HIMOnPolicyRunner, MINEOnPolicyRunner
-from rsl_rl.utils.mine_checkpoint import OBSERVATION_KEYS, policy_config_from_checkpoint
+from rsl_rl.runners import MoECTSOnPolicyRunner
+from rsl_rl.utils.cts_checkpoint import DIMENSION_KEYS, load_cts_checkpoint
 
-from legged_gym import LEGGED_GYM_ROOT_DIR, LEGGED_GYM_ENVS_DIR
-from .helpers import get_args, update_cfg_from_args, class_to_dict, get_load_path, set_seed, parse_sim_params
-from legged_gym.envs.base.legged_robot_config import LeggedRobotCfg, LeggedRobotCfgPPO
+from legged_gym import LEGGED_GYM_ROOT_DIR
+from .helpers import (
+    get_args, update_cfg_from_args, class_to_dict, update_class_from_dict,
+    get_load_path, set_seed, parse_sim_params,
+)
 
-class TaskRegistry():
+
+class TaskRegistry:
     def __init__(self):
         self.task_classes = {}
         self.env_cfgs = {}
         self.train_cfgs = {}
-    
-    def register(self, name: str, task_class: VecEnv, env_cfg: LeggedRobotCfg, train_cfg: LeggedRobotCfgPPO):
+
+    def register(self, name, task_class, env_cfg, train_cfg):
         self.task_classes[name] = task_class
         self.env_cfgs[name] = env_cfg
         self.train_cfgs[name] = train_cfg
-    
-    def get_task_class(self, name: str) -> VecEnv:
+
+    def get_task_class(self, name):
         return self.task_classes[name]
-    
-    def get_cfgs(self, name) -> Tuple[LeggedRobotCfg, LeggedRobotCfgPPO]:
-        train_cfg = self.train_cfgs[name]
-        env_cfg = self.env_cfgs[name]
-        # copy seed
+
+    def get_cfgs(self, name):
+        # Play/resume overrides must not mutate defaults for subsequent envs.
+        env_cfg = copy.deepcopy(self.env_cfgs[name])
+        train_cfg = copy.deepcopy(self.train_cfgs[name])
         env_cfg.seed = train_cfg.seed
         return env_cfg, train_cfg
-    
-    def make_env(self, name, args=None, env_cfg=None) -> Tuple[VecEnv, LeggedRobotCfg]:
-        """ Creates an environment either from a registered namme or from the provided config file.
 
-        Args:
-            name (string): Name of a registered env.
-            args (Args, optional): Isaac Gym comand line arguments. If None get_args() will be called. Defaults to None.
-            env_cfg (Dict, optional): Environment config file used to override the registered config. Defaults to None.
+    @staticmethod
+    def _resume_path(train_cfg, log_root="default"):
+        if not train_cfg.runner.resume:
+            return None
+        if train_cfg.runner.resume_path:
+            return train_cfg.runner.resume_path
+        if log_root == "default":
+            log_root = os.path.join(LEGGED_GYM_ROOT_DIR, "logs", train_cfg.runner.experiment_name)
+        if log_root is None:
+            raise ValueError("Resume requires a log root or runner.resume_path")
+        return get_load_path(log_root, train_cfg.runner.load_run, train_cfg.runner.checkpoint)
 
-        Raises:
-            ValueError: Error if no registered env corresponds to 'name' 
-
-        Returns:
-            isaacgym.VecTaskPython: The created environment
-            Dict: the corresponding config file
-        """
-        # if no args passed get command line arguments
-        if args is None:
-            args = get_args()
-        # check if there is a registered env with that name
-        if name in self.task_classes:
-            task_class = self.get_task_class(name)
-        else:
-            raise ValueError(f"Task with name: {name} was not registered")
+    def make_env(self, name, args=None, env_cfg=None):
+        args = get_args() if args is None else args
+        if name not in self.task_classes:
+            raise ValueError("Task with name: {} was not registered".format(name))
+        default_env_cfg, train_cfg = self.get_cfgs(name)
         if env_cfg is None:
-            # load config files
-            env_cfg, _ = self.get_cfgs(name)
-        # override cfg from args (if specified)
+            env_cfg = default_env_cfg
+        _, train_cfg = update_cfg_from_args(None, train_cfg, args)
+        resume_path = self._resume_path(train_cfg)
+        if resume_path is not None:
+            checkpoint = load_cts_checkpoint(resume_path)
+            if "environment_config" in checkpoint:
+                update_class_from_dict(env_cfg, checkpoint["environment_config"])
+            # Restore the schema before simulator buffers are allocated.
+            env_cfg.env.observation_config = copy.deepcopy(checkpoint["observation_config"])
+            # Keep the resolved file even after a new run directory exists.
+            args.cts_resume_path = resume_path
         env_cfg, _ = update_cfg_from_args(env_cfg, None, args)
         set_seed(env_cfg.seed)
-        # parse sim params (convert to dict first)
-        sim_params = {"sim": class_to_dict(env_cfg.sim)}
-        sim_params = parse_sim_params(args, sim_params)
-        env = task_class(   cfg=env_cfg,
-                            sim_params=sim_params,
-                            physics_engine=args.physics_engine,
-                            sim_device=args.sim_device,
-                            headless=args.headless)
+        sim_params = parse_sim_params(args, {"sim": class_to_dict(env_cfg.sim)})
+        env = self.task_classes[name](
+            cfg=env_cfg, sim_params=sim_params, physics_engine=args.physics_engine,
+            sim_device=args.sim_device, headless=args.headless,
+        )
         return env, env_cfg
 
-    def make_alg_runner(self, env, name=None, args=None, train_cfg=None, log_root="default") -> Tuple[OnPolicyRunner, LeggedRobotCfgPPO]:
-        """ Creates the training algorithm  either from a registered namme or from the provided config file.
-
-        Args:
-            env (isaacgym.VecTaskPython): The environment to train (TODO: remove from within the algorithm)
-            name (string, optional): Name of a registered env. If None, the config file will be used instead. Defaults to None.
-            args (Args, optional): Isaac Gym comand line arguments. If None get_args() will be called. Defaults to None.
-            train_cfg (Dict, optional): Training config file. If None 'name' will be used to get the config file. Defaults to None.
-            log_root (str, optional): Logging directory for Tensorboard. Set to 'None' to avoid logging (at test time for example). 
-                                      Logs will be saved in <log_root>/<date_time>_<run_name>. Defaults to "default"=<path_to_LEGGED_GYM>/logs/<experiment_name>.
-
-        Raises:
-            ValueError: Error if neither 'name' or 'train_cfg' are provided
-            Warning: If both 'name' or 'train_cfg' are provided 'name' is ignored
-
-        Returns:
-            PPO: The created algorithm
-            Dict: the corresponding config file
-        """
-        # if no args passed get command line arguments
-        if args is None:
-            args = get_args()
-        # if config files are passed use them, otherwise load from the name
+    def make_alg_runner(self, env, name=None, args=None, train_cfg=None, log_root="default"):
+        args = get_args() if args is None else args
+        if getattr(args, "horovod", False):
+            raise ValueError("MoE-CTS currently supports single-device training; remove --horovod")
         if train_cfg is None:
             if name is None:
-                raise ValueError("Either 'name' or 'train_cfg' must be not None")
-            # load config files
+                raise ValueError("Either name or train_cfg must be provided")
             _, train_cfg = self.get_cfgs(name)
-        else:
-            if name is not None:
-                print(f"'train_cfg' provided -> Ignoring 'name={name}'")
-        # override cfg from args (if specified)
         _, train_cfg = update_cfg_from_args(None, train_cfg, args)
-
-        if log_root == "default":
-            log_root = os.path.join(LEGGED_GYM_ROOT_DIR, 'logs', train_cfg.runner.experiment_name)
-
-        resume_path = None
-        if train_cfg.runner.resume:
-            resume_path = get_load_path(
-                log_root, load_run=train_cfg.runner.load_run,
-                checkpoint=train_cfg.runner.checkpoint,
-            )
-            if train_cfg.runner_class_name == "MINEOnPolicyRunner":
-                saved = policy_config_from_checkpoint(
-                    torch.load(resume_path, map_location="cpu", weights_only=False)
-                )
-                requested = getattr(args, "mode_gate", None)
-                if requested is not None and (requested == "on") != saved["use_mode_gate"]:
-                    raise ValueError(
-                        "--mode_gate conflicts with checkpoint. Start a new run "
-                        "without --resume to change the architecture."
-                    )
-                dimensions = {
-                    "num_actor_obs": env.num_obs,
-                    "num_critic_obs": env.num_privileged_obs or env.num_obs,
-                    "num_one_step_obs": env.num_one_step_obs,
-                    "num_one_step_privileged_obs": env.num_one_step_privileged_obs,
-                    "estimation_target_indices": list(env.cfg.env.estimation_target_indices),
-                    "num_actions": env.num_actions,
-                }
-                for key, value in saved.items():
-                    if key in OBSERVATION_KEYS:
-                        if dimensions[key] != value:
-                            raise ValueError(f"Environment {key} differs from checkpoint")
-                    else:
-                        setattr(train_cfg.policy, key, value)
-                # Play's explicit legacy history override takes precedence.
-                history_order = getattr(args, "checkpoint_history_order", None)
-                if history_order is not None:
-                    train_cfg.policy.history_order = history_order
-                env.cfg.env.history_order = train_cfg.policy.history_order
-
-        run_name = train_cfg.runner.run_name
-        if train_cfg.runner_class_name == "MINEOnPolicyRunner":
-            mode = "gated" if train_cfg.policy.use_mode_gate else "ungated"
-            target_width = (env.num_one_step_privileged_obs
-                            if train_cfg.policy.is_privileged_obs else env.num_one_step_obs)
-            run_name += f"_{mode}_target{target_width}"
-        log_dir = None if log_root is None else os.path.join(
-            log_root, datetime.now().strftime('%b%d_%H-%M-%S') + '_' + run_name
-        )
-        
-        train_cfg_dict = class_to_dict(train_cfg)
-        runner_name = train_cfg.runner_class_name
-        if hasattr(train_cfg.algorithm, 'distill') and train_cfg.algorithm.distill:
-            from rsl_rl.runners.mult_on_policy_runner import MultOnPolicyRunner
-            runner = MultOnPolicyRunner(env, train_cfg_dict, log_dir, device=args.rl_device)
-        elif runner_name == 'MINEOnPolicyRunner':
-            runner = MINEOnPolicyRunner(env, train_cfg_dict, log_dir, device=args.rl_device)
-        elif runner_name == 'OnPolicyRunner':
-            runner = OnPolicyRunner(env, train_cfg_dict, log_dir, device=args.rl_device)
-        elif runner_name == 'HIMOnPolicyRunner':
-            runner = HIMOnPolicyRunner(env, train_cfg_dict, log_dir, device=args.rl_device)
-        else:
-            raise ValueError(f"Unsupported runner class: {runner_name}")
-        #save resume path before creating a new log_dir
+        if train_cfg.runner_class_name != "MoECTSOnPolicyRunner":
+            raise ValueError("This branch trains Nezha with MoECTSOnPolicyRunner")
+        resume_path = getattr(args, "cts_resume_path", None) or self._resume_path(train_cfg, log_root)
         if resume_path is not None:
-            print(f"Loading model from: {resume_path}")
+            checkpoint = load_cts_checkpoint(resume_path)
+            for key, value in checkpoint["policy_config"].items():
+                if key not in DIMENSION_KEYS:
+                    setattr(train_cfg.policy, key, copy.deepcopy(value))
+            update_class_from_dict(train_cfg.algorithm, checkpoint["train_config"]["algorithm"])
+            train_cfg.runner.num_steps_per_env = checkpoint["train_config"]["runner"]["num_steps_per_env"]
+        if log_root == "default":
+            log_root = os.path.join(LEGGED_GYM_ROOT_DIR, "logs", train_cfg.runner.experiment_name)
+        log_dir = None if log_root is None else os.path.join(
+            log_root, datetime.now().strftime("%Y%m%d_%H%M%S_%f") + "_" + train_cfg.runner.run_name,
+        )
+        runner = MoECTSOnPolicyRunner(env, class_to_dict(train_cfg), log_dir, device=args.rl_device)
+        if resume_path is not None:
+            print("Loading model from: " + resume_path)
             runner.load(resume_path)
         return runner, train_cfg
 
-# make global task registry
+
 task_registry = TaskRegistry()

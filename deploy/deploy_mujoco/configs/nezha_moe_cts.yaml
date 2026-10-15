@@ -1,28 +1,14 @@
-# Paths are relative to deploy/deploy_mujoco, matching the deployment layout.
-# The robot starts at x=-5, y=0 on the shared flat staging area, then uses
-# lateral motion to select one of the three fixed evaluation lanes.
+# Paths are relative to deploy/deploy_mujoco.
 model_path: "nezha/mjcf/scene_course.xml"
 terrain_metadata_path: "nezha/mjcf/assets/nezha_terrain_course.json"
 policy_path: "nezha/policy/policy.pt"
-# Read gate mode from policy.pt. on/off can assert an expected architecture.
-mode_gate: auto
 control_frequency_hz: 50
 initial_base_height: 0.60
 gate_log_interval: 100
-history_steps: 2
-history_order: auto
-# Existing exports made before history metadata was added used LZHMine's old
-# newest-first layout. New exports report the Apr10 oldest-first layout.
-legacy_history_order: newest_first
-zero_wheel_velocity_observations: true
+# Observation dimensions, scales, clipping and history layout come from policy.pt.
+# Set history_steps only to assert a required value; omit to accept model metadata.
 standby_at_zero_command: true
 settle_time_s: 2.0
-mode_names: [wheel, leg, hybrid]
-observation_scales:
-  lin_vel: 2.0
-  ang_vel: 1.0
-  dof_pos: 1.0
-  dof_vel: 0.05
 joint_names:
   - FL_hip_joint
   - FL_thigh_joint

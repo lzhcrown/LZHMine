@@ -1,10 +1,4 @@
-"""wheel_gym_CQ-compatible Nezha MINE training environment.
-
-The environment intentionally reproduces the Apr10 gated-three-class
-experiment, including its reward clipping, per-control-step torque scaling,
-joint-friction randomization and delayed failure termination. The one
-step histories use the original chronological layout (oldest frame first).
-"""
+"""Nezha robot dynamics, randomization and rewards shared by the CTS task."""
 
 import numpy as np
 import torch
@@ -19,11 +13,10 @@ from isaacgym.torch_utils import (
 )
 
 from legged_gym.envs.base.legged_robot import LeggedRobot
-from legged_gym.utils.math import get_scale_shift
 
 
-class NezhaMINEEnv(LeggedRobot):
-    """Nezha environment matching the archived Apr10 wheel_gym_CQ run."""
+class NezhaRobot(LeggedRobot):
+    """Nezha mixed leg-position and wheel-velocity control."""
 
     LEG_JOINT_IDS = [0, 1, 2, 4, 5, 6, 8, 9, 10, 12, 13, 14]
 
@@ -58,71 +51,14 @@ class NezhaMINEEnv(LeggedRobot):
         self.rigid_body_external_torques = torch.zeros_like(
             self.rigid_body_external_forces
         )
-        # Reproduce the snapshot's rigid-body lookup literally: it queries
-        # rigid bodies with the wheel *joint* names. Isaac Gym returns -1 for
-        # those names, so the active lateral-contact reward observes the final
-        # rigid body four times.
-        wheel_names = list(self.cfg.asset.wheel_dof_names)
-        self.wheel_body_indices = torch.zeros(
-            len(wheel_names), dtype=torch.long, device=self.device
-        )
-        for index, name in enumerate(wheel_names):
-            self.wheel_body_indices[index] = self.gym.find_actor_rigid_body_handle(
-                self.envs[0], self.actor_handles[0], name
-            )
+        wheel_names = list(self.cfg.asset.feet_names)
+        indices = [self.gym.find_actor_rigid_body_handle(
+            self.envs[0], self.actor_handles[0], name
+        ) for name in wheel_names]
+        if any(index < 0 for index in indices) or len(set(indices)) != len(indices):
+            raise ValueError("Nezha wheel contact bodies must be distinct valid rigid bodies")
+        self.wheel_body_indices = torch.tensor(indices, dtype=torch.long, device=self.device)
         self.num_wheels = len(wheel_names)
-
-    def step(self, actions):
-        # wheel_gym_CQ increments this at every simulator substep. Increasing
-        # by decimation is equivalent for the active per-environment schedule.
-        self.envs_steps_buf += self.cfg.control.decimation
-        return super().step(actions)
-
-    def post_physics_step(self):
-        self.gym.refresh_actor_root_state_tensor(self.sim)
-        self.gym.refresh_net_contact_force_tensor(self.sim)
-        self.gym.refresh_rigid_body_state_tensor(self.sim)
-
-        self.episode_length_buf += 1
-        self.common_step_counter += 1
-        self.base_quat[:] = self.root_states[:, 3:7]
-        self.base_lin_vel[:] = quat_rotate_inverse(
-            self.base_quat, self.root_states[:, 7:10]
-        )
-        self.base_ang_vel[:] = quat_rotate_inverse(
-            self.base_quat, self.root_states[:, 10:13]
-        )
-        self.projected_gravity[:] = quat_rotate_inverse(
-            self.base_quat, self.gravity_vec
-        )
-        self.feet_pos = self.rigid_body_states.view(
-            self.num_envs, self.num_bodies, 13
-        )[:, self.feet_indices, 0:3]
-        self.feet_vel = self.rigid_body_states.view(
-            self.num_envs, self.num_bodies, 13
-        )[:, self.feet_indices, 7:10]
-        # Compute this before _reward_dof_vel zeroes the wheel rates.
-        self.dof_acc = (self.last_dof_vel - self.dof_vel) / self.dt
-
-        self._post_physics_step_callback()
-        self.check_termination()
-        self.compute_reward()
-        env_ids = self.reset_buf.nonzero(as_tuple=False).flatten()
-        termination_privileged_obs = self.compute_termination_observations(env_ids)
-        self.reset_idx(env_ids)
-        self.compute_observations()
-
-        self.disturbance[:, :, :] = 0.0
-        self.last_last_actions[:] = self.last_actions[:]
-        self.last_actions[:] = self.actions[:]
-        self.last_last_joint_pos_target[:] = self.last_joint_pos_target[:]
-        self.last_joint_pos_target[:] = self.joint_pos_target[:]
-        self.last_dof_vel[:] = self.dof_vel[:]
-        self.last_root_vel[:] = self.root_states[:, 7:13]
-
-        if self.viewer and self.enable_viewer_sync and self.debug_viz:
-            self._draw_debug_vis()
-        return env_ids, termination_privileged_obs
 
     def check_termination(self):
         fail = torch.any(
@@ -138,10 +74,10 @@ class NezhaMINEEnv(LeggedRobot):
         fail |= self.projected_gravity[:, 2] > -0.5
         self.fail_buf *= fail
         self.fail_buf += fail
-        self.time_out_buf = self.episode_length_buf > self.max_episode_length
-        self.reset_buf = (
+        self.time_out_buf.copy_(self.episode_length_buf > self.max_episode_length)
+        self.reset_buf.copy_((
             self.fail_buf > self.cfg.env.fail_to_terminal_time_s / self.dt
-        ) | self.time_out_buf
+        ) | self.time_out_buf)
 
     def compute_reward(self):
         self.rew_buf[:] = 0.0
@@ -207,7 +143,6 @@ class NezhaMINEEnv(LeggedRobot):
         if self.cfg.env.send_timeouts:
             self.extras["time_outs"] = self.time_out_buf
 
-        # wheel_gym_CQ clears every history frame on reset.
         self.obs_buf[env_ids] = 0.0
         if self.privileged_obs_buf is not None:
             self.privileged_obs_buf[env_ids] = 0.0
@@ -382,7 +317,7 @@ class NezhaMINEEnv(LeggedRobot):
         if len(env_ids) == 0:
             return
         max_push_force = (
-            self.mine_base_mass.mean().item()
+            self.robot_base_mass.mean().item()
             * self.cfg.domain_rand.max_push_vel_xy
             / self.sim_params.dt
         )
@@ -483,15 +418,15 @@ class NezhaMINEEnv(LeggedRobot):
                 props[0].com.y + self.com_displacement[env_id, 1].item(),
                 props[0].com.z + self.com_displacement[env_id, 2].item(),
             )
-        if not hasattr(self, "mine_base_mass"):
-            self.mine_base_mass = torch.zeros(
+        if not hasattr(self, "robot_base_mass"):
+            self.robot_base_mass = torch.zeros(
                 self.num_envs, 1, dtype=torch.float32, device=self.device
             )
-            self.mine_base_com = torch.zeros(
+            self.robot_base_com = torch.zeros(
                 self.num_envs, 3, dtype=torch.float32, device=self.device
             )
-        self.mine_base_mass[env_id, 0] = props[0].mass
-        self.mine_base_com[env_id] = torch.tensor(
+        self.robot_base_mass[env_id, 0] = props[0].mass
+        self.robot_base_com[env_id] = torch.tensor(
             [props[0].com.x, props[0].com.y, props[0].com.z],
             dtype=torch.float32,
             device=self.device,
@@ -503,7 +438,7 @@ class NezhaMINEEnv(LeggedRobot):
         dof_error[:, self.wheel_indices] = 0.0
         actions_scaled = actions * self.cfg.control.action_scale
         actions_scaled[:, self.wheel_indices] = 0.0
-        self.joint_pos_target = self.default_dof_pos + actions_scaled
+        self.joint_pos_target.copy_(self.default_dof_pos + actions_scaled)
         velocity_reference = torch.zeros_like(actions_scaled)
         wheel_velocity = actions * self.cfg.control.vel_scale
         velocity_reference[:, self.wheel_indices] = wheel_velocity[
@@ -535,162 +470,9 @@ class NezhaMINEEnv(LeggedRobot):
             torques *= self.motor_strength_factors
         return torch.clip(torques, -self.torque_limits, self.torque_limits)
 
-    def _get_noise_scale_vec(self, cfg):
-        noise = torch.zeros(cfg.env.num_one_step_observations, device=self.device)
-        scales = cfg.noise.noise_scales
-        level = cfg.noise.noise_level
-        noise[0:3] = scales.ang_vel * level * self.obs_scales.ang_vel
-        noise[3:6] = scales.gravity * level
-        noise[9:21] = scales.dof_pos * level * self.obs_scales.dof_pos
-        noise[21:37] = scales.dof_vel * level * self.obs_scales.dof_vel
-        noise[37:49] = scales.dof_pos * level * self.obs_scales.dof_pos
-        self.add_noise = cfg.noise.add_noise
-        return noise
-
-    def _build_one_step_observations(self, add_noise):
-        leg_ids = self.LEG_JOINT_IDS
-        joint_error = (
-            self.dof_pos - self.default_dof_pos
-        ) * self.obs_scales.dof_pos
-        actor_clean = torch.cat(
-            (
-                self.base_ang_vel * self.obs_scales.ang_vel,
-                self.projected_gravity,
-                self.commands[:, :3] * self.commands_scale,
-                joint_error[:, leg_ids],
-                self.dof_vel * self.obs_scales.dof_vel,
-                self.dof_pos[:, leg_ids] * self.obs_scales.dof_pos,
-                self.actions,
-            ),
-            dim=-1,
-        )
-        actor_obs = actor_clean.clone()
-        if add_noise and self.add_noise:
-            actor_obs += torch.randn_like(actor_obs) * self.noise_scale_vec
-
-        if self.cfg.terrain.measure_heights:
-            terrain_heights = torch.clip(
-                self.root_states[:, 2].unsqueeze(1)
-                - 0.5
-                - self.measured_heights,
-                -1.0,
-                1.0,
-            ) * self.obs_scales.height_measurements
-        else:
-            terrain_heights = torch.zeros(
-                self.num_envs,
-                self.cfg.env.num_height_observations,
-                device=self.device,
-            )
-        force_scale, force_shift = get_scale_shift(
-            self.cfg.normalization.contact_force_range
-        )
-        all_contact_forces = (
-            self.contact_forces.reshape(self.num_envs, -1) - force_shift
-        ) * force_scale
-        if all_contact_forces.shape[-1] != 51:
-            raise RuntimeError(
-                "wheel_gym_CQ requires 17 collapsed rigid bodies "
-                f"(51 force values), got {all_contact_forces.shape[-1]}"
-            )
-        privileged = torch.cat(
-            (
-                actor_clean,
-                self.dof_acc * self.obs_scales.dof_acc,
-                self.torques * self.obs_scales.torques,
-                self.mine_base_mass - self.mine_base_mass.mean(),
-                self.mine_base_com,
-                self.p_gains.unsqueeze(0).expand(self.num_envs, -1) / 20.0,
-                self.d_gains.unsqueeze(0).expand(self.num_envs, -1) / 0.2,
-                all_contact_forces,
-                terrain_heights,
-                self.base_lin_vel * self.obs_scales.lin_vel,
-                self.base_height.unsqueeze(1)
-                * self.obs_scales.height_measurements,
-            ),
-            dim=-1,
-        )
-        if actor_obs.shape[-1] != self.num_one_step_obs:
-            raise RuntimeError(
-                f"Actor observation mismatch: {actor_obs.shape[-1]} "
-                f"!= {self.num_one_step_obs}"
-            )
-        if privileged.shape[-1] != self.num_one_step_privileged_obs:
-            raise RuntimeError(
-                f"Privileged observation mismatch: {privileged.shape[-1]} "
-                f"!= {self.num_one_step_privileged_obs}"
-            )
-        return actor_obs, privileged
-
-    def compute_observations(self):
-        actor_obs, privileged_obs = self._build_one_step_observations(
-            add_noise=True
-        )
-        # wheel_gym_CQ appends to a deque and flattens it oldest -> newest.
-        # The legacy option exists only to evaluate pre-alignment checkpoints.
-        if self.cfg.env.history_order == "oldest_first":
-            self.obs_buf = torch.cat(
-                (self.obs_buf[:, self.num_one_step_obs :], actor_obs), dim=-1
-            )
-            self.privileged_obs_buf = torch.cat(
-                (
-                    self.privileged_obs_buf[
-                        :, self.num_one_step_privileged_obs :
-                    ],
-                    privileged_obs,
-                ),
-                dim=-1,
-            )
-        elif self.cfg.env.history_order == "newest_first":
-            self.obs_buf = torch.cat(
-                (actor_obs, self.obs_buf[:, : -self.num_one_step_obs]), dim=-1
-            )
-            self.privileged_obs_buf = torch.cat(
-                (
-                    privileged_obs,
-                    self.privileged_obs_buf[
-                        :, : -self.num_one_step_privileged_obs
-                    ],
-                ),
-                dim=-1,
-            )
-        else:
-            raise ValueError(
-                f"Unsupported history order: {self.cfg.env.history_order}"
-            )
-
-    def compute_termination_observations(self, env_ids):
-        if env_ids.numel() == 0:
-            return self.privileged_obs_buf.new_zeros(
-                (0, self.num_privileged_obs)
-            )
-        _, privileged_obs = self._build_one_step_observations(add_noise=False)
-        if self.cfg.env.history_order == "oldest_first":
-            termination_history = torch.cat(
-                (
-                    self.privileged_obs_buf[
-                        :, self.num_one_step_privileged_obs :
-                    ],
-                    privileged_obs,
-                ),
-                dim=-1,
-            )
-        else:
-            termination_history = torch.cat(
-                (
-                    privileged_obs,
-                    self.privileged_obs_buf[
-                        :, : -self.num_one_step_privileged_obs
-                    ],
-                ),
-                dim=-1,
-            )
-        return termination_history[env_ids]
-
     def _reward_dof_vel(self):
-        # Preserve the original side effect on subsequent rewards/observation.
-        self.dof_vel[:, self.wheel_indices] = 0.0
-        return torch.sum(torch.square(self.dof_vel), dim=1)
+        # Penalize leg rates without corrupting measured wheel velocities.
+        return torch.sum(torch.square(self.dof_vel[:, self.LEG_JOINT_IDS]), dim=1)
 
     def _reward_dof_pos_limits(self):
         out_of_limits = -(
@@ -713,7 +495,7 @@ class NezhaMINEEnv(LeggedRobot):
     def _reward_feet_air_time(self):
         contact = self.contact_forces[:, self.feet_indices, 2] > 1.0
         contact_filtered = torch.logical_or(contact, self.last_contacts)
-        self.last_contacts = contact
+        self.last_contacts.copy_(contact)
         first_contact = (self.feet_air_time > 0.0) * contact_filtered
         self.feet_air_time += self.dt
         reward = torch.sum(
