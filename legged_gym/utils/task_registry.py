@@ -36,7 +36,11 @@ import numpy as np
 
 from rsl_rl.env import VecEnv
 from rsl_rl.runners import OnPolicyRunner, HIMOnPolicyRunner, MINEOnPolicyRunner
-from rsl_rl.utils.mine_checkpoint import OBSERVATION_KEYS, policy_config_from_checkpoint
+from rsl_rl.utils.mine_checkpoint import (
+    OBSERVATION_KEYS,
+    estimator_update_schedule_from_checkpoint,
+    policy_config_from_checkpoint,
+)
 
 from legged_gym import LEGGED_GYM_ROOT_DIR, LEGGED_GYM_ENVS_DIR
 from .helpers import get_args, update_cfg_from_args, class_to_dict, get_load_path, set_seed, parse_sim_params
@@ -146,9 +150,16 @@ class TaskRegistry():
                 checkpoint=train_cfg.runner.checkpoint,
             )
             if train_cfg.runner_class_name == "MINEOnPolicyRunner":
-                saved = policy_config_from_checkpoint(
-                    torch.load(resume_path, map_location="cpu", weights_only=False)
-                )
+                checkpoint = torch.load(resume_path, map_location="cpu", weights_only=False)
+                saved = policy_config_from_checkpoint(checkpoint)
+                saved_schedule = estimator_update_schedule_from_checkpoint(checkpoint)
+                requested_schedule = getattr(args, "estimator_update_schedule", None)
+                if requested_schedule is not None and requested_schedule != saved_schedule:
+                    raise ValueError(
+                        "--estimator_update_schedule conflicts with checkpoint. "
+                        "Start a new run without --resume to compare update schedules."
+                    )
+                train_cfg.algorithm.estimator_update_schedule = saved_schedule
                 requested = getattr(args, "mode_gate", None)
                 if requested is not None and (requested == "on") != saved["use_mode_gate"]:
                     raise ValueError(

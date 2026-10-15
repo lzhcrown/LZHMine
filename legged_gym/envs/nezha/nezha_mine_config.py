@@ -298,6 +298,9 @@ class NezhaMINECfgPPO(LeggedRobotCfgPPO):
         num_mini_batches = 4
         learning_rate = 1e-3
         schedule = "adaptive"
+        # Phase 1 A preserves the original update order. Select after_ppo
+        # explicitly for B; do not silently change existing experiments.
+        estimator_update_schedule = "interleaved"
         gamma = 0.99
         lam = 0.95
         desired_kl = 0.01

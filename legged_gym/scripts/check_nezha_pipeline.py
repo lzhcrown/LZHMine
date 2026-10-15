@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""Real Isaac Gym stage-0 smoke test; not a locomotion-quality experiment.
+"""Real Isaac Gym pipeline/A-B smoke test; not a locomotion-quality experiment.
 
 Uses 16 environments, shortened episodes and a small terrain grid to force
 resets. Runs two updates, loads their checkpoint into a new runner, then runs
@@ -19,7 +19,18 @@ import torch
 
 def attach_checks(runner):
     acted, results = [], []
+    events = []
     act, update = runner.alg.act, runner.alg.update
+    ppo_step = runner.alg.optimizer.step
+    estimator_step = runner.alg.actor_critic.estimator.optimizer.step
+
+    def recorded_ppo_step(*args, **kwargs):
+        events.append("ppo")
+        return ppo_step(*args, **kwargs)
+
+    def recorded_estimator_step(*args, **kwargs):
+        events.append("estimator")
+        return estimator_step(*args, **kwargs)
 
     def recorded_act(obs, critic):
         acted.append((obs.clone(), critic.clone()))
@@ -37,11 +48,26 @@ def attach_checks(runner):
         for group in ("", "_reset", "_non_reset"):
             assert losses["pre_update_kl" + group] < 1e-3, losses
         assert losses["pre_update_value_max_abs_error"] < 1e-4, losses
+        count = runner.alg.num_learning_epochs * runner.alg.num_mini_batches
+        if runner.alg.estimator_update_schedule == "after_ppo":
+            expected_events = ["ppo"] * count + ["estimator"] * count
+            for name in ("post_ppo_kl", "estimator_phase_kl",
+                         "estimator_phase_kl_reset", "estimator_phase_kl_non_reset"):
+                assert name in losses, name
+        else:
+            expected_events = ["estimator", "ppo"] * count
+        assert events == expected_events, "Incorrect PPO/estimator update order or count"
+        assert losses["update_ppo_count"] == losses["update_estimator_count"] == count
+        for row in runner.alg.last_minibatch_diagnostics:
+            assert row["estimator_learning_rate"] == row["learning_rate"]
         results.append(losses)
         acted.clear()
+        events.clear()
         return losses
 
     runner.alg.act, runner.alg.update = recorded_act, checked_update
+    runner.alg.optimizer.step = recorded_ppo_step
+    runner.alg.actor_critic.estimator.optimizer.step = recorded_estimator_step
     return results
 
 
@@ -83,6 +109,8 @@ def main():
         assert best["iter"] == best["infos"]["iteration"]
         for key in ("git", "train_cfg", "env_cfg"):
             assert key in saved
+        schedule = runner.alg.estimator_update_schedule
+        assert saved["train_cfg"]["algorithm"]["estimator_update_schedule"] == schedule
 
         resumed = MINEOnPolicyRunner(
             env, copy.deepcopy(runner.train_cfg), str(directory / "resume"), device=args.rl_device
@@ -100,13 +128,19 @@ def main():
         report = {
             "status": "PASS",
             "gate": runner.alg.actor_critic.use_mode_gate,
+            "estimator_update_schedule": schedule,
             "checkpoint": str(checkpoint),
             "resumed_checkpoint": str(directory / "resume" / "model_3.pt"),
             "restored_learning_rate": rate,
             "reset_samples": [row["pre_update_reset_count"] for row in results + resume_results],
             "pre_update_kl": [row["pre_update_kl"] for row in results + resume_results],
+            "ppo_updates": [row["update_ppo_count"] for row in results + resume_results],
+            "estimator_updates": [row["update_estimator_count"] for row in results + resume_results],
             "observation_equality": "exact, actor and critic, every transition",
         }
+        if schedule == "after_ppo":
+            for name in ("post_ppo_kl", "estimator_phase_kl", "post_update_kl"):
+                report[name] = [row[name] for row in results + resume_results]
         (directory / "stage0_verification.json").write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
         print(json.dumps(report, indent=2))
     finally:

@@ -26,12 +26,16 @@ class MINEPPO:
         schedule="fixed",
         desired_kl=0.01,
         device="cpu",
+        estimator_update_schedule="interleaved",
         **kwargs,
     ):
         del kwargs
         self.device = device
         self.desired_kl = desired_kl
         self.schedule = schedule
+        if estimator_update_schedule not in ("interleaved", "after_ppo"):
+            raise ValueError("estimator_update_schedule must be 'interleaved' or 'after_ppo'")
+        self.estimator_update_schedule = estimator_update_schedule
         self.learning_rate = learning_rate
         self.last_minibatch_diagnostics = []
         self.actor_critic = actor_critic.to(device)
@@ -120,11 +124,15 @@ class MINEPPO:
         return metrics
 
     @torch.no_grad()
-    def rollout_diagnostics(self, prefix, include_latent=False, chunk_size=4096):
+    def rollout_diagnostics(self, prefix, include_latent=False, chunk_size=4096,
+                            capture_means=False, estimator_reference_means=None):
         """Evaluate the complete rollout without sampling actions/changing RNG.
 
         Chunking bounds GPU memory. Only the small KL/latent tensors are kept
         for exact whole-rollout reductions, including the latent median.
+        B can capture means after PPO and compare them after the estimator
+        block. That comparison holds the actor and sigma fixed, and has no
+        numerical KL offset. It is NOT post_update KL minus post_ppo KL.
         """
         if self.storage.step != self.storage.num_transitions_per_env:
             raise RuntimeError("Diagnostics require a complete rollout")
@@ -134,11 +142,18 @@ class MINEPPO:
         old_mu = self.storage.mu.flatten(0, 1)
         old_sigma = self.storage.sigma.flatten(0, 1)
         old_values = self.storage.values.flatten(0, 1)
-        kls, latents = [], []
+        kls, latents, means, estimator_kls = [], [], [], []
         value_error = obs.new_zeros(())
         for start in range(0, obs.shape[0], chunk_size):
             stop = start + chunk_size
             mean = self.actor_critic.act_inference(obs[start:stop])
+            if capture_means:
+                means.append(mean)
+            if estimator_reference_means is not None:
+                estimator_kls.append(torch.sum(
+                    (mean - estimator_reference_means[start:stop]).square()
+                    / (2.0 * self.actor_critic.std.square()), dim=-1,
+                ))
             kls.append(self._kl_per_sample(
                 mean, self.actor_critic.std, old_mu[start:stop], old_sigma[start:stop]
             ))
@@ -155,9 +170,42 @@ class MINEPPO:
             for name, value in self._grouped_kl(kl, self.storage.dones).items()
         }
         metrics[prefix + "_kl_sample_max"] = kl.max().item()
+        if estimator_kls:
+            estimator_kl = torch.cat(estimator_kls)
+            metrics.update({
+                "estimator_phase_" + name: value
+                for name, value in self._grouped_kl(estimator_kl, self.storage.dones).items()
+            })
+            metrics["estimator_phase_kl_sample_max"] = estimator_kl.max().item()
         if include_latent:
             metrics[prefix + "_value_max_abs_error"] = value_error.item()
             metrics.update(self.actor_critic.estimator.latent_statistics(torch.cat(latents)))
+        return (metrics, torch.cat(means)) if capture_means else metrics
+
+    def _update_estimator(self, obs, next_critic_obs, learning_rate,
+                          reference_mean=None, reference_sigma=None):
+        # In B the actor has already completed all PPO steps. Re-evaluate the
+        # current policy before EACH estimator step, never reuse old PPO means.
+        if reference_mean is None:
+            with torch.inference_mode():
+                reference_mean = self.actor_critic.act_inference(obs)
+                reference_sigma = self.actor_critic.std.detach()
+        losses = self.actor_critic.estimator.update(
+            obs, next_critic_obs, learning_rate=learning_rate,
+        )
+        names = (
+            "estimation", "swap", "mode", "semantic_mode", "semantic_valid_ratio",
+            "wheel_target_ratio", "leg_target_ratio", "hybrid_target_ratio",
+            "wheel_activity", "leg_activity", "wheel_gate_probability",
+            "leg_gate_probability", "hybrid_gate_probability",
+        )
+        metrics = dict(zip(names, losses))
+        with torch.inference_mode():
+            shifted_mean = self.actor_critic.act_inference(obs)
+            metrics["kl_estimator_shift"] = torch.sum(
+                torch.square(shifted_mean - reference_mean)
+                / (2.0 * torch.square(reference_sigma)), dim=-1,
+            ).mean().item()
         return metrics
 
     def update(self):
@@ -191,11 +239,26 @@ class MINEPPO:
         kl_max = 0.0
         estimator_diagnostics = {}
         updates = 0
+        deferred = self.estimator_update_schedule == "after_ppo"
+        # Store only index views and scalar rates, not multi-GB batch copies.
+        estimator_batches = []
+
+        def record_estimator(metrics, batch_metrics, rate):
+            batch_metrics["kl_estimator_shift"] = metrics["kl_estimator_shift"]
+            batch_metrics["estimator_learning_rate"] = rate
+            for name, value in metrics.items():
+                totals[name] += value
+            for name, value in self.actor_critic.estimator.last_diagnostics.items():
+                estimator_diagnostics[name] = estimator_diagnostics.get(name, 0.0) + value
+
         generator = self.storage.mini_batch_generator(
-            self.num_mini_batches, self.num_learning_epochs, include_dones=True
+            self.num_mini_batches, self.num_learning_epochs, include_dones=True,
+            include_indices=deferred,
         )
 
         for batch in generator:
+            if deferred:
+                batch, indices = batch[:-1], batch[-1]
             (
                 obs_batch,
                 critic_obs_batch,
@@ -243,40 +306,15 @@ class MINEPPO:
                 batch_metrics["learning_rate"] <= 1e-5 * (1.0 + 1e-6)
             )
 
-            (
-                estimation_loss,
-                swap_loss,
-                mode_loss,
-                semantic_loss,
-                semantic_valid_ratio,
-                wheel_target_ratio,
-                leg_target_ratio,
-                hybrid_target_ratio,
-                wheel_activity,
-                leg_activity,
-                wheel_gate_probability,
-                leg_gate_probability,
-                hybrid_gate_probability,
-            ) = self.actor_critic.estimator.update(
-                obs_batch,
-                next_critic_obs_batch,
-                learning_rate=self.learning_rate,
-            )
-            with torch.inference_mode():
-                # The actor is unchanged here, so this difference comes only
-                # from the estimator step just taken.
-                shifted_mean = self.actor_critic.act_inference(obs_batch)
-                kl_estimator_shift = torch.sum(
-                    torch.square(shifted_mean - mu_batch)
-                    / (2.0 * torch.square(sigma_batch)),
-                    dim=-1,
-                ).mean().item()
-            batch_metrics["kl_estimator_shift"] = kl_estimator_shift
-            self.last_minibatch_diagnostics.append(batch_metrics)
-            for name, value in self.actor_critic.estimator.last_diagnostics.items():
-                estimator_diagnostics[name] = (
-                    estimator_diagnostics.get(name, 0.0) + value
+            if deferred:
+                estimator_batches.append((indices, self.learning_rate, batch_metrics))
+            else:
+                estimator_metrics = self._update_estimator(
+                    obs_batch, next_critic_obs_batch, self.learning_rate,
+                    reference_mean=mu_batch, reference_sigma=sigma_batch,
                 )
+                record_estimator(estimator_metrics, batch_metrics, self.learning_rate)
+            self.last_minibatch_diagnostics.append(batch_metrics)
 
             ratio = torch.exp(
                 actions_log_prob_batch - old_actions_log_prob_batch.squeeze(-1)
@@ -313,30 +351,32 @@ class MINEPPO:
             totals["value"] += value_loss.item()
             totals["surrogate"] += surrogate_loss.item()
             totals["entropy"] += entropy_batch.mean().item()
-            totals["estimation"] += estimation_loss
-            totals["swap"] += swap_loss
-            totals["mode"] += mode_loss
-            totals["semantic_mode"] += semantic_loss
-            totals["semantic_valid_ratio"] += semantic_valid_ratio
-            totals["wheel_target_ratio"] += wheel_target_ratio
-            totals["leg_target_ratio"] += leg_target_ratio
-            totals["hybrid_target_ratio"] += hybrid_target_ratio
-            totals["wheel_activity"] += wheel_activity
-            totals["leg_activity"] += leg_activity
-            totals["wheel_gate_probability"] += wheel_gate_probability
-            totals["leg_gate_probability"] += leg_gate_probability
-            totals["hybrid_gate_probability"] += hybrid_gate_probability
             totals["kl_mean"] += kl
-            totals["kl_estimator_shift"] += kl_estimator_shift
             updates += 1
 
         if updates == 0:
             raise RuntimeError("MINEPPO received no mini-batches")
-        rollout_metrics.update(self.rollout_diagnostics("post_update"))
+        estimator_reference = None
+        if deferred:
+            post_ppo, estimator_reference = self.rollout_diagnostics(
+                "post_ppo", capture_means=True,
+            )
+            rollout_metrics.update(post_ppo)
+            for indices, rate, batch_metrics in estimator_batches:
+                estimator_obs, estimator_next_critic = self.storage.estimator_batch(indices)
+                metrics = self._update_estimator(estimator_obs, estimator_next_critic, rate)
+                record_estimator(metrics, batch_metrics, rate)
+            # The main optimizer also owns these parameters; leave no stale
+            # gradients from the deferred block for the next rollout/update.
+            self.actor_critic.estimator.optimizer.zero_grad(set_to_none=True)
+        rollout_metrics.update(self.rollout_diagnostics(
+            "post_update", estimator_reference_means=estimator_reference,
+        ))
         self.storage.clear()
         totals.update(estimator_diagnostics)
         means = {name: value / updates for name, value in totals.items()}
         means.update(kl_first=kl_first, kl_max=kl_max)
+        means.update(update_ppo_count=updates, update_estimator_count=updates)
         for name in ("reset", "non_reset"):
             count = sum(row[name + "_count"] for row in self.last_minibatch_diagnostics)
             means["update_" + name + "_count"] = count

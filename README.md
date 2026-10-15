@@ -259,9 +259,83 @@ python legged_gym/scripts/summarize_training_diagnostics.py \
 迭代末学习率下限占比，不代表阶段 1 自动通过。若 1500 次仍不足以判断稳定性，
 按预先约定延长窗口，不根据结果挑选有利区间。
 
-实验 B 的“估计器更新后移”尚未在阶段 0 引入。实现 B 时必须固定环境、门控模式、
-seed、初始化、更新次数和学习率规则，仅比较更新安排，并保留更新后 KL 检查。
 阶段 0 不改变交换损失、温度、VICReg、门控结构或奖励设置。
+
+### 阶段 1：A/B 估计器更新顺序对照
+
+实验 A 回答的是：**只修复训练流程、保留原有算法，学习率是否还会长期触底？**
+它不是门控效果实验，也不以解决表示塌缩为目标。A 同时为 B 提供可复查的流程基准。
+已完成的 `Oct15_10-20-53_phase1_A_seed10_gated_target375` 使用提交
+`720ef747efda797485d74054ac1c88ee2183f89f`（启动时工作区干净）。其 501–1500 窗口中，
+迭代末触底率 0.7%，小批次触底率 0.255%，小批次平均 KL 0.01407，更新后平均 KL 0.01466，
+重置/非重置更新前 KL 均约 1.6e-4，Critic 重算误差为零，满足实验 A 的验收目标。
+潜在表示余弦相似度中位数仍约 0.9997，因此阶段 2 仍需单独开展。
+
+现在可通过 `algorithm.estimator_update_schedule` 或 CLI 选择更新安排：
+
+| 参数值 | 每轮更新顺序 | 用途 |
+| --- | --- | --- |
+| `interleaved`（默认） | 每个小批次计算 PPO 前向和 KL → 更新估计器 → PPO 反向更新，重复全部 epoch | A，保留原实现 |
+| `after_ppo` | 完成全部 PPO 小批次更新 → 按原小批次顺序完成全部估计器更新 | B，仅后移估计器更新 |
+
+B 每轮仍执行 5 epoch × 4 minibatch = 20 次 PPO 更新与 20 次估计器更新，
+重放 PPO 使用的相同样本索引和该批次调度后的学习率；不再次打乱样本、不缓存完整批次副本，
+也不是把估计器改成每轮只更新一次。重放的是 **B 自身** 的逐批学习率，不是 A 的历史学习率。
+自适应调度规则保持不变，A/B 实际学习率轨迹可以因 KL 不同而不同。
+损失、温度、原型路径、门控结构、奖励、初始学习率与更新次数均保持不变。
+
+配置随 `run_info.json` 和 checkpoint 保存。续训/play 不传参数时采用 checkpoint 的安排；
+旧 checkpoint 没有该字段时视为 `interleaved`。显式指定与 checkpoint 不同的安排会报错，
+不能把 A 的检查点直接续训成正式 B 对照。
+
+提交并同步本次修改后，先复跑单元测试与 B 的真实 GPU 短测：
+
+```bash
+source .venv/bin/activate
+PYTHONPATH=.:rsl_rl OMP_NUM_THREADS=1 python -m unittest -v \
+  legged_gym.tests.test_mine_training_pipeline \
+  legged_gym.tests.test_mine_modes \
+  legged_gym.tests.test_mine_update_schedule \
+  legged_gym.tests.test_mine_diagnostic_summary
+
+python legged_gym/scripts/check_nezha_pipeline.py \
+  --mode_gate on --estimator_update_schedule after_ppo --run_name phase1_B_smoke
+```
+
+短测还会断言真实优化器 step 的顺序/次数、逐批学习率重放和检查点安排恢复。
+正式 B 从头训练，保持与 A 相同的环境数、seed、门控模式、target375 和迭代数：
+
+```bash
+python legged_gym/scripts/train_nezha_mine.py \
+  --headless --num_envs 4096 --max_iterations 1500 \
+  --seed 10 --mode_gate on --no_wandb \
+  --estimator_update_schedule after_ppo --run_name phase1_B_seed10
+
+python legged_gym/scripts/summarize_training_diagnostics.py \
+  logs/nezha3_mine/<B实际运行目录> --start 501 --end 1500 --check-integrity
+```
+
+用同一脚本、同一 501–1500 窗口重新汇总 A，比较触底比例、KL 均值、p95/p99、
+极值及超过 0.05/0.1 的次数。小批次分位数以每批的平均 KL 为统计单元；
+阶段/分组分位数以每轮的平均 KL 为统计单元，并非单样本 KL 的分布。
+`*_kl_sample_max` 单独记录样本级最大值。新增诊断的含义是：
+
+| 指标 | 含义 |
+| --- | --- |
+| `post_ppo_kl`（B） | 全部 PPO 更新之后、估计器更新之前，相对采样策略的完整 rollout KL |
+| `estimator_phase_kl`（B） | Actor/std 不变时，整段估计器更新前后策略的 KL；直接比较分布，不含旧公式的 1e-5 偏置 |
+| `post_update_kl`（A/B） | 所有 PPO 与估计器更新完成后，相对采样策略的 KL，是共同的最终漂移指标 |
+| `update_ppo_count` / `update_estimator_count` | 每轮两类更新次数，汇总时与小批次数交叉检查 |
+
+以上阶段 KL 均按重置/非重置样本额外分组。`estimator_phase_kl` **不等于**
+`post_update_kl - post_ppo_kl`，KL 不能这样相减分解。B 的逐小批次
+`kl_estimator_shift` 在对应的后置估计器更新前后测量，不与早先 PPO 的均值比较。
+
+继续使用原验收标准：数据一致性通过、迭代末学习率触底比例 < 10%、KL 约 0.01。
+不能只因 B 的 PPO 内 KL 或触底率更小就判定更好，还要检查完整更新后的 KL 尾部，
+避免把漂移转移到学习率调度器看不到的估计器阶段。如果 B 没有稳定收益，保留 A。
+单个 seed 的短训练只用于选择后续更新安排，不证明门控优劣或跨 seed 的普遍优势。
+选定安排后，才进入阶段 2 的无门控表示塌缩消融；本次未实现温度/VICReg/原型平均修复。
 
 ## Isaac Gym Play 与导出
 

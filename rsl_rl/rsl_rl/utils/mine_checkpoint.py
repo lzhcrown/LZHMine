@@ -10,6 +10,16 @@ OBSERVATION_KEYS = (
 )
 
 
+def estimator_update_schedule_from_checkpoint(checkpoint):
+    """Read phase-1 update order; archived runs used interleaved updates."""
+    schedule = checkpoint.get("train_cfg", {}).get("algorithm", {}).get(
+        "estimator_update_schedule", "interleaved"
+    )
+    if schedule not in ("interleaved", "after_ppo"):
+        raise ValueError(f"Unsupported estimator update schedule in checkpoint: {schedule!r}")
+    return schedule
+
+
 def policy_config_from_checkpoint(checkpoint):
     """Read new metadata, or infer the gate/target view of archived Nezha runs."""
     state = checkpoint["model_state_dict"]

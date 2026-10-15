@@ -8,12 +8,15 @@ from .him_rollout_storage import HIMRolloutStorage
 class MINERolloutStorage(HIMRolloutStorage):
     """MINE storage without LZHMine's later reward/advantage clamps."""
 
-    def mini_batch_generator(self, num_mini_batches, num_epochs=8, include_dones=False):
+    def mini_batch_generator(self, num_mini_batches, num_epochs=8, include_dones=False,
+                             include_indices=False):
         """Keep reset labels aligned with the same shuffled transition indices.
 
         A reset sample means done[t] is true: step(action[t]) reset this env.
         The default ten-field interface remains compatible with other callers.
         Preserve the original shuffle/update order (one permutation per rollout).
+        Optional indices let a deferred estimator replay exactly these samples
+        without another shuffle or retaining copies of all privileged batches.
         """
         batch_size = self.num_envs * self.num_transitions_per_env
         mini_batch_size = batch_size // num_mini_batches
@@ -35,7 +38,19 @@ class MINERolloutStorage(HIMRolloutStorage):
             for index in range(num_mini_batches):
                 batch_ids = indices[index * mini_batch_size:(index + 1) * mini_batch_size]
                 batch = tuple(value[batch_ids] for value in fields)
-                yield batch + (dones[batch_ids],) if include_dones else batch
+                if include_dones:
+                    batch += (dones[batch_ids],)
+                if include_indices:
+                    batch += (batch_ids,)
+                yield batch
+
+    def estimator_batch(self, indices):
+        """Read a previously selected batch while the rollout is still live."""
+        next_critic = self.next_privileged_observations
+        if next_critic is None:
+            next_critic = self.observations
+        return (self.observations.flatten(0, 1)[indices],
+                next_critic.flatten(0, 1)[indices])
 
     def compute_returns(self, last_values, gamma, lam):
         advantage = 0

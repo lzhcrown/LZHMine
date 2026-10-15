@@ -143,6 +143,15 @@ def update_cfg_from_args(env_cfg, cfg_train, args):
             if mode_gate not in ("on", "off"):
                 raise ValueError("--mode_gate must be 'on' or 'off'")
             cfg_train.policy.use_mode_gate = mode_gate == "on"
+        estimator_update_schedule = getattr(args, "estimator_update_schedule", None)
+        if estimator_update_schedule is not None:
+            if getattr(cfg_train, "runner_class_name", None) != "MINEOnPolicyRunner":
+                raise ValueError("--estimator_update_schedule is only supported by MINE")
+            if estimator_update_schedule not in ("interleaved", "after_ppo"):
+                raise ValueError(
+                    "--estimator_update_schedule must be 'interleaved' or 'after_ppo'"
+                )
+            cfg_train.algorithm.estimator_update_schedule = estimator_update_schedule
         if args.seed is not None:
             cfg_train.seed = args.seed
         # alg runner parameters
@@ -182,6 +191,7 @@ def get_args(extra_custom_parameters=None):
     """
     custom_parameters = [
         {"name": "--mode_gate", "type": str, "help": "MINE gate: on/off. Omit to use config for new runs or checkpoint mode for resume/play."},
+        {"name": "--estimator_update_schedule", "type": str, "help": "MINE estimator updates: interleaved (A) or after_ppo (B). Omit to use config for new runs or checkpoint schedule for resume/play."},
         {"name": "--task", "type": str, "default": "nezha_mine", "help": "Registered task to train or play."},
         {"name": "--resume", "action": "store_true", "default": False,  "help": "Resume training from a checkpoint"},
         {"name": "--experiment_name", "type": str,  "help": "Name of the experiment to run or load. Overrides config file if provided."},

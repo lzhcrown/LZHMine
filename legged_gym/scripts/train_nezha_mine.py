@@ -58,6 +58,7 @@ def train(args):
     print(f"mode gate:          {'on' if runner.alg.actor_critic.use_mode_gate else 'off'}")
     print(f"task:               {TASK_NAME}")
     print(f"runner/algorithm:   {EXPECTED_RUNNER} / {EXPECTED_ALGORITHM}")
+    print(f"estimator updates:  {runner.alg.estimator_update_schedule}")
     print(f"environments:       {env.num_envs}")
     print(f"actor observations: {env.num_obs} ({env.history_length} x {env.num_one_step_obs})")
     print(f"critic observations:{env.num_privileged_obs}")

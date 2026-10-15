@@ -17,6 +17,7 @@ from rsl_rl.env import VecEnv
 from rsl_rl.modules.mine_actor_critic import MINEActorCritic
 from rsl_rl.utils.mine_checkpoint import (
     config_to_dict,
+    estimator_update_schedule_from_checkpoint,
     git_diff,
     git_state,
     policy_config_from_checkpoint,
@@ -30,6 +31,9 @@ class MINEOnPolicyRunner:
         self.train_cfg = train_cfg
         self.cfg = train_cfg["runner"]
         self.alg_cfg = train_cfg["algorithm"]
+        # Record the effective default even when constructed with an archived
+        # config that predates the A/B switch.
+        self.alg_cfg.setdefault("estimator_update_schedule", "interleaved")
         self.policy_cfg = train_cfg["policy"]
         self.device = device
         self.env = env
@@ -366,7 +370,10 @@ class MINEOnPolicyRunner:
             if name in losses:
                 metrics[f"ModeGate/{name}"] = self._scalar(losses[name])
         for name, value in losses.items():
-            if name.startswith(("kl_", "pre_update_", "post_update_", "update_")):
+            if name.startswith((
+                "kl_", "pre_update_", "post_update_", "post_ppo_",
+                "estimator_phase_", "update_",
+            )):
                 metrics[f"Diagnostics/{name}"] = self._scalar(value)
             elif name.startswith("learning_rate_"):
                 metrics[f"LearningRate/{name[len('learning_rate_'):]}"] = self._scalar(value)
@@ -555,6 +562,14 @@ class MINEOnPolicyRunner:
 
     def load(self, path, load_optimizer=True):
         checkpoint = torch.load(path, map_location=self.device, weights_only=False)
+        saved_schedule = estimator_update_schedule_from_checkpoint(checkpoint)
+        if saved_schedule != self.alg.estimator_update_schedule:
+            raise ValueError(
+                f"Estimator update schedule differs from checkpoint "
+                f"({self.alg.estimator_update_schedule!r} vs {saved_schedule!r}); "
+                "construct the runner with the checkpoint schedule, or start a "
+                "new run to compare schedules"
+            )
         config = policy_config_from_checkpoint(checkpoint)
         if config["use_mode_gate"] != self.alg.actor_critic.use_mode_gate:
             raise ValueError("Gate mode differs from checkpoint; start a new run to change it")
