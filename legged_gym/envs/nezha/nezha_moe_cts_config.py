@@ -73,8 +73,9 @@ class NezhaMoECTSCfgPPO(LeggedRobotCfgPPO):
         max_iterations = 100000
         save_interval = 1000
         experiment_name = "nezha_moe_cts"
-        run_name = "wf_observations"
-        wandb_enabled = True
+        run_name = "wf_terrain"
+        # TensorBoard always records; W&B is an optional CLI opt-in.
+        wandb_enabled = False
         wandb_project = "LZHMine"
         wandb_entity = None
         wandb_group = "nezha_moe_cts"

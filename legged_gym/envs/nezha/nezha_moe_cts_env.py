@@ -57,6 +57,15 @@ class NezhaMoECTSEnv(NezhaRobot):
         )
         self.current_obs = torch.zeros(self.num_envs, self.num_one_step_obs, device=self.device)
 
+    def reset(self):
+        if self.wf_curriculum is None:
+            return super().reset()
+        # Isaac Lab reset computes the first observation without a physics
+        # step. Preserve the restored curriculum clock and full command timer.
+        self.reset_idx(torch.arange(self.num_envs, device=self.device))
+        self.compute_observations()
+        return self.obs_buf, self.privileged_obs_buf
+
     def _get_noise_scale_vec(self, cfg):
         # The base allocator calls this; actual noise is applied per raw term
         # by the shared observation builder, before clipping and scaling.
@@ -129,6 +138,7 @@ class NezhaMoECTSEnv(NezhaRobot):
         env_ids = self.reset_buf.nonzero(as_tuple=False).flatten()
         termination_privileged = self.compute_termination_observations(env_ids)
         self.reset_idx(env_ids)
+        self._update_wf_commands_after_reset()
         self.compute_observations()
         self.disturbance.zero_()
         self.last_last_actions.copy_(self.last_actions)

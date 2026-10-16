@@ -2,32 +2,50 @@
 
 from legged_gym import LEGGED_GYM_ROOT_DIR
 from legged_gym.envs.base.legged_robot_config import LeggedRobotCfg
+from legged_gym.terrains.wf import default_wf_sub_terrains
+from rsl_rl.utils.wf_curriculum import default_wf_command_config
 
 
 class NezhaRobotCfg(LeggedRobotCfg):
     class env(LeggedRobotCfg.env):
         num_envs = 4096
         num_actions = 16
-        episode_length_s = 20
+        episode_length_s = 25
         fail_to_terminal_time_s = 0.6
 
     class terrain(LeggedRobotCfg.terrain):
         mesh_type = "trimesh"
-        generator_profile = "wheel_gym_cq"
-        terrain_length = 10.0
-        terrain_width = 10.0
+        generator_profile = "legbot_wf"
+        terrain_length = 9.0
+        terrain_width = 9.0
+        horizontal_scale = 0.1
+        vertical_scale = 0.005
+        border_size = 25.0
+        sub_terrain_border_width = 0.5
+        difficulty_range = [0.0, 1.0]
+        seed = None
         num_rows = 10
         num_cols = 20
         max_init_terrain_level = 5
-        # wheel_gym_CQ Apr10 gated-three-class baseline:
-        # plane, slope, rough slope, stairs down, stairs up.
-        terrain_proportions = [0.1, 0.1, 0.35, 0.2, 0.25]
+        # legbot_lab WF-CTS-MOE daff9fb: TERRAIN_CFG, not DEFAULT_TERRAIN_CFG.
+        wf_sub_terrains = default_wf_sub_terrains()
+        terrain_proportions = [spec["proportion"] for spec in wf_sub_terrains.values()]
         curriculum = True
         measure_heights = True
-        restitution = 0.5
-        yaw_init_range = 0.0
+        static_friction = 1.0
+        dynamic_friction = 1.0
+        restitution = 0.0
+        yaw_init_range = 3.14
+        spawn_xy_range = 0.5
+        spawn_z_range = [0.0, 0.05]
 
     class commands(LeggedRobotCfg.commands):
+        curriculum_profile = "legbot_wf"
+        wf_settings = default_wf_command_config()
+        # Keep WF sampling; restore Nezha's reward-gated range progression.
+        wf_settings["range_curriculum"] = "nezha_reward"
+        curriculum = True
+        resampling_time = 5.0
         heading_command = False
         max_curriculum = 1.5
         max_curriculum_yaw = 1.5
@@ -168,9 +186,11 @@ class NezhaRobotCfg(LeggedRobotCfg):
             termination = -0.8
             tracking_lin_vel = 3.0
             tracking_ang_vel = 1.5
-            lin_vel_z = -4.0
+            # WF curriculum: -2 -> -1 over iterations 0..1500.
+            lin_vel_z = -2.0
             ang_vel_xy = -0.2
             orientation = -2.0
+            # WF curriculum: -1 -> -10 over iterations 0..5000.
             base_height = -1.0
             feet_contact_uniform = -0.1
             hip_default = -8.0

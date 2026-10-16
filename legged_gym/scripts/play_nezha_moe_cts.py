@@ -3,6 +3,13 @@
 
 import os
 
+if __package__:
+    from ._bootstrap import configure_runtime
+else:
+    from _bootstrap import configure_runtime
+
+configure_runtime(isaac_gym=True)
+
 import isaacgym  # noqa: F401 - Isaac Gym must be imported before torch.
 import torch
 

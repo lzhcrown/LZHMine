@@ -30,6 +30,13 @@
 
 """Default entry point for evaluating the Nezha MoE-CTS student."""
 
+if __package__:
+    from ._bootstrap import configure_runtime
+else:
+    from _bootstrap import configure_runtime
+
+configure_runtime(isaac_gym=True)
+
 from legged_gym.scripts.play_nezha_moe_cts import PLAY_ARGUMENTS, play
 from legged_gym.utils import get_args
 

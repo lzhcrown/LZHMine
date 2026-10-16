@@ -1,13 +1,17 @@
 """Exercise the real CTS runner without loading an Isaac Gym simulator."""
 
 import copy
+import json
+from types import SimpleNamespace
 
 import pytest
 import torch
+from tensorboard.backend.event_processing.event_accumulator import EventAccumulator
 
 from rsl_rl.runners.on_policy_runner_cts import MoECTSOnPolicyRunner
 from rsl_rl.utils.cts_checkpoint import load_cts_checkpoint, policy_from_checkpoint
 from rsl_rl.utils.cts_observations import default_observation_config
+from rsl_rl.utils.wf_curriculum import WFCurriculum, default_wf_command_config
 
 
 class FakeVectorEnv:
@@ -64,6 +68,43 @@ class FakeVectorEnv:
         # Match Nezha's seven-result Gym step API.
         return (self.observations, self.privileged, rewards, dones, infos,
                 ids, terminal_privileged)
+
+
+class CurriculumVectorEnv(FakeVectorEnv):
+    """Use the real range curriculum while keeping simulator state minimal."""
+
+    def __init__(self, range_profile="nezha_reward"):
+        super().__init__()
+        self.device = "cpu"
+        self.dt = 0.02
+        self.command_ranges = {
+            "lin_vel_x": [-1.0, 1.0], "lin_vel_y": [-0.6, 0.6],
+            "ang_vel_yaw": [-1.0, 1.0], "heading": [-3.14, 3.14],
+        }
+        settings = default_wf_command_config()
+        settings["range_curriculum"] = range_profile
+        self.cfg = SimpleNamespace(
+            commands=SimpleNamespace(
+                curriculum=True, wf_settings=settings,
+                ranges=SimpleNamespace(**copy.deepcopy(self.command_ranges)),
+            ),
+            terrain=SimpleNamespace(
+                mesh_type="trimesh", terrain_length=9.0,
+                sub_terrain_border_width=0.5,
+            ),
+        )
+        self.terrain = SimpleNamespace(column_types=["flat", "stairs_up"])
+        self.terrain_types = torch.arange(self.num_envs) % 2
+        self.wf_curriculum = WFCurriculum(self)
+        self.ranges_at_reset = []
+
+    def reset(self):
+        self.wf_curriculum.update_command_ranges()
+        self.ranges_at_reset.append((
+            self.common_step_counter, copy.deepcopy(self.command_ranges),
+            self.wf_curriculum.env_command_ranges["lin_vel_x"].clone(),
+        ))
+        return super().reset()
 
 
 def runner_config():
@@ -153,6 +194,133 @@ def test_runner_learns_saves_and_resumes_both_optimizers(tmp_path):
     # Restoring Adam's step matters: both optimizers must continue at step 6.
     for optimizer in (restored.alg.optimizer, restored.alg.optimizer_stu_enc):
         assert all(state["step"].item() == 6 for state in optimizer.state.values())
+
+
+def test_reward_command_range_checkpoint_restores_expansion_before_reset(tmp_path):
+    env = CurriculumVectorEnv()
+    runner = MoECTSOnPolicyRunner(env, runner_config())
+    env.command_ranges["lin_vel_x"] = [-1.4, 1.4]
+    env.command_ranges["ang_vel_yaw"] = [-1.3, 1.3]
+    env.wf_curriculum.update_command_ranges()
+    env.common_step_counter = 5800 * runner.num_steps_per_env
+    expanded = copy.deepcopy(env.command_ranges)
+    path = tmp_path / "expanded.pt"
+    runner.save(path)
+    checkpoint = load_cts_checkpoint(path)
+    assert checkpoint["command_curriculum_state"] == {
+        "profile": "nezha_reward", "ranges": expanded,
+    }
+    # Saving runtime state must not rewrite the documented initial settings.
+    assert checkpoint["environment_config"]["commands"]["ranges"]["lin_vel_x"] == [-1.0, 1.0]
+
+    resumed = MoECTSOnPolicyRunner(CurriculumVectorEnv(), runner_config())
+    resumed.load(path)
+    clock, ranges, per_terrain = resumed.env.ranges_at_reset[-1]
+    assert clock == env.common_step_counter
+    assert ranges == expanded
+    assert resumed.env.command_ranges == expanded
+    assert torch.allclose(per_terrain[::2], torch.tensor([[-1.4, 1.4]]).expand(4, -1))
+    # WF still caps the effective speed on stairs after a global expansion.
+    assert torch.equal(per_terrain[1::2], torch.tensor([[-1.0, 1.0]]).expand(4, -1))
+
+
+def test_reward_command_range_load_accepts_older_checkpoint_without_state(tmp_path):
+    runner = MoECTSOnPolicyRunner(CurriculumVectorEnv(), runner_config())
+    path = tmp_path / "older.pt"
+    runner.save(path)
+    checkpoint = load_cts_checkpoint(path)
+    checkpoint.pop("command_curriculum_state")
+    checkpoint["env_common_step_counter"] = 100000 * runner.num_steps_per_env
+    torch.save(checkpoint, path)
+
+    resumed = MoECTSOnPolicyRunner(CurriculumVectorEnv(), runner_config())
+    initial = copy.deepcopy(resumed.env.command_ranges)
+    resumed.load(path)
+    assert resumed.env.command_ranges == initial
+    assert resumed.env.ranges_at_reset[-1][1] == initial
+
+
+def test_iteration_command_curriculum_does_not_save_or_load_reward_ranges(tmp_path):
+    runner = MoECTSOnPolicyRunner(CurriculumVectorEnv("iteration"), runner_config())
+    path = tmp_path / "iteration.pt"
+    runner.save(path)
+    checkpoint = load_cts_checkpoint(path)
+    assert "command_curriculum_state" not in checkpoint
+    checkpoint["command_curriculum_state"] = {
+        "profile": "nezha_reward",
+        "ranges": {"lin_vel_x": [-1.4, 1.4], "ang_vel_yaw": [-1.3, 1.3]},
+    }
+    checkpoint["env_common_step_counter"] = 75000 * runner.num_steps_per_env
+    torch.save(checkpoint, path)
+
+    runner.load(path)
+    assert runner.env.command_ranges["lin_vel_x"] == [-3.0, 3.0]
+    assert runner.env.command_ranges["ang_vel_yaw"] == [-3.14, 3.14]
+
+
+def test_tensorboard_starts_before_rollout_and_covers_repeated_learn_calls(tmp_path, monkeypatch):
+    env = FakeVectorEnv()
+    env.max_episode_length = 100
+    env.cfg = SimpleNamespace(terrain=SimpleNamespace(generator_profile="legbot_wf"))
+    runner = MoECTSOnPolicyRunner(env, runner_config(), log_dir=str(tmp_path))
+    original_step = env.step
+    observed_writers = []
+
+    def check_live_logs(actions):
+        if env.common_step_counter == 0:
+            assert runner.writer is not None
+            observed_writers.append(runner.writer)
+            assert list(tmp_path.glob("events.out.tfevents.*"))
+            # Creating the run must not manufacture loss/reward samples.
+            assert not EventAccumulator(str(tmp_path)).Reload().Tags()["scalars"]
+        elif env.common_step_counter == 3:
+            events = EventAccumulator(str(tmp_path)).Reload()
+            assert [event.step for event in events.Scalars("Loss/value")] == [0]
+            assert "Train/teacher_reward" not in events.Tags()["scalars"]
+        return original_step(actions)
+
+    monkeypatch.setattr(env, "step", check_live_logs)
+    runner.learn(2)
+    assert runner.writer is None
+    assert observed_writers[0].file_writer is None
+    events = EventAccumulator(str(tmp_path)).Reload()
+    assert [event.step for event in events.Scalars("Loss/value")] == [0, 1]
+    assert [event.value for event in events.Scalars("Perf/total_timesteps")] == [24, 48]
+    with (tmp_path / "config.json").open() as stream:
+        assert json.load(stream)["environment"]["terrain"]["generator_profile"] == "legbot_wf"
+
+    runner.learn(1)
+    assert runner.writer is None
+    events = EventAccumulator(str(tmp_path)).Reload()
+    assert [event.step for event in events.Scalars("Loss/value")] == [0, 1, 2]
+    assert [event.value for event in events.Scalars("Perf/total_timesteps")] == [24, 48, 72]
+    assert (tmp_path / "model_3.pt").is_file()
+
+
+@pytest.mark.parametrize("interruption", [RuntimeError, KeyboardInterrupt])
+def test_tensorboard_persists_completed_iterations_on_interruption(tmp_path, monkeypatch, interruption):
+    env = FakeVectorEnv()
+    runner = MoECTSOnPolicyRunner(env, runner_config(), log_dir=str(tmp_path))
+    original_step = env.step
+    observed_writers = []
+
+    def interrupted_step(actions):
+        if env.common_step_counter == 0:
+            observed_writers.append(runner.writer)
+        if env.common_step_counter == 6:
+            raise interruption("interrupted during third rollout")
+        return original_step(actions)
+
+    monkeypatch.setattr(env, "step", interrupted_step)
+    with pytest.raises(interruption, match="interrupted during third rollout"):
+        runner.learn(3)
+    assert runner.writer is None
+    assert observed_writers[0].file_writer is None
+    events = EventAccumulator(str(tmp_path)).Reload()
+    assert [event.step for event in events.Scalars("Loss/value")] == [0, 1]
+    assert [event.value for event in events.Scalars("Perf/total_timesteps")] == [24, 48]
+    assert (tmp_path / "model_2.pt").is_file()
+    assert not (tmp_path / "model_3.pt").exists()
 
 
 def test_checkpoint_rejects_other_architectures_and_inconsistent_dimensions(tmp_path):

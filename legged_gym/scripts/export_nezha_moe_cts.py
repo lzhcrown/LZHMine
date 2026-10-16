@@ -5,6 +5,13 @@ import argparse
 import os
 import re
 
+if __package__:
+    from ._bootstrap import configure_runtime
+else:
+    from _bootstrap import configure_runtime
+
+configure_runtime()
+
 import torch
 
 from rsl_rl.utils.cts_checkpoint import load_cts_checkpoint, policy_from_checkpoint

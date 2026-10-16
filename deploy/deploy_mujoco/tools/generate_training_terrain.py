@@ -10,13 +10,16 @@ import hashlib
 import json
 from pathlib import Path
 import sys
+import xml.etree.ElementTree as ET
 
+import isaacgym  # noqa: F401 - must precede torch through the training config
 import numpy as np
 from PIL import Image
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
+sys.path.insert(0, str(REPO_ROOT / "rsl_rl"))
 
 from legged_gym.envs.nezha.nezha_moe_cts_config import (
     NezhaMoECTSCfg,
@@ -30,8 +33,12 @@ ASSET_DIR = DEPLOY_DIR / "nezha" / "mjcf" / "assets"
 IMAGE_PATH = ASSET_DIR / "nezha_training_curriculum.png"
 BINARY_PATH = ASSET_DIR / "nezha_training_curriculum.bin"
 METADATA_PATH = ASSET_DIR / "nezha_training_curriculum.json"
+SCENE_PATH = DEPLOY_DIR / "nezha" / "mjcf" / "scene_training.xml"
 
 def _column_labels(cfg):
+    if getattr(cfg, "generator_profile", None) == "legbot_wf":
+        from legged_gym.terrains.wf import column_types
+        return column_types(cfg)
     cumulative = np.cumsum(cfg.terrain_proportions)
     labels = []
     for column in range(cfg.num_cols):
@@ -102,6 +109,9 @@ def main():
         "terrain_proportions": terrain_cfg.terrain_proportions,
         "max_init_terrain_level": terrain_cfg.max_init_terrain_level,
         "column_types": _column_labels(terrain_cfg),
+        "difficulty_range": getattr(terrain_cfg, "difficulty_range", [0.0, 1.0]),
+        "tile_difficulties": terrain.difficulties.tolist() if hasattr(terrain, "difficulties") else None,
+        "sub_terrain_border_width_m": getattr(terrain_cfg, "sub_terrain_border_width", 0.0),
         "env_origins": terrain.env_origins.tolist(),
         "height_shape": list(terrain.height_field_raw.shape),
         "image_shape": list(pixels.shape),
@@ -117,6 +127,18 @@ def main():
         json.dumps(metadata, indent=2, ensure_ascii=False) + "\n",
         encoding="utf-8",
     )
+    # Keep the optional full-map scene aligned with the regenerated dimensions
+    # and elevation range instead of retaining the old 10x10 m Gym map values.
+    scene = ET.parse(SCENE_PATH)
+    scene.getroot().set("model", "nezha WF-CTS-MOE full-training-curriculum sim-to-sim")
+    span_x = (terrain.tot_rows - 1) * terrain_cfg.horizontal_scale
+    span_y = (terrain.tot_cols - 1) * terrain_cfg.horizontal_scale
+    scene.find("./asset/hfield").set("size", "{} {} {} 0.1".format(span_x / 2, span_y / 2, maximum - minimum))
+    scene.find("./worldbody/geom[@name='training_terrain']").set(
+        "pos", "{} {} {}".format(span_x / 2 - terrain_cfg.border_size,
+                                  span_y / 2 - terrain_cfg.border_size, minimum))
+    scene_xml = ET.tostring(scene.getroot(), encoding="unicode")
+    SCENE_PATH.write_text("\n".join(line.rstrip() for line in scene_xml.splitlines()) + "\n", encoding="utf-8")
     print(
         f"wrote {BINARY_PATH} ({binary_data.shape[1]}x{binary_data.shape[0]}), "
         f"height range [{minimum:.3f}, {maximum:.3f}] m"

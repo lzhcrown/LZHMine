@@ -43,6 +43,11 @@ class Terrain:
         self.type = cfg.mesh_type
         if self.type in ["none", 'plane']:
             return
+        if getattr(cfg, "generator_profile", None) == "legbot_wf":
+            from legged_gym.terrains.wf import WFTerrain
+            terrain = WFTerrain(cfg, num_robots, terrain_utils.convert_heightfield_to_trimesh)
+            self.__dict__.update(terrain.__dict__)
+            return
         self.env_length = cfg.terrain_length
         self.env_width = cfg.terrain_width
         self.proportions = [np.sum(cfg.terrain_proportions[:i+1]) for i in range(len(cfg.terrain_proportions))]

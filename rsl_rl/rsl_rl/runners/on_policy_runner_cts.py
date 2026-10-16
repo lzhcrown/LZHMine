@@ -51,6 +51,11 @@ class MoECTSOnPolicyRunner:
         policy.observation_config = copy.deepcopy(self.observation_config)
         self.alg = MoECTS(policy, num_envs=env.num_envs, device=device, **self.train_cfg["algorithm"])
         self.num_steps_per_env = int(self.cfg["num_steps_per_env"])
+        curriculum = getattr(env, "wf_curriculum", None)
+        if curriculum is not None:
+            curriculum.steps_per_iteration = self.num_steps_per_env
+            curriculum.cfg["num_steps_per_iter"] = self.num_steps_per_env
+            env.cfg.commands.wf_settings["num_steps_per_iter"] = self.num_steps_per_env
         self.save_interval = int(self.cfg.get("save_interval", 50))
         if self.num_steps_per_env < 1 or self.save_interval < 1:
             raise ValueError("Rollout length and save interval must be positive")
@@ -72,12 +77,17 @@ class MoECTSOnPolicyRunner:
         if self.writer is None:
             from torch.utils.tensorboard import SummaryWriter
             self.writer = SummaryWriter(self.log_dir, flush_secs=10)
+            self._flush_first_log = True
             with open(os.path.join(self.log_dir, "config.json"), "w", encoding="utf-8") as stream:
                 json.dump({
                     "training": self.train_cfg,
+                    "environment": _config_dict(self.env.cfg) if hasattr(self.env, "cfg") else {},
                     "observations": self.observation_config,
                     "policy": self.policy_config,
                 }, stream, ensure_ascii=False, indent=2)
+            # Make the run discoverable before the first rollout. Loss and
+            # episode metrics are only available after actual training steps.
+            self.writer.flush()
         if self.cfg.get("wandb_enabled", False) and self.wandb_run is None:
             import wandb
             self.wandb_run = wandb.init(
@@ -95,7 +105,28 @@ class MoECTSOnPolicyRunner:
         count = int(num_learning_iterations)
         if count < 1:
             raise ValueError("num_learning_iterations must be positive")
-        self._open_logs()
+        try:
+            self._open_logs()
+            self._learn(count, init_at_random_ep_len)
+        finally:
+            # Also persist completed iterations when interrupted by Ctrl+C or
+            # an exception. A later learn() call can open a fresh event file.
+            self._close_logs()
+
+    def _close_logs(self):
+        writer, self.writer = self.writer, None
+        wandb_run, self.wandb_run = self.wandb_run, None
+        try:
+            if writer is not None:
+                try:
+                    writer.flush()
+                finally:
+                    writer.close()
+        finally:
+            if wandb_run is not None:
+                wandb_run.finish()
+
+    def _learn(self, count, init_at_random_ep_len):
         if init_at_random_ep_len:
             self.env.episode_length_buf = torch.randint_like(
                 self.env.episode_length_buf, high=int(self.env.max_episode_length),
@@ -151,11 +182,6 @@ class MoECTSOnPolicyRunner:
                 self.save(os.path.join(self.log_dir, "model_{}.pt".format(self.current_learning_iteration)))
         if self.log_dir is not None:
             self.save(os.path.join(self.log_dir, "model_{}.pt".format(self.current_learning_iteration)))
-        if self.writer is not None:
-            self.writer.flush()
-        if self.wandb_run is not None:
-            self.wandb_run.finish()
-            self.wandb_run = None
 
     def _log(self, iteration, losses, collected, learned, buffers, episodes):
         metrics = {}
@@ -183,6 +209,9 @@ class MoECTSOnPolicyRunner:
         if self.writer is not None:
             for name, value in metrics.items():
                 self.writer.add_scalar(name, value, iteration)
+            if self._flush_first_log:
+                self.writer.flush()
+                self._flush_first_log = False
         if self.wandb_run is not None:
             self.wandb_run.log(metrics, step=iteration)
         print("MoE-CTS iteration {} | {:.0f} steps/s | {}".format(
@@ -227,6 +256,14 @@ class MoECTSOnPolicyRunner:
             "env_common_step_counter": getattr(self.env, "common_step_counter", 0),
             "infos": infos,
         }
+        curriculum = getattr(self.env, "wf_curriculum", None)
+        if getattr(curriculum, "uses_reward_command_curriculum", False):
+            # Reward-driven ranges cannot be reconstructed from the iteration
+            # clock, unlike WF's fixed-stage command curriculum.
+            checkpoint["command_curriculum_state"] = {
+                "profile": "nezha_reward",
+                "ranges": copy.deepcopy(self.env.command_ranges),
+            }
         # Atomic replacement prevents a partial checkpoint being treated as latest.
         temporary = str(path) + ".tmp"
         torch.save(checkpoint, temporary)
@@ -248,6 +285,13 @@ class MoECTSOnPolicyRunner:
         self.tot_time = float(checkpoint.get("total_time", 0.0))
         if hasattr(self.env, "common_step_counter"):
             self.env.common_step_counter = int(checkpoint.get("env_common_step_counter", 0))
+        curriculum = getattr(self.env, "wf_curriculum", None)
+        command_state = checkpoint.get("command_curriculum_state")
+        if (getattr(curriculum, "uses_reward_command_curriculum", False)
+                and command_state is not None
+                and command_state.get("profile") == "nezha_reward"):
+            self.env.command_ranges.update(copy.deepcopy(command_state["ranges"]))
+            curriculum.update_command_ranges()
         # Physics and per-environment histories are intentionally reinitialised.
         self.env.reset()
         return checkpoint.get("infos")

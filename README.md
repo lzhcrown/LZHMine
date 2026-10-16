@@ -38,71 +38,105 @@
 
 接触特征为四轮接触力范数的 [最近三次最大值、当前、前一次、前两次]，共 16 维，按每个 0.005 s 物理步采样。高度使用 17×11 个 yaw 对齐点（x -0.8…0.8 m，y -0.5…0.5 m），按 WF 的 xy 网格顺序展开；值为机体高度减地面高度再减 0.5 m。高度原始值裁剪到 ±1，其余项默认 ±100，之后乘 scale。
 
-Isaac Gym 的高度来自原有 heightfield 邻点采样，接触来自 PhysX net contact tensor；它们与 Isaac Lab 的射线／接触传感器并非完全相同的数值实现。这里对齐输入定义、维数、顺序和预处理，保留 Nezha 的 URDF、地形课程、奖励与动力学随机化。腿部动作尺度为 0.25，轮速尺度为 **10**，控制频率 50 Hz。
+Isaac Gym 的高度来自原有 heightfield 邻点采样，接触来自 PhysX net contact tensor；它们与 Isaac Lab 的射线／接触传感器并非完全相同的数值实现。这里对齐输入定义、维数、顺序和预处理；地形采用下述 WF 配置，速度范围按 Nezha 原来的跟踪奖励条件扩展，机器人 URDF、控制与其余奖励／动力学仍使用 Nezha 配置。腿部动作尺度为 0.25，轮速尺度为 **10**，控制频率 50 Hz。
+
+## WF 地形与 Nezha 速度课程
+
+新训练使用 `legbot_wf`，参考 `legbot_lab@daff9fbe` 的 `LegbotEnvCfg` 和 `TERRAIN_CFG`（不是同文件中的 `DEFAULT_TERRAIN_CFG`）。高度场实现对照其依赖的 [Isaac Lab v2.3.2 源码](https://github.com/isaac-sim/IsaacLab/tree/v2.3.2/source/isaaclab/isaaclab/terrains)。
+
+- 10 行 × 20 列，每块 9×9 m，包含四边各 0.5 m 的子地形边界；全图外圈 25 m。
+- 水平／垂直分辨率 0.1／0.005 m；初始等级均匀采样 0～5。
+- 第 `r` 行难度为 `(r + U[0,1)) / 10`，不是固定 `r/10`；按列、行顺序生成，使用与参考相同的独立难度随机数生成器。
+- 地面静／动摩擦系数均为 1，恢复系数为 0；episode 为 25 s。出生 x/y 偏移 ±0.5 m、z 偏移 0～0.05 m、yaw 为 ±3.14。
+
+| 地形名称 | 比例／列数 | 随难度变化的参数 | 坡面修正阈值 |
+|---|---|---|---|
+| `wave` | 5%／1 | 幅值 0.1～0.28 m，5 个波，叠加 ±0.05 m 粗糙度 | 10 |
+| `slope_up` | 10%／2 | 倒置金字塔，坡度 0.1～0.568，中心平台 3 m | 10 |
+| `slope_down` | 10%／2 | 正向金字塔，同上 | 10 |
+| `rough_slope` | 5%／1 | 正向坡面，叠加 ±0.05 m 粗糙度 | 10 |
+| `stairs_up` | 25%／5 | 倒置台阶，高 0.05～0.257 m，宽 0.31 m，平台 3 m | 0.25 |
+| `stairs_down` | 10%／2 | 正向台阶，同上 | 0.25 |
+| `obstacles` | 20%／4 | 20 个随机障碍，高度范围 0.05～0.275 m，宽度范围 1～2 m，平台 3 m | 0.25 |
+| `flat` | 15%／3 | 平地 | 无 |
+
+名称和正／倒置方向直接沿用参考定义。`stepping_stones`、`gap` 的比例均为 0，不生成。高度场边界包含额外采样点，每块为 91×91 格、内部为 79×79 格；台阶宽度按参考离散为 3 格，粗糙度使用双三次插值。三角网格按每类地形自己的阈值修正。Gym 全图保留原坐标约定，较 Lab 整体平移，局部几何一致。
+
+地形课程在 episode reset 前评估：历史最大平面位移大于 4 m 时升级；否则，当最大位移小于 `0.5 × ||累计 xy 指令|| × 5 × (1 - 零指令概率)` 时降级。累计指令按每次重采样的速度向量求和，正反指令会抵消。等级低于 0 时裁剪，超过最高等级 9 时重新随机分配到 0～9。
+
+速度全局范围恢复 Nezha 原设定，使用 `commands.wf_settings["range_curriculum"] = "nezha_reward"`：
+
+| 指令 | 初始范围 | 每次达标扩展量 | 最大范围 |
+|---|---|---|---|
+| x 速度（m/s） | ±1.0 | 两端各 0.2 | ±1.5 |
+| y 速度（m/s） | ±0.6 | 不扩展 | ±0.6 |
+| yaw 角速度（rad/s） | ±1.0 | 两端各 0.1 | ±1.5 |
+
+沿用 Nezha 的检查时机：有环境重置，且全局控制步计数是最大回合步数的整数倍时检查（当前每 1250 步）。对这批重置环境，`tracking_lin_vel` 的回合累计奖励均值除以最大回合步数，严格超过该项每步奖励权重的 80% 才扩展 x；`tracking_ang_vel` 独立决定 yaw 是否扩展。侧向范围固定，提前失败的短回合也按最大回合步数归一化。速度不再根据 20000／50000／75000 轮自动增加。
+
+其余 WF 采样保持原样：全局范围仍与各地形限速取交集，平地／波浪／坡面最终 x 上限为 ±1.5 m/s，台阶／障碍 x 上限仍为 ±1 m/s；所有地形 y 保持 ±0.6 m/s，yaw 最高 ±1.5 rad/s。默认每 5 s 重采样，保留动态速度下界、20% 极限指令采样和连续极限指令反向。零指令概率在前 1500 轮从 0 增至 15%，其中 20% 附加极限 yaw。本次只恢复全局速度范围和奖励达标扩展规则，没有改成原 Nezha 的 10 s 均匀采样。
+
+两项奖励课程也同步：`lin_vel_z` 权重在 0～1500 轮从 -2 变到 -1；`base_height` 在 0～5000 轮从 -1 变到 -10。课程时钟按每轮 rollout 步数换算；显式 reset 不额外推进该时钟。其余 Nezha 奖励不变，因此这不是整个 Isaac Lab 任务的动力学或奖励复刻。
+
+**使用新的速度范围与奖励达标课程请从零启动训练。** 旧 checkpoint 续训会恢复它保存的旧环境配置：旧 WF checkpoint 继续使用按轮次扩速，旧地形 checkpoint 继续使用原地形。新 checkpoint 会额外保存已扩展的速度范围，续训后保持进度。
+
+当前只注册 `nezha_moe_cts` 任务，新训练直接进入 `WFTerrain` 和 `WFCurriculum`，速度范围选择其中的 `nezha_reward` 模式，不会执行旧 `wheel_gym_cq` 地形分支。旧分支保留用于恢复旧 checkpoint。Nezha 机器人资产、控制、其余奖励、随机化、终止判据，以及 Isaac Gym 物理后端和高度／接触采样仍沿用本项目实现。
 
 ## 训练、续训、play 和导出
 
-在仓库根目录、已安装 Isaac Gym 的训练环境执行。本机训练环境为 `.venv`，MuJoCo 环境为 `.venv-mujoco`：
+本机训练环境为 `.venv`，MuJoCo 环境为 `.venv-mujoco`。入口自动配置仓库包路径、编译缓存和线程数，无需手动设置环境变量。默认使用 `cuda:0`、GPU pipeline、无窗口训练和 TensorBoard 记录。
+
+从零训练只需指定最大轮次、并行环境数和种子（示例先训练 5000 轮）：
 
 ```bash
 cd /home/bit/LZHMine
-export PYTHONPATH="$PWD/rsl_rl:$PWD"
-export PATH="$PWD/.venv/bin:$PATH"
-export TORCH_EXTENSIONS_DIR=/tmp/cts_torch_extensions
-export OMP_NUM_THREADS=1
+.venv/bin/python legged_gym/scripts/train_nezha_moe_cts.py \
+  --max_iterations 5000 --num_envs 4096 --seed 10
 ```
 
-使用 TensorBoard 记录训练曲线（示例从零训练 2000 轮）：
-
-```bash
-python legged_gym/scripts/train_nezha_moe_cts.py \
-  --headless --no_wandb \
-  --rl_device cuda:0 --sim_device cuda:0 --pipeline gpu \
-  --num_envs 4096 --max_iterations 2000 --seed 10 \
-  --run_name cts_moe_seed10
-```
+上例 5000 轮用于初步观察，速度范围是否扩大取决于跟踪奖励，而非预设轮次；后续可根据曲线和策略表现续训，训练预算上限仍为配置中的 100000 轮。如需训练窗口，可额外加 `--viewer`。
 
 在另一个终端启动 TensorBoard：
 
 ```bash
 cd /home/bit/LZHMine
-.venv/bin/tensorboard --logdir "$PWD/logs/nezha_moe_cts" \
+.venv/bin/tensorboard --logdir /home/bit/LZHMine/logs/nezha_moe_cts \
   --host 127.0.0.1 --port 6006
 ```
 
 浏览器打开 <http://127.0.0.1:6006>。远程训练时，在本地执行 `ssh -L 6006:127.0.0.1:6006 用户名@训练服务器`，再访问同一地址。
 
-默认日志目录为 `logs/nezha_moe_cts/<时间>_<run_name>/`，终端会打印实际路径。`--no_wandb` 关闭 W&B 上传，保留本地 TensorBoard event 文件，无需 W&B 登录；不带该参数时默认同时启用 W&B。重点查看：
+默认日志目录为 `logs/nezha_moe_cts/<时间>_wf_terrain/`，终端会打印实际路径；如需自定义名称，可额外加 `--run_name`。默认无需 W&B 登录，增加 `--wandb` 才会同时上传 W&B。
+
+TensorBoard 在首轮采样前创建日志，每轮记录指标直到最后一轮。第一轮 loss 在首次更新完成后出现，回报／episode 长度在对应组有回合结束后出现；无需等待 1000 轮模型保存。首轮指标立即落盘，后续最多约 10 秒批量刷新，正常结束或 Ctrl+C／Python 异常退出时刷新并关闭日志。TensorBoard 服务可在训练前或训练后启动，都能读取已经记录的完整历史。`config.json` 和 checkpoint 同时保存环境配置，可确认实际使用的地形与课程。重点查看：
 
 - `Train/teacher_reward`、`Train/student_reward`：教师／学生回报。
 - `Train/teacher_length`、`Train/student_length`：episode 长度。
 - `Loss/value`、`Loss/teacher_surrogate`、`Loss/student_surrogate`：PPO 损失。
 - `Loss/mean_latent_loss`、`Loss/mean_load_balance_loss`：蒸馏与专家均衡损失。
 - `Experts/gate_entropy`、`Experts/expert_0_usage` 至 `Experts/expert_7_usage`：门控熵与专家使用率。
+- `Episode/max_command_x`、`Episode/max_command_yaw`：奖励达标后扩展的全局速度上限；实际采样还受各地形限速约束。
 
 训练每 **1000 轮**保存一次 checkpoint，文件名为 `model_1000.pt`、`model_2000.pt` 等，保留各轮版本。训练正常结束时也会保存最后一轮，即使该轮不是 1000 的整数倍。训练需至少两个环境；当前 runner 面向单设备训练。
 
 以下续训、play、导出和 MuJoCo 命令直接填写绝对路径。将路径中的 `实际运行目录名` 替换为 `logs/nezha_moe_cts/` 下对应的运行目录名即可。续训示例：
 
 ```bash
-python legged_gym/scripts/train_nezha_moe_cts.py \
-  --headless --no_wandb \
-  --rl_device cuda:0 --sim_device cuda:0 --pipeline gpu \
-  --num_envs 4096 --max_iterations 2000 \
+.venv/bin/python legged_gym/scripts/train_nezha_moe_cts.py \
+  --max_iterations 95000 --num_envs 4096 --seed 10 \
   --resume \
   --load_run "/home/bit/LZHMine/logs/nezha_moe_cts/实际运行目录名" \
-  --checkpoint -1 \
-  --run_name cts_moe_resume
+  --checkpoint -1
 ```
 
-续训的 `--max_iterations 2000` 表示**追加 2000 轮**；`--load_run` 填运行目录路径，`--checkpoint -1` 选择该目录中最新的 checkpoint，也可传 `1000` 等轮数。续训会创建新的日志目录，TensorBoard 可同时查看各次运行；导出续训结果时需填写新目录下的模型路径。
+续训的 `--max_iterations 95000` 表示**追加 95000 轮**，例如从第 5000 轮接着训练到累计 100000 轮；`--load_run` 填运行目录路径，`--checkpoint -1` 选择该目录中最新的 checkpoint，也可传 `1000` 等轮数。续训会创建新的日志目录，TensorBoard 可同时查看各次运行；导出续训结果时需填写新目录下的模型路径。
 
-Checkpoint 保存网络与观测 schema、环境配置、控制参数、两个优化器和训练计数。续训先恢复观测配置再创建环境，可以用 `--num_envs` 调整并行数量；物理状态和历史重新初始化，运行期地形等级和指令课程进度目前也未恢复。旧架构 checkpoint 会明确报错。
+Checkpoint 保存网络与观测 schema、环境配置、控制参数、两个优化器和训练计数。续训先恢复观测配置再创建环境，可以用 `--num_envs` 调整并行数量；物理状态、历史和每个环境的地形等级重新初始化。新模式的已扩展速度范围保存于 `command_curriculum_state`，恢复后再采样首条指令；WF 零指令概率与奖励课程仍由恢复的训练步数推导。旧 WF checkpoint 保持原来的按轮次速度课程，旧地形 profile 的运行期指令课程状态不恢复。旧架构 checkpoint 会明确报错。
 
 学生 play（直接指定第 1000 轮 checkpoint，默认一个环境）：
 
 ```bash
-python legged_gym/scripts/play_nezha_moe_cts.py \
+.venv/bin/python legged_gym/scripts/play_nezha_moe_cts.py \
   --checkpoint_path "/home/bit/LZHMine/logs/nezha_moe_cts/实际运行目录名/model_1000.pt" \
   --play_num_envs 1
 ```
@@ -110,12 +144,12 @@ python legged_gym/scripts/play_nezha_moe_cts.py \
 独立导出学生策略（不需要 Isaac Gym/GPU）。独立导出和 play 自动导出的默认目录统一为 `deploy/deploy_mujoco/nezha/policy/`，目录不存在时自动创建。下面导出第 1000 轮 checkpoint，并直接填写输出路径；省略 `--output` 也使用同一路径：
 
 ```bash
-python legged_gym/scripts/export_nezha_moe_cts.py \
+.venv/bin/python legged_gym/scripts/export_nezha_moe_cts.py \
   --checkpoint "/home/bit/LZHMine/logs/nezha_moe_cts/实际运行目录名/model_1000.pt" \
   --output "/home/bit/LZHMine/deploy/deploy_mujoco/nezha/policy/policy.pt"
 
 # 或导出该运行最新的 checkpoint
-python legged_gym/scripts/export_nezha_moe_cts.py \
+.venv/bin/python legged_gym/scripts/export_nezha_moe_cts.py \
   --run "/home/bit/LZHMine/logs/nezha_moe_cts/实际运行目录名" \
   --output "/home/bit/LZHMine/deploy/deploy_mujoco/nezha/policy/policy.pt"
 ```
@@ -152,6 +186,8 @@ MuJoCo 可视化仿真（从 YAML 读取最近导出的策略，前进速度指�
 | Isaac Gym 原始观测采集、接触历史、reset | `legged_gym/envs/nezha/nezha_moe_cts_env.py` |
 | 历史帧数、专家数、latent、网络层宽、训练参数 | `legged_gym/envs/nezha/nezha_moe_cts_config.py` |
 | Nezha 控制、奖励、随机化与资产配置 | `legged_gym/envs/nezha/nezha_robot_config.py` |
+| WF 地形参数、离散高度场与网格组装 | `legged_gym/terrains/wf.py` |
+| WF 速度采样、地形升级降级、奖励课程 | `rsl_rl/rsl_rl/utils/wf_curriculum.py` |
 | MoE 与教师／学生 Actor-Critic | `rsl_rl/rsl_rl/modules/moe.py`、`actor_critic_moe_cts.py` |
 | 两阶段训练与 rollout | `rsl_rl/rsl_rl/algorithms/moe_cts.py`、`storage/rollout_storage_cts.py` |
 
@@ -166,6 +202,8 @@ OMP_NUM_THREADS=1 PYTHONPATH="$PWD/rsl_rl:$PWD" \
 ```
 
 自动化验证覆盖输入维数、逐项预处理、轮速、历史／reset、梯度隔离、同刻蒸馏、尾批次完整采样、checkpoint 续训、TorchScript 一致性和部署控制参数校验。短时仿真仅验证接口与数值运行，策略运动表现需要正式训练与评估。
+
+WF 验证还覆盖官方地形高度场 golden、类型比例／难度／边界／原点／种子复现／每类坡面修正阈值，以及旧速度阶段兼容、地形限速、累计指令、最大位移、零指令、奖励课程和 reset 时钟边界。Nezha 速度课程验证严格 80% 阈值、x/yaw 独立扩展、步长与上限、检查时机、采样后范围保持及 checkpoint 续训。
 
 实际 Isaac Gym 短时物理回归（需训练环境，默认 16 个环境和小地形）：
 

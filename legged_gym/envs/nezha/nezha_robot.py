@@ -13,6 +13,7 @@ from isaacgym.torch_utils import (
 )
 
 from legged_gym.envs.base.legged_robot import LeggedRobot
+from rsl_rl.utils.wf_curriculum import WFCurriculum, configure_wf_timing, is_wf_profile
 
 
 class NezhaRobot(LeggedRobot):
@@ -22,6 +23,7 @@ class NezhaRobot(LeggedRobot):
 
     def _parse_cfg(self, cfg):
         super()._parse_cfg(cfg)
+        configure_wf_timing(self)
         cfg.domain_rand.rand_interval = np.ceil(
             cfg.domain_rand.rand_interval_s / self.dt
         )
@@ -59,6 +61,16 @@ class NezhaRobot(LeggedRobot):
             raise ValueError("Nezha wheel contact bodies must be distinct valid rigid bodies")
         self.wheel_body_indices = torch.tensor(indices, dtype=torch.long, device=self.device)
         self.num_wheels = len(wheel_names)
+        self.wf_curriculum = (
+            WFCurriculum(self)
+            if is_wf_profile(self.cfg)
+            else None
+        )
+
+    def _prepare_reward_function(self):
+        super()._prepare_reward_function()
+        if self.wf_curriculum is not None:
+            self.wf_curriculum.update_reward_curriculum()
 
     def check_termination(self):
         fail = torch.any(
@@ -74,7 +86,11 @@ class NezhaRobot(LeggedRobot):
         fail |= self.projected_gravity[:, 2] > -0.5
         self.fail_buf *= fail
         self.fail_buf += fail
-        self.time_out_buf.copy_(self.episode_length_buf > self.max_episode_length)
+        self.time_out_buf.copy_(
+            self.episode_length_buf >= self.max_episode_length
+            if self.wf_curriculum is not None
+            else self.episode_length_buf > self.max_episode_length
+        )
         self.reset_buf.copy_((
             self.fail_buf > self.cfg.env.fail_to_terminal_time_s / self.dt
         ) | self.time_out_buf)
@@ -100,10 +116,15 @@ class NezhaRobot(LeggedRobot):
         if len(env_ids) == 0:
             return
 
-        self._resample_commands(env_ids)
+        if self.wf_curriculum is None:
+            self._resample_commands(env_ids)
         if self.cfg.terrain.curriculum:
             self._update_terrain_curriculum(env_ids)
+        if self.wf_curriculum is not None:
+            self.wf_curriculum.update_reward_curriculum()
         if self.cfg.commands.curriculum and (
+            self.wf_curriculum is None or self.wf_curriculum.uses_reward_command_curriculum
+        ) and (
             self.common_step_counter % self.max_episode_length == 0
         ):
             self.update_command_curriculum(env_ids)
@@ -120,6 +141,10 @@ class NezhaRobot(LeggedRobot):
         self.last_last_joint_pos_target[env_ids] = 0.0
         self.last_dof_vel[env_ids] = 0.0
         self.feet_air_time[env_ids] = 0.0
+        if self.wf_curriculum is not None:
+            # Isaac Lab resets CommandManager before the episode clock. The
+            # first sample therefore still sees the completed episode length.
+            self.wf_curriculum.reset(env_ids)
         self.episode_length_buf[env_ids] = 0
         self.reset_buf[env_ids] = 1
         self.fail_buf[env_ids] = 0
@@ -139,6 +164,9 @@ class NezhaRobot(LeggedRobot):
         if self.cfg.commands.curriculum:
             self.extras["episode"]["max_command_x"] = self.command_ranges[
                 "lin_vel_x"
+            ][1]
+            self.extras["episode"]["max_command_yaw"] = self.command_ranges[
+                "ang_vel_yaw"
             ][1]
         if self.cfg.env.send_timeouts:
             self.extras["time_outs"] = self.time_out_buf
@@ -169,9 +197,18 @@ class NezhaRobot(LeggedRobot):
         self.root_states[env_ids] = self.base_init_state
         self.root_states[env_ids, :3] += self.env_origins[env_ids]
         if self.custom_origins:
-            self.root_states[env_ids, :2] += torch_rand_float(
-                -1.0, 1.0, (len(env_ids), 2), device=self.device
+            xy_range = (
+                self.cfg.terrain.spawn_xy_range
+                if self.wf_curriculum is not None else 1.0
             )
+            self.root_states[env_ids, :2] += torch_rand_float(
+                -xy_range, xy_range, (len(env_ids), 2), device=self.device
+            )
+        if self.wf_curriculum is not None:
+            self.root_states[env_ids, 2] += torch_rand_float(
+                *self.cfg.terrain.spawn_z_range,
+                (len(env_ids), 1), device=self.device,
+            ).squeeze(1)
         self.root_states[env_ids, 7:13] = torch_rand_float(
             -0.5, 0.5, (len(env_ids), 6), device=self.device
         )
@@ -194,6 +231,9 @@ class NezhaRobot(LeggedRobot):
         )
 
     def _resample_commands(self, env_ids):
+        if self.wf_curriculum is not None:
+            self.wf_curriculum.resample(env_ids)
+            return
         self.commands[env_ids, 0] = torch_rand_float(
             self.command_ranges["lin_vel_x"][0],
             self.command_ranges["lin_vel_x"][1],
@@ -227,16 +267,19 @@ class NezhaRobot(LeggedRobot):
     def _update_terrain_curriculum(self, env_ids):
         if not self.init_done:
             return
-        distance = torch.norm(
-            self.root_states[env_ids, :2] - self.env_origins[env_ids, :2],
-            dim=1,
-        )
-        move_up = distance > self.terrain.env_length / 2
-        move_down = (
-            self.episode_sums["tracking_lin_vel"][env_ids]
-            / self.max_episode_length_s
-            < (self.reward_scales["tracking_lin_vel"] / self.dt) * 0.5
-        ) & ~move_up
+        if self.wf_curriculum is not None:
+            move_up, move_down = self.wf_curriculum.terrain_move_masks(env_ids)
+        else:
+            distance = torch.norm(
+                self.root_states[env_ids, :2] - self.env_origins[env_ids, :2],
+                dim=1,
+            )
+            move_up = distance > self.terrain.env_length / 2
+            move_down = (
+                self.episode_sums["tracking_lin_vel"][env_ids]
+                / self.max_episode_length_s
+                < (self.reward_scales["tracking_lin_vel"] / self.dt) * 0.5
+            ) & ~move_up
         self.terrain_levels[env_ids] += move_up.long() - move_down.long()
         self.terrain_levels[env_ids] = torch.where(
             self.terrain_levels[env_ids] >= self.max_terrain_level,
@@ -250,6 +293,12 @@ class NezhaRobot(LeggedRobot):
         ]
 
     def update_command_curriculum(self, env_ids):
+        if self.wf_curriculum is not None:
+            if self.wf_curriculum.uses_reward_command_curriculum:
+                self.wf_curriculum.update_reward_command_ranges(env_ids)
+            else:
+                self.wf_curriculum.update_command_ranges()
+            return
         if (
             torch.mean(self.episode_sums["tracking_lin_vel"][env_ids])
             / self.max_episode_length
@@ -282,12 +331,13 @@ class NezhaRobot(LeggedRobot):
             )
 
     def _post_physics_step_callback(self):
-        env_ids = (
-            self.episode_length_buf
-            % int(self.cfg.commands.resampling_time / self.dt)
-            == 0
-        ).nonzero(as_tuple=False).flatten()
-        self._resample_commands(env_ids)
+        if self.wf_curriculum is None:
+            env_ids = (
+                self.episode_length_buf
+                % int(self.cfg.commands.resampling_time / self.dt)
+                == 0
+            ).nonzero(as_tuple=False).flatten()
+            self._resample_commands(env_ids)
         if self.cfg.commands.heading_command:
             forward = quat_apply(self.base_quat, self.forward_vec)
             heading = torch.atan2(forward[:, 1], forward[:, 0])
@@ -307,6 +357,12 @@ class NezhaRobot(LeggedRobot):
             self.root_states[:, 2].unsqueeze(1) - self.measured_heights,
             dim=1,
         )
+
+    def _update_wf_commands_after_reset(self):
+        # Isaac Lab evaluates reward/terrain curriculum using the command and
+        # metrics from the completed step, then advances command.compute.
+        if self.wf_curriculum is not None:
+            self.wf_curriculum.step()
 
     def _push_robots(self):
         env_ids = (

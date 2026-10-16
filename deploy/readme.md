@@ -5,8 +5,6 @@
 先按根目录 [README](../README.md) 训练；每 1000 轮生成 `model_<轮数>.pt`。以下命令在仓库根目录执行，直接填写模型的绝对路径；将路径中的 `实际运行目录名` 替换为对应的训练运行目录名：
 
 ```bash
-export PYTHONPATH="$PWD/rsl_rl:$PWD"
-
 .venv/bin/python legged_gym/scripts/export_nezha_moe_cts.py \
   --checkpoint "/home/bit/LZHMine/logs/nezha_moe_cts/实际运行目录名/model_1000.pt" \
   --output "/home/bit/LZHMine/deploy/deploy_mujoco/nezha/policy/policy.pt"
@@ -20,7 +18,7 @@ export PYTHONPATH="$PWD/rsl_rl:$PWD"
 
 相对场景／策略路径以 `deploy/deploy_mujoco/` 为基准，也支持绝对路径。不传 `--policy` 时读取仓库下的 `deploy/deploy_mujoco/nezha/policy/policy.pt`，与默认导出位置一致；既有旧架构策略不会被当成新模型加载。
 
-MuJoCo 入口会自动加入仓库内的 Python 包路径；单独启动仿真无需设置 `PYTHONPATH`，可在仓库根目录直接执行 `.venv-mujoco/bin/python deploy/deploy_mujoco/deploy_mujoco.py -c nezha_moe_cts.yaml`。
+导出和 MuJoCo 入口都会自动加入仓库内的 Python 包路径，无需设置 `PYTHONPATH`。可在仓库根目录直接执行 `.venv-mujoco/bin/python deploy/deploy_mujoco/deploy_mujoco.py -c nezha_moe_cts.yaml` 启动仿真。
 
 学生输入为 57 维本体观测的 4 帧历史，共 228 维，输出 16 个动作。观测维数、尺度、裁剪、轮关节位置掩码和 term-major 历史顺序直接读取模型元数据，与训练共用预处理模块；runtime 保留真实轮速。reset 清除旧历史，下一次传感器帧填满历史。
 
@@ -30,4 +28,4 @@ MuJoCo 入口会自动加入仓库内的 Python 包路径；单独启动仿真�
 
 省略 `--headless` 使用交互窗口，`W/S` 调前后速度，`A/D` 调侧向速度，`Q/E` 调转向，空格停止，`R` 复位。macOS viewer 需使用对应 MuJoCo 环境的 `mjpython`。
 
-`tools/generate_training_terrain.py` 从新的 `NezhaMoECTSCfg` 生成训练地形资产；`tools/generate_terrain_course.py` 管理部署测试路线。短时仿真只验证接线，运动表现需使用训练完成的模型评估。
+`tools/generate_training_terrain.py` 从 `NezhaMoECTSCfg` 生成 WF 训练高度场、元数据，并同步 `scene_training.xml` 的地图尺寸和高度范围；`tools/generate_terrain_course.py` 管理独立的部署测试路线。默认 `scene_course.xml` 仍是三条测试路线。MuJoCo 的训练场景使用高度场，台阶边缘碰撞不等价于 Gym 中经坡面修正的三角网格。短时仿真只验证接线，运动表现需使用训练完成的模型评估。

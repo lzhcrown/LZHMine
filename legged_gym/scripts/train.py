@@ -30,9 +30,15 @@
 
 """Default entry point for Nezha concurrent teacher/student MoE training."""
 
-from legged_gym.scripts.train_nezha_moe_cts import train
-from legged_gym.utils import get_args
+if __package__:
+    from ._bootstrap import configure_runtime
+else:
+    from _bootstrap import configure_runtime
+
+configure_runtime(isaac_gym=True)
+
+from legged_gym.scripts.train_nezha_moe_cts import train, training_args
 
 
 if __name__ == "__main__":
-    train(get_args())
+    train(training_args())
