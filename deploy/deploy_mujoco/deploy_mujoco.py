@@ -21,8 +21,11 @@ import yaml
 
 DEPLOY_DIR = os.path.dirname(os.path.realpath(__file__))
 REPO_ROOT = os.path.dirname(os.path.dirname(DEPLOY_DIR))
-if REPO_ROOT not in sys.path:
-    sys.path.insert(0, REPO_ROOT)
+# The local package lives under rsl_rl/rsl_rl; adding only REPO_ROOT
+# exposes the outer directory as a namespace without rsl_rl.utils.
+for source_root in (REPO_ROOT, os.path.join(REPO_ROOT, "rsl_rl")):
+    if source_root not in sys.path:
+        sys.path.insert(0, source_root)
 
 from deploy.deploy_mujoco.runtime import NezhaCTSPolicyRuntime
 

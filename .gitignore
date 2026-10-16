@@ -1,8 +1,6 @@
 # Local Python environments
 .venv/
-.venv-train/
-.venv-sim/
-.venv-mujoco/
+.venv-*/
 
 # Local agent/account state
 /.agents/
@@ -13,10 +11,15 @@
 logs/
 runs/
 wandb/
+.tensorboard-info/
 *.log
+nohup.out
+MUJOCO_LOG.TXT
 events.out.tfevents.*
 
 # Model checkpoints and exported policies
+# Ignore the whole export directory, including policy.json and future metadata.
+deploy/**/policy/
 *.pt
 *.pth
 *.onnx
@@ -24,9 +27,6 @@ events.out.tfevents.*
 *.ckpt
 *.safetensors
 *.tflite
-deploy/**/policy/*.ts
-deploy/**/policy/*.engine
-deploy/**/policy/*.plan
 
 # Optional deployment recordings and visualization output
 deploy/**/frames/
@@ -70,6 +70,9 @@ tmp/
 .marscode/
 *.swp
 *.swo
+*.tmp
+*.temp
+*.bak
 *~
 
 # Local secrets

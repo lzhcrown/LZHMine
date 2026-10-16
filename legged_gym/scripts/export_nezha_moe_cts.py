@@ -13,6 +13,7 @@ from rsl_rl.utils.cts_export import CTSStudentExporter
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
 EXPERIMENT = "nezha_moe_cts"
+DEFAULT_EXPORT_PATH = os.path.join(REPO_ROOT, "deploy", "deploy_mujoco", "nezha", "policy", "policy.pt")
 
 
 def resolve_checkpoint(checkpoint=None, run=None, experiment=EXPERIMENT):
@@ -45,10 +46,7 @@ def export(args):
     path = resolve_checkpoint(args.checkpoint, args.run, getattr(args, "experiment", EXPERIMENT))
     checkpoint = load_cts_checkpoint(path, map_location="cpu")
     policy = policy_from_checkpoint(checkpoint, device="cpu").eval()
-    run_name = os.path.basename(os.path.dirname(path))
-    output = os.path.abspath(args.output or os.path.join(
-        REPO_ROOT, "logs", getattr(args, "experiment", EXPERIMENT), "exported", run_name, "policy.pt"
-    ))
+    output = os.path.abspath(args.output or DEFAULT_EXPORT_PATH)
     CTSStudentExporter(policy, checkpoint["observation_config"], checkpoint.get("control_config")).export(output)
     scripted = torch.jit.load(output, map_location="cpu").eval()
     with torch.inference_mode():
@@ -73,7 +71,7 @@ def parse_args():
     parser.add_argument("--checkpoint", help="Explicit model_<iteration>.pt path")
     parser.add_argument("--run", help="Run name, absolute run directory, or latest (default)")
     parser.add_argument("--experiment", default=EXPERIMENT)
-    parser.add_argument("--output", help="Exported policy.pt path")
+    parser.add_argument("--output", help="Exported policy path (default: deploy/deploy_mujoco/nezha/policy/policy.pt)")
     return parser.parse_args()
 
 

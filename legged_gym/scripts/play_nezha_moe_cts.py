@@ -6,10 +6,9 @@ import os
 import isaacgym  # noqa: F401 - Isaac Gym must be imported before torch.
 import torch
 
-from legged_gym import LEGGED_GYM_ROOT_DIR
 from legged_gym.envs import *  # noqa: F401,F403 - registers tasks
 from legged_gym.utils import get_args, task_registry, update_class_from_dict
-from legged_gym.scripts.export_nezha_moe_cts import resolve_checkpoint
+from legged_gym.scripts.export_nezha_moe_cts import DEFAULT_EXPORT_PATH, resolve_checkpoint
 from rsl_rl.utils.cts_checkpoint import load_cts_checkpoint, policy_from_checkpoint
 from rsl_rl.utils.cts_export import CTSStudentExporter
 
@@ -91,8 +90,7 @@ def play(args):
     if policy.num_actor_obs != env.num_obs:
         raise ValueError("Evaluation environment history does not match the checkpoint")
     if not args.no_export:
-        export_path = os.path.join(LEGGED_GYM_ROOT_DIR, "logs", experiment, "exported",
-                                   os.path.basename(os.path.dirname(path)), "policy.pt")
+        export_path = DEFAULT_EXPORT_PATH
         CTSStudentExporter(policy, checkpoint["observation_config"], checkpoint.get("control_config")).export(export_path)
         print("Student exported to {}".format(export_path))
     command = (args.command_x, args.command_y, args.command_yaw)

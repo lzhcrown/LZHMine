@@ -71,7 +71,7 @@ class NezhaMoECTSCfgPPO(LeggedRobotCfgPPO):
         algorithm_class_name = "MoECTS"
         num_steps_per_env = 24
         max_iterations = 100000
-        save_interval = 200
+        save_interval = 1000
         experiment_name = "nezha_moe_cts"
         run_name = "wf_observations"
         wandb_enabled = True

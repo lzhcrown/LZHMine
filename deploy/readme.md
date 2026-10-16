@@ -2,19 +2,25 @@
 
 使用 `deploy/deploy_mujoco/deploy_mujoco.py` 启动，默认配置是 `configs/nezha_moe_cts.yaml`，runtime 是 `runtime/cts_policy_runtime.py`。机器人 MJCF、网格和地形仍位于 `nezha/`。
 
-先用新训练入口产生 checkpoint，再执行：
+先按根目录 [README](../README.md) 训练；每 1000 轮生成 `model_<轮数>.pt`。以下命令在仓库根目录执行，直接填写模型的绝对路径；将路径中的 `实际运行目录名` 替换为对应的训练运行目录名：
 
 ```bash
-PYTHONPATH="$PWD/rsl_rl:$PWD" .venv-train/bin/python \
-  legged_gym/scripts/export_nezha_moe_cts.py \
-  --checkpoint /absolute/path/model_200.pt --output /absolute/path/policy.pt
+export PYTHONPATH="$PWD/rsl_rl:$PWD"
 
-.venv-sim/bin/python deploy/deploy_mujoco/deploy_mujoco.py \
-  -c nezha_moe_cts.yaml --policy /absolute/path/policy.pt \
-  --headless --duration 3 --vx 0.5
+.venv/bin/python legged_gym/scripts/export_nezha_moe_cts.py \
+  --checkpoint "/home/bit/LZHMine/logs/nezha_moe_cts/实际运行目录名/model_1000.pt" \
+  --output "/home/bit/LZHMine/deploy/deploy_mujoco/nezha/policy/policy.pt"
+
+.venv-mujoco/bin/python deploy/deploy_mujoco/deploy_mujoco.py \
+  -c nezha_moe_cts.yaml \
+  --headless --duration 30 --vx 0.5 --vy 0.0 --yaw 0.0
 ```
 
-相对场景／策略路径以 `deploy/deploy_mujoco/` 为基准，也支持绝对路径。不传 `--policy` 时读取 `nezha/policy/policy.pt`，该文件需要先替换为新导出的 CTS 模型；既有旧架构策略不会被当成新模型加载。
+独立导出和 play 自动导出统一默认写入 `deploy/deploy_mujoco/nezha/policy/policy.pt`，并在同目录生成 `policy.json`；目录不存在时自动创建。独立导出可省略 `--output`，每次导出覆盖这两个文件。如需保留多个策略，通过 `--output` 在同目录指定不同文件名，并将仿真的 `--policy` 改为对应路径。
+
+相对场景／策略路径以 `deploy/deploy_mujoco/` 为基准，也支持绝对路径。不传 `--policy` 时读取仓库下的 `deploy/deploy_mujoco/nezha/policy/policy.pt`，与默认导出位置一致；既有旧架构策略不会被当成新模型加载。
+
+MuJoCo 入口会自动加入仓库内的 Python 包路径；单独启动仿真无需设置 `PYTHONPATH`，可在仓库根目录直接执行 `.venv-mujoco/bin/python deploy/deploy_mujoco/deploy_mujoco.py -c nezha_moe_cts.yaml`。
 
 学生输入为 57 维本体观测的 4 帧历史，共 228 维，输出 16 个动作。观测维数、尺度、裁剪、轮关节位置掩码和 term-major 历史顺序直接读取模型元数据，与训练共用预处理模块；runtime 保留真实轮速。reset 清除旧历史，下一次传感器帧填满历史。
 

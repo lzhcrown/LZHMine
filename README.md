@@ -42,49 +42,105 @@ Isaac Gym 的高度来自原有 heightfield 邻点采样，接触来自 PhysX ne
 
 ## 训练、续训、play 和导出
 
-在仓库根目录、已安装 Isaac Gym 的训练环境执行。本机可使用 `.venv-train/bin/python`，并设置：
+在仓库根目录、已安装 Isaac Gym 的训练环境执行。本机训练环境为 `.venv`，MuJoCo 环境为 `.venv-mujoco`：
 
 ```bash
+cd /home/bit/LZHMine
 export PYTHONPATH="$PWD/rsl_rl:$PWD"
-export PATH="$PWD/.venv-train/bin:$PATH"
+export PATH="$PWD/.venv/bin:$PATH"
+export TORCH_EXTENSIONS_DIR=/tmp/cts_torch_extensions
+export OMP_NUM_THREADS=1
 ```
 
-训练与续训：
+使用 TensorBoard 记录训练曲线（示例从零训练 2000 轮）：
 
 ```bash
-python legged_gym/scripts/train_nezha_moe_cts.py --headless --no_wandb
-
-python legged_gym/scripts/train_nezha_moe_cts.py --headless --no_wandb \
-  --resume --load_run <运行目录名> --checkpoint -1
+python legged_gym/scripts/train_nezha_moe_cts.py \
+  --headless --no_wandb \
+  --rl_device cuda:0 --sim_device cuda:0 --pipeline gpu \
+  --num_envs 4096 --max_iterations 2000 --seed 10 \
+  --run_name cts_moe_seed10
 ```
 
-默认日志目录为 `logs/nezha_moe_cts/<时间>_<run_name>/`。默认配置启用 W&B；`--no_wandb` 使用本地 TensorBoard。日志包含教师／学生回报、PPO 损失、蒸馏损失、均衡损失、gate entropy 和各专家使用率。训练需至少两个环境；当前 runner 面向单设备训练。
+在另一个终端启动 TensorBoard：
 
-Checkpoint 保存网络与观测 schema、环境配置、控制参数、两个优化器和训练计数。续训先恢复观测配置再创建环境，可以用 `--num_envs` 调整并行数量；物理状态和历史重新初始化，不是逐物理步确定性恢复。旧架构 checkpoint 会明确报错。
+```bash
+cd /home/bit/LZHMine
+.venv/bin/tensorboard --logdir "$PWD/logs/nezha_moe_cts" \
+  --host 127.0.0.1 --port 6006
+```
 
-学生 play（默认一个环境）与独立导出：
+浏览器打开 <http://127.0.0.1:6006>。远程训练时，在本地执行 `ssh -L 6006:127.0.0.1:6006 用户名@训练服务器`，再访问同一地址。
+
+默认日志目录为 `logs/nezha_moe_cts/<时间>_<run_name>/`，终端会打印实际路径。`--no_wandb` 关闭 W&B 上传，保留本地 TensorBoard event 文件，无需 W&B 登录；不带该参数时默认同时启用 W&B。重点查看：
+
+- `Train/teacher_reward`、`Train/student_reward`：教师／学生回报。
+- `Train/teacher_length`、`Train/student_length`：episode 长度。
+- `Loss/value`、`Loss/teacher_surrogate`、`Loss/student_surrogate`：PPO 损失。
+- `Loss/mean_latent_loss`、`Loss/mean_load_balance_loss`：蒸馏与专家均衡损失。
+- `Experts/gate_entropy`、`Experts/expert_0_usage` 至 `Experts/expert_7_usage`：门控熵与专家使用率。
+
+训练每 **1000 轮**保存一次 checkpoint，文件名为 `model_1000.pt`、`model_2000.pt` 等，保留各轮版本。训练正常结束时也会保存最后一轮，即使该轮不是 1000 的整数倍。训练需至少两个环境；当前 runner 面向单设备训练。
+
+以下续训、play、导出和 MuJoCo 命令直接填写绝对路径。将路径中的 `实际运行目录名` 替换为 `logs/nezha_moe_cts/` 下对应的运行目录名即可。续训示例：
+
+```bash
+python legged_gym/scripts/train_nezha_moe_cts.py \
+  --headless --no_wandb \
+  --rl_device cuda:0 --sim_device cuda:0 --pipeline gpu \
+  --num_envs 4096 --max_iterations 2000 \
+  --resume \
+  --load_run "/home/bit/LZHMine/logs/nezha_moe_cts/实际运行目录名" \
+  --checkpoint -1 \
+  --run_name cts_moe_resume
+```
+
+续训的 `--max_iterations 2000` 表示**追加 2000 轮**；`--load_run` 填运行目录路径，`--checkpoint -1` 选择该目录中最新的 checkpoint，也可传 `1000` 等轮数。续训会创建新的日志目录，TensorBoard 可同时查看各次运行；导出续训结果时需填写新目录下的模型路径。
+
+Checkpoint 保存网络与观测 schema、环境配置、控制参数、两个优化器和训练计数。续训先恢复观测配置再创建环境，可以用 `--num_envs` 调整并行数量；物理状态和历史重新初始化，运行期地形等级和指令课程进度目前也未恢复。旧架构 checkpoint 会明确报错。
+
+学生 play（直接指定第 1000 轮 checkpoint，默认一个环境）：
 
 ```bash
 python legged_gym/scripts/play_nezha_moe_cts.py \
-  --load_run <运行目录名> --checkpoint -1 --play_num_envs 1
-
-python legged_gym/scripts/export_nezha_moe_cts.py \
-  --run <运行目录名>
-
-# 也可指定 checkpoint 和输出路径；此导出入口不需要 Isaac Gym/GPU
-python legged_gym/scripts/export_nezha_moe_cts.py \
-  --checkpoint /absolute/path/model_200.pt --output /absolute/path/policy.pt
+  --checkpoint_path "/home/bit/LZHMine/logs/nezha_moe_cts/实际运行目录名/model_1000.pt" \
+  --play_num_envs 1
 ```
 
-导出的 `policy.pt` 只包含学生 MoE、共享 Actor 及必要元数据，输入 [N, 228]、输出 [N, 16]。历史由 runtime 管理；教师、Critic 和优化器不进入部署模型。导出会检查 TorchScript 与 checkpoint 学生输出一致，同时写出便于查看的 `policy.json`。
-
-MuJoCo：
+独立导出学生策略（不需要 Isaac Gym/GPU）。独立导出和 play 自动导出的默认目录统一为 `deploy/deploy_mujoco/nezha/policy/`，目录不存在时自动创建。下面导出第 1000 轮 checkpoint，并直接填写输出路径；省略 `--output` 也使用同一路径：
 
 ```bash
-.venv-sim/bin/python deploy/deploy_mujoco/deploy_mujoco.py \
-  -c nezha_moe_cts.yaml --policy /absolute/path/exported/policy.pt \
-  --headless --duration 3 --vx 0.5
+python legged_gym/scripts/export_nezha_moe_cts.py \
+  --checkpoint "/home/bit/LZHMine/logs/nezha_moe_cts/实际运行目录名/model_1000.pt" \
+  --output "/home/bit/LZHMine/deploy/deploy_mujoco/nezha/policy/policy.pt"
+
+# 或导出该运行最新的 checkpoint
+python legged_gym/scripts/export_nezha_moe_cts.py \
+  --run "/home/bit/LZHMine/logs/nezha_moe_cts/实际运行目录名" \
+  --output "/home/bit/LZHMine/deploy/deploy_mujoco/nezha/policy/policy.pt"
 ```
+
+`model_<轮数>.pt` 是训练 checkpoint，MuJoCo 使用导出后的 `policy.pt`。导出的文件只包含学生 MoE、共享 Actor 及必要元数据，输入 [N, 228]、输出 [N, 16]。历史由 runtime 管理；教师、Critic 和优化器不进入部署模型。导出会检查 TorchScript 与 checkpoint 学生输出一致，同时写出便于查看的 `policy.json`。
+
+每次导出会覆盖该目录中的 `policy.pt` 和 `policy.json`；play 使用 `--no_export` 可跳过自动导出。如需保留多个策略，可通过 `--output` 在同一目录下指定不同文件名，例如 `policy_1000.pt`，仿真时在 `--policy` 中填写对应文件路径。
+
+MuJoCo 可视化仿真（从 YAML 读取最近导出的策略，前进速度指令为 0.5 m/s）。MuJoCo 入口会自动加入仓库内的 Python 包路径，可在新终端直接运行，无需设置 `PYTHONPATH`：
+
+```bash
+.venv-mujoco/bin/python deploy/deploy_mujoco/deploy_mujoco.py \
+  -c nezha_moe_cts.yaml \
+  --vx 0.5 --vy 0.0 --yaw 0.0
+```
+
+无窗口短时仿真：
+
+```bash
+.venv-mujoco/bin/python deploy/deploy_mujoco/deploy_mujoco.py \
+  -c nezha_moe_cts.yaml \
+  --headless --duration 30 --vx 0.5 --vy 0.0 --yaw 0.0
+```
+
+默认配置已指向 `deploy/deploy_mujoco/nezha/policy/policy.pt`，也可以省略 `--policy`。可视化窗口支持 `W/S` 调前后速度、`A/D` 调侧向速度、`Q/E` 调转向、空格停止、`R` 复位。`--headless` 模式必须设置正数 `--duration`（单位为仿真秒）。默认场景为 `scene_course.xml`。
 
 传感器观测、裁剪、缩放和历史顺序由模型中的 schema 驱动。部署 runtime 校验模型附带的名义姿态、PD 增益、关节顺序、控制周期和动作尺度等控制参数。详细说明见 [deploy/readme.md](deploy/readme.md)。
 
@@ -104,8 +160,9 @@ MuJoCo：
 ## 验证
 
 ```bash
+# 训练环境需已安装 pytest
 OMP_NUM_THREADS=1 PYTHONPATH="$PWD/rsl_rl:$PWD" \
-  .venv-train/bin/python -m pytest legged_gym/tests tests -q
+  .venv/bin/python -m pytest legged_gym/tests tests -q
 ```
 
 自动化验证覆盖输入维数、逐项预处理、轮速、历史／reset、梯度隔离、同刻蒸馏、尾批次完整采样、checkpoint 续训、TorchScript 一致性和部署控制参数校验。短时仿真仅验证接口与数值运行，策略运动表现需要正式训练与评估。
