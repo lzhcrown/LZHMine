@@ -38,7 +38,7 @@ COMMAND_MAX = np.asarray([1.0, 0.6, 1.0], dtype=np.float32)
 class KeyboardCommandController:
     """Thread-safe velocity commands updated by MuJoCo's viewer callback."""
 
-    def __init__(self, initial, linear_step=0.1, yaw_step=0.1):
+    def __init__(self, initial, linear_step=0.1, yaw_step=0.1, terrain_names=()):
         self._lock = threading.Lock()
         self._commands = np.clip(
             np.asarray(initial, dtype=np.float32), COMMAND_MIN, COMMAND_MAX
@@ -46,6 +46,8 @@ class KeyboardCommandController:
         self._linear_step = float(linear_step)
         self._yaw_step = float(yaw_step)
         self._reset_requested = False
+        self._terrain_names = tuple(terrain_names)
+        self._terrain_requested = None
 
     def get(self):
         with self._lock:
@@ -58,8 +60,10 @@ class KeyboardCommandController:
     def consume_reset_request(self):
         with self._lock:
             requested = self._reset_requested
+            terrain_index = self._terrain_requested
             self._reset_requested = False
-            return requested
+            self._terrain_requested = None
+            return requested, terrain_index
 
     def on_key(self, keycode):
         key = chr(keycode).upper() if 0 <= keycode < 256 else ""
@@ -80,6 +84,11 @@ class KeyboardCommandController:
                 self._commands.fill(0.0)
             elif key == "R":
                 self._commands.fill(0.0)
+                self._reset_requested = True
+                self._terrain_requested = None
+            elif key in tuple("123456789") and int(key) <= len(self._terrain_names):
+                self._commands.fill(0.0)
+                self._terrain_requested = int(key) - 1
                 self._reset_requested = True
             else:
                 return
@@ -220,6 +229,19 @@ def _terrain_course_spawn(mujoco, model, cfg, initial_base_height):
         "sha256": metadata["height_field_sha256"],
     }
     return position, description
+
+
+def _terrain_lane_spawn(description, lane_name):
+    """Align the flat staging spawn with a named evaluation lane."""
+    if description is None:
+        raise ValueError("--terrain requires a scene with terrain-course metadata")
+    for lane in description["lanes"]:
+        if lane["name"] == lane_name:
+            position = description["spawn"].copy()
+            position[1] = lane["y_center_m"]
+            return position
+    available = ", ".join(lane["name"] for lane in description["lanes"])
+    raise ValueError(f"Unknown terrain {lane_name!r}; choose one of: {available}")
 
 
 def _joint_addresses(mujoco, model, joint_names):
@@ -370,6 +392,8 @@ def run(args):
     initial_base_position, terrain_description = _terrain_course_spawn(
         mujoco, model, cfg, initial_base_height
     )
+    if args.terrain:
+        initial_base_position = _terrain_lane_spawn(terrain_description, args.terrain)
     _reset_robot(
         mujoco,
         model,
@@ -399,6 +423,10 @@ def run(args):
         initial=[args.vx, args.vy, args.yaw],
         linear_step=args.linear_step,
         yaw_step=args.yaw_step,
+        terrain_names=(
+            [lane["name"] for lane in terrain_description["lanes"]]
+            if terrain_description is not None else ()
+        ),
     )
     viewer_context = (
         mujoco.viewer.launch_passive(
@@ -413,19 +441,23 @@ def run(args):
         description = terrain_description
         print(
             "Terrain gallery loaded: robot starts on flat staging area at "
-            f"{np.array2string(description['spawn'], precision=3)}; "
+            f"{np.array2string(initial_base_position, precision=3)}; "
             f"profile={description['profile']}; "
             f"raw_sha256={description['sha256'][:12]}..."
         )
-        print("Lanes across y (use A/D on the staging area to align):")
-        for lane in description["lanes"]:
-            print(f"  y={lane['y_center_m']:+5.1f} m  {lane['name']}")
+        print("Terrain lanes (number keys reset to the selected lane's approach):")
+        for index, lane in enumerate(description["lanes"], start=1):
+            print(f"  {index}: y={lane['y_center_m']:+5.1f} m  {lane['name']}")
     if viewer_context is not None:
+        with viewer_context.lock():
+            viewer_context.cam.lookat[:] = data.xpos[root_body_id]
+            viewer_context.cam.distance = 8.0
+            course_geom_groups = viewer_context.opt.geomgroup.copy()
         print(
             "Nezha was pre-settled and starts in frozen standby. "
             "Send a nonzero command to release it."
         )
-        print("Keyboard: W/S=vx  A/D=vy  Q/E=yaw  Space=stop  R=reset")
+        print("Keyboard: W/S=vx  A/D=vy  Q/E=yaw  Space=stop  R=reset current lane")
     simulated_time = 0.0
     policy_step = 0
     gate_log_interval = (
@@ -442,7 +474,19 @@ def run(args):
     )
     try:
         while viewer_context is None or viewer_context.is_running():
-            if command_controller.consume_reset_request():
+            reset_requested, terrain_index = command_controller.consume_reset_request()
+            if reset_requested:
+                if terrain_index is not None:
+                    lane = terrain_description["lanes"][terrain_index]
+                    initial_base_position = _terrain_lane_spawn(
+                        terrain_description, lane["name"]
+                    )
+                    if viewer_context is not None:
+                        with viewer_context.lock():
+                            # MuJoCo also binds number keys to geometry visibility.
+                            # Keep the robot/course visible when selecting a lane.
+                            viewer_context.opt.geomgroup[:] = course_geom_groups
+                    print(f"Selected terrain: {lane['name']}")
                 _reset_robot(
                     mujoco,
                     model,
@@ -560,6 +604,10 @@ def parse_args():
     )
     parser.add_argument("--model", help="Floating-base Nezha MJCF or MuJoCo-compatible URDF")
     parser.add_argument("--policy", help="Exported policy.pt")
+    parser.add_argument(
+        "--terrain",
+        help="Start in a named course lane, e.g. stairs_15cm or ramp_25deg; number keys switch lanes in the viewer.",
+    )
     parser.add_argument("--device", default="cpu")
     parser.add_argument("--vx", type=float, default=0.0)
     parser.add_argument("--vy", type=float, default=0.0)

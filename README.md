@@ -176,7 +176,32 @@ MuJoCo 可视化仿真（从 YAML 读取最近导出的策略，前进速度指�
   --headless --duration 30 --vx 0.5 --vy 0.0 --yaw 0.0
 ```
 
-默认配置已指向 `deploy/deploy_mujoco/nezha/policy/policy.pt`，也可以省略 `--policy`。可视化窗口支持 `W/S` 调前后速度、`A/D` 调侧向速度、`Q/E` 调转向、空格停止、`R` 复位。`--headless` 模式必须设置正数 `--duration`（单位为仿真秒）。默认场景为 `scene_course.xml`。
+默认配置已指向 `deploy/deploy_mujoco/nezha/policy/policy.pt`，也可以省略 `--policy`。可视化窗口支持 `W/S` 调前后速度、`A/D` 调侧向速度、`Q/E` 调转向、空格停止、`R` 复位到当前测试道入口。`--headless` 模式必须设置正数 `--duration`（单位为仿真秒）。默认场景为 `scene_course.xml`。
+
+场景包含七条并排测试道，每条横向宽 5 m，保留原来的 10 m 出发区、10 m 障碍区和 5 m 结束区。窗口内按数字键 `1`～`7` 可切换到对应测试道入口并清零速度指令，再按 `W` 前进；默认从第 1 条开始。
+
+| 数字键 | 测试道名称（`--terrain`） | 地形参数 |
+|---|---|---|
+| 1 | `stairs_15cm` | 单级高 15 cm，踏面深 30 cm |
+| 2 | `stairs_20cm` | 单级高 20 cm，踏面深 30 cm |
+| 3 | `stairs_25cm` | 单级高 25 cm，踏面深 30 cm |
+| 4 | `ramp_15deg` | 15° 光滑上坡—平台—下坡 |
+| 5 | `ramp_25deg` | 25° 光滑上坡—平台—下坡 |
+| 6 | `ramp_30deg` | 30° 光滑上坡—平台—下坡 |
+| 7 | `rubble_speed_bumps` | 不平路面叠加圆滑横向减速带，最高 20 cm |
+
+楼梯每侧上／下各 5 级，顶部平台长 1 m，每级横向长 5 m，使用实体几何保留竖直立面。坡道上下坡的水平长度各为 3.5 m，顶部平台长 1 m；坡面及顶平台滑动摩擦系数为 **0.35**，普通地面、楼梯和减速带为 **1.0**。减速带沿行驶方向宽 80 cm，共 5 条，高度依次为 12、16、20、16、20 cm。可以直接选择起始测试道：
+
+```bash
+.venv-mujoco/bin/python deploy/deploy_mujoco/deploy_mujoco.py \
+  -c nezha_moe_cts.yaml --terrain ramp_25deg
+```
+
+上述命令默认零速度，在入口待命。地形参数集中在 `deploy/deploy_mujoco/tools/generate_terrain_course.py`；修改后执行以下命令即可同步重建高度场、实体地形和元数据：
+
+```bash
+.venv-mujoco/bin/python deploy/deploy_mujoco/tools/generate_terrain_course.py
+```
 
 传感器观测、裁剪、缩放和历史顺序由模型中的 schema 驱动。部署 runtime 校验模型附带的名义姿态、PD 增益、关节顺序、控制周期和动作尺度等控制参数。详细说明见 [deploy/readme.md](deploy/readme.md)。
 

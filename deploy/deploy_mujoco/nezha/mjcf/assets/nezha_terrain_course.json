@@ -1,17 +1,19 @@
 {
   "generator": "deploy.deploy_mujoco.tools.generate_terrain_course",
-  "profile": "three_lane_visual_course",
+  "profile": "seven_lane_stairs_smooth_ramps_speed_bumps",
   "horizontal_scale_m": 0.05,
   "binary_shape": [
-    401,
+    801,
     501
   ],
   "height_min_m": 0.0,
-  "height_max_m": 1.0,
+  "height_max_m": 0.2,
+  "heightfield_scope": "flat ground and rubble lane only; stairs and ramps use separate solid geoms",
+  "obstacle_height_max_m": 2.02072594216369,
   "hfield_size": [
     12.5,
-    10.0,
-    1.0,
+    20.0,
+    0.2,
     0.1
   ],
   "hfield_position": [
@@ -19,19 +21,21 @@
     0.0,
     0.0
   ],
+  "geometry_include": "course_geometry.xml",
+  "geometry_sha256": "738cc4455acbb9bed6c49ffd31865ad10fcc5e5d1e0d2dccedafef747cca5114",
   "world_bounds": {
     "x": [
       -10.0,
       15.0
     ],
     "y": [
-      -10.0,
-      10.0
+      -20.0,
+      20.0
     ]
   },
   "spawn_ground_position": [
     -5.0,
-    0.0,
+    -15.0,
     0.0
   ],
   "staging_area": {
@@ -50,42 +54,529 @@
   },
   "lanes": [
     {
+      "name": "stairs_15cm",
+      "width_m": 5.0,
+      "y_min_m": -17.5,
+      "y_max_m": -12.5,
+      "y_center_m": -15.0,
+      "obstacle_x_start_m": 0.0,
+      "obstacle_x_end_m": 10.0,
+      "surface_type": "box_stairs",
+      "step_height_m": 0.15,
+      "tread_depth_m": 0.3,
+      "step_count": 5,
+      "riser_count_per_side": 5,
+      "intermediate_tread_count_per_side": 4,
+      "platform_length_m": 1.0,
+      "platform_x_range_m": [
+        2.2,
+        3.2
+      ],
+      "top_height_m": 0.75,
+      "geometry_x_range_m": [
+        1.0,
+        4.3999999999999995
+      ],
+      "friction": [
+        1.0,
+        0.01,
+        0.001
+      ],
+      "geom_names": [
+        "stairs_15cm_up_1",
+        "stairs_15cm_up_2",
+        "stairs_15cm_up_3",
+        "stairs_15cm_up_4",
+        "stairs_15cm_platform",
+        "stairs_15cm_down_4",
+        "stairs_15cm_down_3",
+        "stairs_15cm_down_2",
+        "stairs_15cm_down_1"
+      ],
+      "surfaces": [
+        {
+          "geom_name": "stairs_15cm_up_1",
+          "x_range_m": [
+            1.0,
+            1.3
+          ],
+          "height_m": 0.15
+        },
+        {
+          "geom_name": "stairs_15cm_up_2",
+          "x_range_m": [
+            1.3,
+            1.6
+          ],
+          "height_m": 0.3
+        },
+        {
+          "geom_name": "stairs_15cm_up_3",
+          "x_range_m": [
+            1.6,
+            1.9000000000000001
+          ],
+          "height_m": 0.44999999999999996
+        },
+        {
+          "geom_name": "stairs_15cm_up_4",
+          "x_range_m": [
+            1.9000000000000001,
+            2.2
+          ],
+          "height_m": 0.6
+        },
+        {
+          "geom_name": "stairs_15cm_platform",
+          "x_range_m": [
+            2.2,
+            3.2
+          ],
+          "height_m": 0.75
+        },
+        {
+          "geom_name": "stairs_15cm_down_4",
+          "x_range_m": [
+            3.2,
+            3.5
+          ],
+          "height_m": 0.6
+        },
+        {
+          "geom_name": "stairs_15cm_down_3",
+          "x_range_m": [
+            3.5,
+            3.8
+          ],
+          "height_m": 0.44999999999999996
+        },
+        {
+          "geom_name": "stairs_15cm_down_2",
+          "x_range_m": [
+            3.8,
+            4.1
+          ],
+          "height_m": 0.3
+        },
+        {
+          "geom_name": "stairs_15cm_down_1",
+          "x_range_m": [
+            4.1,
+            4.3999999999999995
+          ],
+          "height_m": 0.15
+        }
+      ]
+    },
+    {
       "name": "stairs_20cm",
+      "width_m": 5.0,
+      "y_min_m": -12.5,
+      "y_max_m": -7.5,
+      "y_center_m": -10.0,
+      "obstacle_x_start_m": 0.0,
+      "obstacle_x_end_m": 10.0,
+      "surface_type": "box_stairs",
+      "step_height_m": 0.2,
+      "tread_depth_m": 0.3,
+      "step_count": 5,
+      "riser_count_per_side": 5,
+      "intermediate_tread_count_per_side": 4,
+      "platform_length_m": 1.0,
+      "platform_x_range_m": [
+        2.2,
+        3.2
+      ],
+      "top_height_m": 1.0,
+      "geometry_x_range_m": [
+        1.0,
+        4.3999999999999995
+      ],
+      "friction": [
+        1.0,
+        0.01,
+        0.001
+      ],
+      "geom_names": [
+        "stairs_20cm_up_1",
+        "stairs_20cm_up_2",
+        "stairs_20cm_up_3",
+        "stairs_20cm_up_4",
+        "stairs_20cm_platform",
+        "stairs_20cm_down_4",
+        "stairs_20cm_down_3",
+        "stairs_20cm_down_2",
+        "stairs_20cm_down_1"
+      ],
+      "surfaces": [
+        {
+          "geom_name": "stairs_20cm_up_1",
+          "x_range_m": [
+            1.0,
+            1.3
+          ],
+          "height_m": 0.2
+        },
+        {
+          "geom_name": "stairs_20cm_up_2",
+          "x_range_m": [
+            1.3,
+            1.6
+          ],
+          "height_m": 0.4
+        },
+        {
+          "geom_name": "stairs_20cm_up_3",
+          "x_range_m": [
+            1.6,
+            1.9000000000000001
+          ],
+          "height_m": 0.6000000000000001
+        },
+        {
+          "geom_name": "stairs_20cm_up_4",
+          "x_range_m": [
+            1.9000000000000001,
+            2.2
+          ],
+          "height_m": 0.8
+        },
+        {
+          "geom_name": "stairs_20cm_platform",
+          "x_range_m": [
+            2.2,
+            3.2
+          ],
+          "height_m": 1.0
+        },
+        {
+          "geom_name": "stairs_20cm_down_4",
+          "x_range_m": [
+            3.2,
+            3.5
+          ],
+          "height_m": 0.8
+        },
+        {
+          "geom_name": "stairs_20cm_down_3",
+          "x_range_m": [
+            3.5,
+            3.8
+          ],
+          "height_m": 0.6000000000000001
+        },
+        {
+          "geom_name": "stairs_20cm_down_2",
+          "x_range_m": [
+            3.8,
+            4.1
+          ],
+          "height_m": 0.4
+        },
+        {
+          "geom_name": "stairs_20cm_down_1",
+          "x_range_m": [
+            4.1,
+            4.3999999999999995
+          ],
+          "height_m": 0.2
+        }
+      ]
+    },
+    {
+      "name": "stairs_25cm",
+      "width_m": 5.0,
       "y_min_m": -7.5,
       "y_max_m": -2.5,
       "y_center_m": -5.0,
       "obstacle_x_start_m": 0.0,
       "obstacle_x_end_m": 10.0,
-      "step_height_m": 0.2,
-      "tread_depth_m": 0.7,
+      "surface_type": "box_stairs",
+      "step_height_m": 0.25,
+      "tread_depth_m": 0.3,
       "step_count": 5,
-      "top_height_m": 1.0
+      "riser_count_per_side": 5,
+      "intermediate_tread_count_per_side": 4,
+      "platform_length_m": 1.0,
+      "platform_x_range_m": [
+        2.2,
+        3.2
+      ],
+      "top_height_m": 1.25,
+      "geometry_x_range_m": [
+        1.0,
+        4.3999999999999995
+      ],
+      "friction": [
+        1.0,
+        0.01,
+        0.001
+      ],
+      "geom_names": [
+        "stairs_25cm_up_1",
+        "stairs_25cm_up_2",
+        "stairs_25cm_up_3",
+        "stairs_25cm_up_4",
+        "stairs_25cm_platform",
+        "stairs_25cm_down_4",
+        "stairs_25cm_down_3",
+        "stairs_25cm_down_2",
+        "stairs_25cm_down_1"
+      ],
+      "surfaces": [
+        {
+          "geom_name": "stairs_25cm_up_1",
+          "x_range_m": [
+            1.0,
+            1.3
+          ],
+          "height_m": 0.25
+        },
+        {
+          "geom_name": "stairs_25cm_up_2",
+          "x_range_m": [
+            1.3,
+            1.6
+          ],
+          "height_m": 0.5
+        },
+        {
+          "geom_name": "stairs_25cm_up_3",
+          "x_range_m": [
+            1.6,
+            1.9000000000000001
+          ],
+          "height_m": 0.75
+        },
+        {
+          "geom_name": "stairs_25cm_up_4",
+          "x_range_m": [
+            1.9000000000000001,
+            2.2
+          ],
+          "height_m": 1.0
+        },
+        {
+          "geom_name": "stairs_25cm_platform",
+          "x_range_m": [
+            2.2,
+            3.2
+          ],
+          "height_m": 1.25
+        },
+        {
+          "geom_name": "stairs_25cm_down_4",
+          "x_range_m": [
+            3.2,
+            3.5
+          ],
+          "height_m": 1.0
+        },
+        {
+          "geom_name": "stairs_25cm_down_3",
+          "x_range_m": [
+            3.5,
+            3.8
+          ],
+          "height_m": 0.75
+        },
+        {
+          "geom_name": "stairs_25cm_down_2",
+          "x_range_m": [
+            3.8,
+            4.1
+          ],
+          "height_m": 0.5
+        },
+        {
+          "geom_name": "stairs_25cm_down_1",
+          "x_range_m": [
+            4.1,
+            4.3999999999999995
+          ],
+          "height_m": 0.25
+        }
+      ]
     },
     {
-      "name": "platform_40cm",
+      "name": "ramp_15deg",
+      "width_m": 5.0,
       "y_min_m": -2.5,
       "y_max_m": 2.5,
       "y_center_m": 0.0,
       "obstacle_x_start_m": 0.0,
       "obstacle_x_end_m": 10.0,
-      "height_m": 0.4,
-      "x_range_m": [
-        1.5,
-        7.5
+      "surface_type": "smooth_wedge_ramp",
+      "slope_degrees": 15.0,
+      "ramp_horizontal_length_m": 3.5,
+      "ramp_surface_length_m": 3.623466631435291,
+      "platform_length_m": 1.0,
+      "top_height_m": 0.9378221735089294,
+      "up_x_range_m": [
+        1.0,
+        4.5
+      ],
+      "platform_x_range_m": [
+        4.5,
+        5.5
+      ],
+      "down_x_range_m": [
+        5.5,
+        9.0
+      ],
+      "geometry_x_range_m": [
+        1.0,
+        9.0
+      ],
+      "friction": [
+        0.35,
+        0.01,
+        0.001
+      ],
+      "contact_priority": 1,
+      "contact_dimension": 3,
+      "solref": [
+        0.0125,
+        1.0
+      ],
+      "geom_names": [
+        "ramp_15deg_up",
+        "ramp_15deg_platform",
+        "ramp_15deg_down"
       ]
     },
     {
-      "name": "rubble",
+      "name": "ramp_25deg",
+      "width_m": 5.0,
       "y_min_m": 2.5,
       "y_max_m": 7.5,
       "y_center_m": 5.0,
       "obstacle_x_start_m": 0.0,
       "obstacle_x_end_m": 10.0,
-      "maximum_bump_height_m": 0.12,
+      "surface_type": "smooth_wedge_ramp",
+      "slope_degrees": 25.0,
+      "ramp_horizontal_length_m": 3.5,
+      "ramp_surface_length_m": 3.8618227163687213,
+      "platform_length_m": 1.0,
+      "top_height_m": 1.632076803542495,
+      "up_x_range_m": [
+        1.0,
+        4.5
+      ],
+      "platform_x_range_m": [
+        4.5,
+        5.5
+      ],
+      "down_x_range_m": [
+        5.5,
+        9.0
+      ],
+      "geometry_x_range_m": [
+        1.0,
+        9.0
+      ],
+      "friction": [
+        0.35,
+        0.01,
+        0.001
+      ],
+      "contact_priority": 1,
+      "contact_dimension": 3,
+      "solref": [
+        0.0125,
+        1.0
+      ],
+      "geom_names": [
+        "ramp_25deg_up",
+        "ramp_25deg_platform",
+        "ramp_25deg_down"
+      ]
+    },
+    {
+      "name": "ramp_30deg",
+      "width_m": 5.0,
+      "y_min_m": 7.5,
+      "y_max_m": 12.5,
+      "y_center_m": 10.0,
+      "obstacle_x_start_m": 0.0,
+      "obstacle_x_end_m": 10.0,
+      "surface_type": "smooth_wedge_ramp",
+      "slope_degrees": 30.0,
+      "ramp_horizontal_length_m": 3.5,
+      "ramp_surface_length_m": 4.04145188432738,
+      "platform_length_m": 1.0,
+      "top_height_m": 2.02072594216369,
+      "up_x_range_m": [
+        1.0,
+        4.5
+      ],
+      "platform_x_range_m": [
+        4.5,
+        5.5
+      ],
+      "down_x_range_m": [
+        5.5,
+        9.0
+      ],
+      "geometry_x_range_m": [
+        1.0,
+        9.0
+      ],
+      "friction": [
+        0.35,
+        0.01,
+        0.001
+      ],
+      "contact_priority": 1,
+      "contact_dimension": 3,
+      "solref": [
+        0.0125,
+        1.0
+      ],
+      "geom_names": [
+        "ramp_30deg_up",
+        "ramp_30deg_platform",
+        "ramp_30deg_down"
+      ]
+    },
+    {
+      "name": "rubble_speed_bumps",
+      "width_m": 5.0,
+      "y_min_m": 12.5,
+      "y_max_m": 17.5,
+      "y_center_m": 15.0,
+      "obstacle_x_start_m": 0.0,
+      "obstacle_x_end_m": 10.0,
+      "surface_type": "rubble_with_rounded_speed_bumps",
+      "maximum_bump_height_m": 0.2,
       "seed": 20260904,
-      "bump_count": 170
+      "bump_count": 170,
+      "speed_bump_centers_x_m": [
+        1.5,
+        3.5,
+        5.5,
+        7.5,
+        9.0
+      ],
+      "speed_bump_heights_m": [
+        0.12,
+        0.16,
+        0.2,
+        0.16,
+        0.2
+      ],
+      "speed_bump_length_m": 0.8,
+      "edge_fade_width_m": 0.25,
+      "friction": [
+        1.0,
+        0.01,
+        0.001
+      ],
+      "geom_names": [
+        "training_terrain"
+      ]
     }
   ],
-  "height_field_sha256": "42435f0d944d0c32e0fd99f4190b42ab1e67341483912875fcb05a8f296123fe",
-  "binary_data_sha256": "2e040e7968904805a078c61953a0f220858207b305c8847b114c495213833a8d"
+  "height_field_sha256": "0258ec192af2e0a5dd6814a6c4e37aa827df710532e35880287fff278d798b19",
+  "binary_data_sha256": "18d023ad398736558e211b00f0cc36fc70006bd6f21d5ab76c1d0673c85e6d13"
 }
