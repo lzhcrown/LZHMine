@@ -13,6 +13,8 @@ setup(name='rsl_rl',
             "torchvision>=0.5.0",
             "numpy>=1.16.4",
             "tensorboard",
+            # TensorBoard versions supporting Python 3.8 use the protobuf 4 JSON API.
+            "protobuf<5; python_version < '3.9'",
             "wandb"
       ],
       )

@@ -91,7 +91,7 @@ Isaac Gym 的高度来自原有 heightfield 邻点采样，接触来自 PhysX ne
 ```bash
 cd /home/bit/LZHMine
 .venv/bin/python legged_gym/scripts/train_nezha_moe_cts.py \
-  --max_iterations 5000 --num_envs 4096 --seed 10
+  --max_iterations 20000 --num_envs 4096 --seed 10
 ```
 
 上例 5000 轮用于初步观察，速度范围是否扩大取决于跟踪奖励，而非预设轮次；后续可根据曲线和策略表现续训，训练预算上限仍为配置中的 100000 轮。如需训练窗口，可额外加 `--viewer`。
@@ -101,10 +101,12 @@ cd /home/bit/LZHMine
 ```bash
 cd /home/bit/LZHMine
 .venv/bin/tensorboard --logdir /home/bit/LZHMine/logs/nezha_moe_cts \
-  --host 127.0.0.1 --port 6006
+  --host 127.0.0.1 --port 6007
 ```
 
-浏览器打开 <http://127.0.0.1:6006>。远程训练时，在本地执行 `ssh -L 6006:127.0.0.1:6006 用户名@训练服务器`，再访问同一地址。
+浏览器打开 <http://127.0.0.1:6007/#scalars>，在左侧勾选本次运行。远程训练时，在本地执行 `ssh -L 6007:127.0.0.1:6007 用户名@训练服务器`，再访问同一地址。若端口已占用，确认浏览器访问的是本项目的 TensorBoard，或换用空闲端口。
+
+当前 Python 3.8 环境使用 TensorBoard 2.14，需要 `protobuf<5`；项目已在 `rsl_rl/setup.py` 添加对应的条件依赖。若旧环境出现 `MessageToJson() got an unexpected keyword argument 'including_default_value_fields'`，执行 `uv pip install --python /home/bit/LZHMine/.venv/bin/python 'protobuf>=4.25.8,<5'`，然后重启 TensorBoard 并刷新浏览器。无需重新训练，已有事件日志可以继续使用。
 
 默认日志目录为 `logs/nezha_moe_cts/<时间>_wf_terrain/`，终端会打印实际路径；如需自定义名称，可额外加 `--run_name`。默认无需 W&B 登录，增加 `--wandb` 才会同时上传 W&B。
 
