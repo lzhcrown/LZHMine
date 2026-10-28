@@ -90,3 +90,25 @@ class MoE(nn.Module):
         weights = self.gating_network(x)
         expert_latents = self.experts(x)
         return (weights.unsqueeze(-1) * expert_latents).sum(dim=1), weights
+
+
+class MoEActor(nn.Module):
+    """Dense action-mean mixture with the same expert layout as the student.
+
+    Experts share a feature trunk and have independent output heads. The gate
+    has its own MLP; its softmax weights combine all expert action means.
+    Unlike the student latent, actions are not L2-normalized. Exploration is
+    applied once to the combined mean by ActorCriticMoECTS.
+    """
+
+    def __init__(self, expert_num, input_dim, hidden_dims, num_actions,
+                 activation="elu"):
+        super().__init__()
+        self.moe = MoE(expert_num, input_dim, hidden_dims, num_actions, activation)
+
+    def forward(self, inputs: torch.Tensor) -> torch.Tensor:
+        mean, _ = self.moe(inputs)
+        return mean
+
+    def get_expert_probabilities(self, inputs: torch.Tensor) -> torch.Tensor:
+        return self.moe.gating_network(inputs)

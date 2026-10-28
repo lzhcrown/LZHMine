@@ -11,6 +11,8 @@ from torch import nn
 class CTSStudentExporter(nn.Module):
     """Input is already preprocessed, term-major history; no internal cache."""
 
+    __constants__ = ["actor_is_moe"]
+
     def __init__(self, actor_critic, observation_config=None, control_config=None):
         super().__init__()
         if observation_config is None:
@@ -30,6 +32,9 @@ class CTSStudentExporter(nn.Module):
         self.num_actor_obs = int(actor_critic.num_actor_obs)
         self.num_actions = int(actor_critic.num_actions)
         self.num_experts = int(actor_critic.expert_num)
+        self.actor_type = actor_critic.actor_type
+        self.actor_is_moe = self.actor_type == "moe"
+        self.actor_expert_num = int(actor_critic.actor_expert_num)
         self.history_length = int(actor_critic.history_length)
         self.observation_config_json = json.dumps(observation_config, sort_keys=True)
         self.control_config_json = json.dumps(control_config or {}, sort_keys=True)
@@ -43,7 +48,24 @@ class CTSStudentExporter(nn.Module):
 
     @torch.jit.export
     def get_expert_probabilities(self, history: torch.Tensor) -> torch.Tensor:
+        # Keep the established deployment API referring to student experts.
         return self.student_encoder.moe.gating_network(history)
+
+    @torch.jit.export
+    def get_actor_expert_probabilities(self, history: torch.Tensor) -> torch.Tensor:
+        if self.actor_is_moe:
+            latent, _ = self.student_encoder(history)
+            current = history.index_select(-1, self.current_obs_indices)
+            return self.actor.get_expert_probabilities(torch.cat((latent, current), dim=-1))
+        return history.new_empty((history.shape[0], 0))
+
+    @torch.jit.export
+    def get_actor_type(self) -> str:
+        return self.actor_type
+
+    @torch.jit.export
+    def get_num_actor_experts(self) -> int:
+        return self.actor_expert_num
 
     @torch.jit.export
     def get_architecture(self) -> str:
@@ -85,6 +107,8 @@ class CTSStudentExporter(nn.Module):
             "num_actor_obs": self.num_actor_obs,
             "num_actions": self.num_actions,
             "num_experts": self.num_experts,
+            "actor_type": self.actor_type,
+            "actor_expert_num": self.actor_expert_num,
             "observation_config": json.loads(self.observation_config_json),
             "control_config": json.loads(self.control_config_json),
         }

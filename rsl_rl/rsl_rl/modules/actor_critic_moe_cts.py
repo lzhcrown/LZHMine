@@ -11,7 +11,7 @@ import torch
 from torch import nn
 from torch.distributions import Normal
 
-from .moe import L2Norm, MLP, MoE, SimNorm
+from .moe import L2Norm, MLP, MoE, MoEActor, SimNorm
 
 
 class StudentMoEEncoder(nn.Module):
@@ -38,6 +38,7 @@ class ActorCriticMoECTS(nn.Module):
         latent_dim=32, activation="elu", init_noise_std=1.0,
         norm_type="l2norm", noise_std_type="scalar", state_dependent_std=False,
         actor_obs_normalization=False, critic_obs_normalization=False,
+        actor_type="mlp", actor_expert_num=8,
     ):
         super().__init__()
         if history_length < 1 or sum(observation_dims) != num_one_step_obs:
@@ -56,6 +57,11 @@ class ActorCriticMoECTS(nn.Module):
             raise ValueError("This WF policy uses a shared scalar standard deviation per action")
         if actor_obs_normalization or critic_obs_normalization:
             raise ValueError("WF baseline disables empirical observation normalization")
+        if actor_type not in ("mlp", "moe"):
+            raise ValueError("actor_type must be 'mlp' or 'moe'")
+        if (int(actor_expert_num) != actor_expert_num or actor_expert_num < 0
+                or (actor_type == "moe" and actor_expert_num < 1)):
+            raise ValueError("actor_expert_num must be a positive integer for a MoE actor")
 
         self.num_actor_obs = num_actor_obs
         self.num_critic_obs = num_critic_obs
@@ -67,6 +73,9 @@ class ActorCriticMoECTS(nn.Module):
         self.expert_num = expert_num
         self.latent_dim = latent_dim
         self.norm_type = norm_type
+        # Missing actor_type in an older checkpoint retains the original MLP.
+        self.actor_type = actor_type
+        self.actor_expert_num = int(actor_expert_num) if actor_type == "moe" else 0
 
         indices = []
         offset = 0
@@ -86,11 +95,16 @@ class ActorCriticMoECTS(nn.Module):
             expert_num, num_actor_obs, student_encoder_hidden_dims, latent_dim,
             activation, norm_type,
         )
-        self.actor = MLP(latent_dim + num_one_step_obs, num_actions,
-                         actor_hidden_dims, activation)
+        if actor_type == "moe":
+            self.actor = MoEActor(self.actor_expert_num, latent_dim + num_one_step_obs,
+                                  actor_hidden_dims, num_actions, activation)
+        else:
+            self.actor = MLP(latent_dim + num_one_step_obs, num_actions,
+                             actor_hidden_dims, activation)
         self.critic = MLP(latent_dim + num_critic_obs, 1, critic_hidden_dims, activation)
         self.std = nn.Parameter(init_noise_std * torch.ones(num_actions))
         self.distribution = None
+        self.actor_gate_weights = torch.empty(0)
 
     def reset(self, dones=None):
         pass
@@ -124,7 +138,11 @@ class ActorCriticMoECTS(nn.Module):
             with torch.no_grad():
                 latent, _ = self.student_moe_encoder(observations)
         inputs = torch.cat((latent, self.get_current_observations(observations)), dim=-1)
-        mean = self.actor(inputs)
+        if self.actor_type == "moe":
+            mean, self.actor_gate_weights = self.actor.moe(inputs)
+        else:
+            mean = self.actor(inputs)
+            self.actor_gate_weights = inputs.new_empty((inputs.shape[0], 0))
         self.distribution = Normal(mean, self.std.clamp_min(1.0e-6).expand_as(mean),
                                    validate_args=False)
         return self.distribution.sample()
@@ -147,3 +165,17 @@ class ActorCriticMoECTS(nn.Module):
 
     def get_expert_probabilities(self, observations):
         return self.student_moe_encoder.moe.gating_network(observations)
+
+    def get_actor_expert_probabilities(self, observations, critic_obs=None, is_teacher=False):
+        """Actor routing, distinct from the student's representation routing."""
+        if self.actor_type != "moe":
+            return observations.new_empty((observations.shape[0], 0))
+        if is_teacher:
+            if critic_obs is None:
+                raise ValueError("Teacher routing requires current privileged observations")
+            latent = self.teacher_encoder(critic_obs)
+        else:
+            with torch.no_grad():
+                latent, _ = self.student_moe_encoder(observations)
+        inputs = torch.cat((latent, self.get_current_observations(observations)), dim=-1)
+        return self.actor.get_expert_probabilities(inputs)

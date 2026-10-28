@@ -33,9 +33,10 @@ import os
 from datetime import datetime
 
 from rsl_rl.runners import MoECTSOnPolicyRunner
-from rsl_rl.utils.cts_checkpoint import DIMENSION_KEYS, load_cts_checkpoint
+from rsl_rl.utils.cts_checkpoint import DIMENSION_KEYS, load_cts_checkpoint, validate_checkpoint_actor
 
 from legged_gym import LEGGED_GYM_ROOT_DIR
+from experiments.registry import clone_config
 from .helpers import (
     get_args, update_cfg_from_args, class_to_dict, update_class_from_dict,
     get_load_path, set_seed, parse_sim_params,
@@ -50,8 +51,8 @@ class TaskRegistry:
 
     def register(self, name, task_class, env_cfg, train_cfg):
         self.task_classes[name] = task_class
-        self.env_cfgs[name] = env_cfg
-        self.train_cfgs[name] = train_cfg
+        self.env_cfgs[name] = clone_config(env_cfg)
+        self.train_cfgs[name] = clone_config(train_cfg)
 
     def get_task_class(self, name):
         return self.task_classes[name]
@@ -75,6 +76,13 @@ class TaskRegistry:
             raise ValueError("Resume requires a log root or runner.resume_path")
         return get_load_path(log_root, train_cfg.runner.load_run, train_cfg.runner.checkpoint)
 
+    @staticmethod
+    def _validate_experiment_checkpoint(train_cfg, checkpoint):
+        if getattr(train_cfg.runner, "experiment_key", None):
+            validate_checkpoint_actor(
+                checkpoint, train_cfg.policy.actor_type, train_cfg.policy.actor_expert_num,
+            )
+
     def make_env(self, name, args=None, env_cfg=None):
         args = get_args() if args is None else args
         if name not in self.task_classes:
@@ -86,6 +94,7 @@ class TaskRegistry:
         resume_path = self._resume_path(train_cfg)
         if resume_path is not None:
             checkpoint = load_cts_checkpoint(resume_path)
+            self._validate_experiment_checkpoint(train_cfg, checkpoint)
             if "environment_config" in checkpoint:
                 update_class_from_dict(env_cfg, checkpoint["environment_config"])
             # Restore the schema before simulator buffers are allocated.
@@ -115,11 +124,26 @@ class TaskRegistry:
         resume_path = getattr(args, "cts_resume_path", None) or self._resume_path(train_cfg, log_root)
         if resume_path is not None:
             checkpoint = load_cts_checkpoint(resume_path)
+            self._validate_experiment_checkpoint(train_cfg, checkpoint)
+            # The loader makes legacy actor_type='mlp' explicit, so restoring
+            # its config also overrides a newer task default of actor_type='moe'.
             for key, value in checkpoint["policy_config"].items():
                 if key not in DIMENSION_KEYS:
                     setattr(train_cfg.policy, key, copy.deepcopy(value))
             update_class_from_dict(train_cfg.algorithm, checkpoint["train_config"]["algorithm"])
-            train_cfg.runner.num_steps_per_env = checkpoint["train_config"]["runner"]["num_steps_per_env"]
+            saved_runner = checkpoint["train_config"]["runner"]
+            train_cfg.runner.num_steps_per_env = saved_runner["num_steps_per_env"]
+            if getattr(args, "run_name", None) is None:
+                train_cfg.runner.run_name = saved_runner.get("run_name") or (
+                    "cts_actor_moe" if train_cfg.policy.actor_type == "moe" else "cts_mlp_baseline"
+                )
+            actor_is_moe = train_cfg.policy.actor_type == "moe"
+            default_tags = ["nezha", "moe-cts", "isaac-gym"] + (["actor-moe"] if actor_is_moe else [])
+            train_cfg.runner.wandb_tags = copy.deepcopy(saved_runner.get("wandb_tags", default_tags))
+            train_cfg.runner.wandb_notes = saved_runner.get("wandb_notes", (
+                "CTS student MoE + MoE actor; MLP critic on Nezha" if actor_is_moe
+                else "WF MoE concurrent teacher-student training with an MLP actor on Nezha"
+            ))
         if log_root == "default":
             log_root = os.path.join(LEGGED_GYM_ROOT_DIR, "logs", train_cfg.runner.experiment_name)
         log_dir = None if log_root is None else os.path.join(

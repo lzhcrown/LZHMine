@@ -16,7 +16,7 @@ import torch
 from legged_gym.envs import *  # noqa: F401,F403 - registers tasks
 from legged_gym.utils import get_args, task_registry, update_class_from_dict
 from legged_gym.scripts.export_nezha_moe_cts import DEFAULT_EXPORT_PATH, resolve_checkpoint
-from rsl_rl.utils.cts_checkpoint import load_cts_checkpoint, policy_from_checkpoint
+from rsl_rl.utils.cts_checkpoint import load_cts_checkpoint, policy_from_checkpoint, validate_checkpoint_actor
 from rsl_rl.utils.cts_export import CTSStudentExporter
 
 
@@ -55,22 +55,24 @@ def _fixed_commands(env, observations, command):
     return observations
 
 
-def play(args):
+def play(args, task_name=TASK_NAME, export_path=None,
+         expected_actor_type=None, expected_actor_expert_num=None):
     if args.play_num_envs < 1 or args.play_steps < 1:
         raise ValueError("play_num_envs and play_steps must be positive")
     if args.terrain not in ("plane", "heightfield", "trimesh"):
         raise ValueError("terrain must be plane, heightfield or trimesh")
-    args.task = TASK_NAME
+    args.task = task_name
     # This entry point loads the student directly, without constructing a trainer.
     args.resume = False
     args.num_envs = args.play_num_envs
-    env_cfg, train_cfg = task_registry.get_cfgs(name=TASK_NAME)
+    env_cfg, train_cfg = task_registry.get_cfgs(name=task_name)
     experiment = args.experiment_name or train_cfg.runner.experiment_name
     path = resolve_checkpoint(args.checkpoint_path, args.load_run, experiment)
     if not args.checkpoint_path and args.checkpoint not in (None, "-1"):
         filename = "best_policy.pt" if args.checkpoint == "best_policy" else "model_{}.pt".format(args.checkpoint)
         path = os.path.join(os.path.dirname(path), filename)
     checkpoint = load_cts_checkpoint(path, map_location="cpu")
+    validate_checkpoint_actor(checkpoint, expected_actor_type, expected_actor_expert_num)
     if checkpoint.get("environment_config"):
         update_class_from_dict(env_cfg, checkpoint["environment_config"])
     env_cfg.env.observation_config = checkpoint["observation_config"]
@@ -91,13 +93,13 @@ def play(args):
             if name.startswith("randomize_") or name in ("disturbance", "push_robots", "delay"):
                 if isinstance(getattr(env_cfg.domain_rand, name), bool):
                     setattr(env_cfg.domain_rand, name, False)
-    env, _ = task_registry.make_env(name=TASK_NAME, args=args, env_cfg=env_cfg)
+    env, _ = task_registry.make_env(name=task_name, args=args, env_cfg=env_cfg)
     env.reset()
     policy = policy_from_checkpoint(checkpoint, device=env.device).eval()
     if policy.num_actor_obs != env.num_obs:
         raise ValueError("Evaluation environment history does not match the checkpoint")
     if not args.no_export:
-        export_path = DEFAULT_EXPORT_PATH
+        export_path = export_path or DEFAULT_EXPORT_PATH
         CTSStudentExporter(policy, checkpoint["observation_config"], checkpoint.get("control_config")).export(export_path)
         print("Student exported to {}".format(export_path))
     command = (args.command_x, args.command_y, args.command_yaw)

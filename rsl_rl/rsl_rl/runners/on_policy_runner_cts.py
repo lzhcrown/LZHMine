@@ -11,7 +11,9 @@ import torch
 
 from rsl_rl.algorithms.moe_cts import MoECTS
 from rsl_rl.modules.actor_critic_moe_cts import ActorCriticMoECTS
-from rsl_rl.utils.cts_checkpoint import ARCHITECTURE, FORMAT_VERSION, load_cts_checkpoint
+from rsl_rl.utils.cts_checkpoint import (
+    ARCHITECTURE, FORMAT_VERSION, load_cts_checkpoint, normalize_policy_config,
+)
 
 
 def _config_dict(value):
@@ -34,7 +36,7 @@ class MoECTSOnPolicyRunner:
         self.cfg = self.train_cfg["runner"]
         self.log_dir = log_dir
         self.observation_config = copy.deepcopy(env.observation_config)
-        self.policy_config = copy.deepcopy(self.train_cfg["policy"])
+        self.policy_config = normalize_policy_config(self.train_cfg["policy"])
         self.policy_config.update(
             num_actor_obs=env.num_obs,
             num_critic_obs=env.num_privileged_obs,
@@ -186,8 +188,11 @@ class MoECTSOnPolicyRunner:
     def _log(self, iteration, losses, collected, learned, buffers, episodes):
         metrics = {}
         for key, value in losses.items():
-            prefix = "Experts" if key.startswith(("expert_", "gate_")) else "Loss"
-            metrics[prefix + "/" + key] = float(value)
+            if key.startswith("actor_"):
+                metrics["ActorExperts/" + key[len("actor_"):]] = float(value)
+            else:
+                prefix = "Experts" if key.startswith(("expert_", "gate_")) else "Loss"
+                metrics[prefix + "/" + key] = float(value)
         for name, values in buffers.items():
             if values:
                 metrics["Train/" + name] = statistics.mean(values)
@@ -216,7 +221,8 @@ class MoECTSOnPolicyRunner:
             self.wandb_run.log(metrics, step=iteration)
         print("MoE-CTS iteration {} | {:.0f} steps/s | {}".format(
             iteration + 1, metrics["Perf/fps"],
-            " | ".join("{}={:.5f}".format(k, float(v)) for k, v in losses.items() if not k.startswith("expert_")),
+            " | ".join("{}={:.5f}".format(k, float(v)) for k, v in losses.items()
+                       if "expert_" not in k),
         ))
 
     def _control_config(self):

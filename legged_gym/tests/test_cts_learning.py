@@ -8,13 +8,14 @@ from rsl_rl.modules.actor_critic_moe_cts import ActorCriticMoECTS
 from rsl_rl.storage.rollout_storage_cts import RolloutStorageCTS
 
 
-def make_policy():
+def make_policy(actor_type="mlp"):
     return ActorCriticMoECTS(
         num_actor_obs=24, num_critic_obs=11, num_one_step_obs=6,
         num_actions=3, history_length=4, observation_dims=[2, 1, 3],
         actor_hidden_dims=[16], critic_hidden_dims=[16],
         teacher_encoder_hidden_dims=[16], student_encoder_hidden_dims=[16, 8],
         latent_dim=8, expert_num=4,
+        actor_type=actor_type, actor_expert_num=8,
     )
 
 
@@ -55,8 +56,9 @@ def test_wf_policy_shapes_and_term_major_current_frame():
     assert policy.critic.network[0].in_features == 327
 
 
-def test_gradient_boundaries_and_positive_action_scale():
-    policy = make_policy()
+@pytest.mark.parametrize("actor_type", ["mlp", "moe"])
+def test_gradient_boundaries_and_positive_action_scale(actor_type):
+    policy = make_policy(actor_type)
     obs, privileged = torch.randn(5, 24), torch.randn(5, 11)
     policy.act(obs, privileged, is_teacher=True)
     policy.action_mean.square().mean().backward()
@@ -75,6 +77,7 @@ def test_gradient_boundaries_and_positive_action_scale():
         policy.zero_grad(set_to_none=True)
         policy.evaluate(obs, privileged, is_teacher=is_teacher).square().mean().backward()
         assert has_gradient(policy.critic)
+        assert not has_gradient(policy.actor)
         assert not has_gradient(policy.teacher_encoder)
         assert not has_gradient(policy.student_moe_encoder)
 
@@ -156,9 +159,10 @@ def test_return_computation_stops_at_episode_boundary():
     assert torch.allclose(storage.returns[:, :, 0], torch.tensor([[1.0, 10.0], [10.0, 10.0]]))
 
 
-def test_update_finishes_ppo_before_student_distillation(monkeypatch):
+@pytest.mark.parametrize("actor_type", ["mlp", "moe"])
+def test_update_finishes_ppo_before_student_distillation(monkeypatch, actor_type):
     torch.manual_seed(7)
-    policy = make_policy()
+    policy = make_policy(actor_type)
     algorithm = MoECTS(policy, 6, num_learning_epochs=2, num_mini_batches=2, schedule="fixed")
     ppo_ids = {id(p) for group in algorithm.optimizer.param_groups for p in group["params"]}
     student_ids = {id(p) for group in algorithm.optimizer_stu_enc.param_groups for p in group["params"]}
@@ -167,6 +171,8 @@ def test_update_finishes_ppo_before_student_distillation(monkeypatch):
     fill_rollout(algorithm)
     before_teacher = [p.detach().clone() for p in policy.teacher_encoder.parameters()]
     before_student = [p.detach().clone() for p in policy.student_moe_encoder.parameters()]
+    before_actor = {name: p.detach().clone() for name, p in policy.actor.named_parameters()}
+    actor_after_ppo = {}
     phase_steps = []
     original_ppo_step = algorithm.optimizer.step
     original_student_step = algorithm.optimizer_stu_enc.step
@@ -190,6 +196,11 @@ def test_update_finishes_ppo_before_student_distillation(monkeypatch):
         phase_steps.append("student")
         assert phase_steps.count("ppo") == 4
         assert all(p.grad is None for p in algorithm.ppo_parameters)
+        if not actor_after_ppo:
+            actor_after_ppo.update({name: p.detach().clone()
+                                    for name, p in policy.actor.named_parameters()})
+        assert all(torch.equal(actor_after_ppo[name], p)
+                   for name, p in policy.actor.named_parameters())
         return original_student_step(*args, **kwargs)
 
     monkeypatch.setattr(algorithm.optimizer, "step", ppo_step)
@@ -211,6 +222,16 @@ def test_update_finishes_ppo_before_student_distillation(monkeypatch):
     assert losses["surrogate"] == pytest.approx(losses["teacher_surrogate"] + losses["student_surrogate"])
     assert any(not torch.equal(old, new) for old, new in zip(before_teacher, policy.teacher_encoder.parameters()))
     assert any(not torch.equal(old, new) for old, new in zip(before_student, policy.student_moe_encoder.parameters()))
+    assert any(not torch.equal(before_actor[name], p) for name, p in policy.actor.named_parameters())
+    if actor_type == "moe":
+        assert any(not torch.equal(before_actor[name], p)
+                   for name, p in policy.actor.named_parameters() if "gating_network" in name)
+        # Grouped Conv1d stores one contiguous action-head block per expert.
+        head_name = "moe.experts.experts.weight"
+        old_heads = before_actor[head_name].reshape(8, policy.num_actions, -1)
+        new_heads = dict(policy.actor.named_parameters())[head_name].detach().reshape_as(old_heads)
+        assert torch.all((old_heads != new_heads).flatten(1).any(dim=1))
+        assert not hasattr(policy.critic, "moe")
     assert algorithm.storage.step == 0
 
 

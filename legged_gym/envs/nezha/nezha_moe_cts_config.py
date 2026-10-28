@@ -41,6 +41,10 @@ class NezhaMoECTSCfgPPO(LeggedRobotCfgPPO):
 
     class policy:
         init_noise_std = 1.0
+        # Shared defaults preserve the original baseline. Experiment-specific
+        # overrides live in experiments/exp01_baseline and exp02_actor_moe.
+        actor_type = "mlp"
+        actor_expert_num = 0
         actor_hidden_dims = [512, 256, 128]
         critic_hidden_dims = [512, 256, 128]
         teacher_encoder_hidden_dims = [512, 256]

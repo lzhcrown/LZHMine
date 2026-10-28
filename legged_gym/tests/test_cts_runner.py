@@ -1,8 +1,11 @@
 """Exercise the real CTS runner without loading an Isaac Gym simulator."""
 
 import copy
+import importlib.util
 import json
-from types import SimpleNamespace
+from pathlib import Path
+import sys
+from types import ModuleType, SimpleNamespace
 
 import pytest
 import torch
@@ -107,13 +110,14 @@ class CurriculumVectorEnv(FakeVectorEnv):
         return super().reset()
 
 
-def runner_config():
+def runner_config(actor_type="mlp"):
     return {
         "policy": {
             "actor_hidden_dims": [16], "critic_hidden_dims": [16],
             "teacher_encoder_hidden_dims": [16],
             "student_encoder_hidden_dims": [16, 8],
             "latent_dim": 8, "expert_num": 8,
+            "actor_type": actor_type, "actor_expert_num": 8,
         },
         "algorithm": {
             "num_learning_epochs": 1, "num_mini_batches": 2,
@@ -142,10 +146,11 @@ def assert_nested_equal(expected, actual):
         assert expected == actual
 
 
-def test_runner_learns_saves_and_resumes_both_optimizers(tmp_path):
+@pytest.mark.parametrize("actor_type", ["mlp", "moe"])
+def test_runner_learns_saves_and_resumes_both_optimizers(tmp_path, actor_type):
     torch.manual_seed(31)
     env = FakeVectorEnv()
-    runner = MoECTSOnPolicyRunner(env, runner_config(), log_dir=str(tmp_path))
+    runner = MoECTSOnPolicyRunner(env, runner_config(actor_type), log_dir=str(tmp_path))
     before = {name: parameter.detach().clone()
               for name, parameter in runner.alg.actor_critic.named_parameters()}
     try:
@@ -171,7 +176,9 @@ def test_runner_learns_saves_and_resumes_both_optimizers(tmp_path):
     assert checkpoint["optimizer_state_dict"]["state"]
     assert checkpoint["student_optimizer_state_dict"]["state"]
     assert checkpoint["next_iter"] == 2
-    restored = MoECTSOnPolicyRunner(FakeVectorEnv(), runner_config())
+    assert checkpoint["policy_config"]["actor_type"] == actor_type
+    assert checkpoint["policy_config"]["actor_expert_num"] == (8 if actor_type == "moe" else 0)
+    restored = MoECTSOnPolicyRunner(FakeVectorEnv(), runner_config(actor_type))
     restored.load(tmp_path / "model_2.pt")
     assert restored.current_learning_iteration == 2
     assert restored.tot_timesteps == 48
@@ -183,6 +190,7 @@ def test_runner_learns_saves_and_resumes_both_optimizers(tmp_path):
     assert restored.alg.learning_rate == 3.0e-4
 
     policy = policy_from_checkpoint(checkpoint)
+    assert policy.actor_type == actor_type
     observations = torch.randn(3, 228)
     with torch.no_grad():
         expected = runner.get_inference_policy()(observations)
@@ -194,6 +202,157 @@ def test_runner_learns_saves_and_resumes_both_optimizers(tmp_path):
     # Restoring Adam's step matters: both optimizers must continue at step 6.
     for optimizer in (restored.alg.optimizer, restored.alg.optimizer_stu_enc):
         assert all(state["step"].item() == 6 for state in optimizer.state.values())
+
+
+@pytest.mark.parametrize("actor_type", ["mlp", "moe"])
+def test_actor_tensorboard_metrics_are_separate_from_student_encoder(tmp_path, actor_type):
+    runner = MoECTSOnPolicyRunner(FakeVectorEnv(), runner_config(actor_type), log_dir=str(tmp_path))
+    runner.learn(2)
+    events = EventAccumulator(str(tmp_path)).Reload()
+    scalar_tags = events.Tags()["scalars"]
+    assert "Experts/gate_entropy" in scalar_tags
+    assert all("Experts/expert_%d_usage" % i in scalar_tags for i in range(8))
+    actor_tags = [tag for tag in scalar_tags if tag.startswith("ActorExperts/")]
+    if actor_type == "mlp":
+        assert not actor_tags
+        return
+    for prefix in ("", "teacher_", "student_"):
+        entropy_tag = "ActorExperts/%sgate_entropy" % prefix
+        assert [event.step for event in events.Scalars(entropy_tag)] == [0, 1]
+        entropies = torch.tensor([event.value for event in events.Scalars(entropy_tag)])
+        assert torch.isfinite(entropies).all()
+        assert torch.all((entropies >= 0) & (entropies <= torch.log(torch.tensor(8.0)) + 1.0e-6))
+        usage = torch.tensor([[event.value for event in events.Scalars(
+            "ActorExperts/%sexpert_%d_usage" % (prefix, i))] for i in range(8)])
+        assert torch.all((usage >= 0) & (usage <= 1))
+        assert torch.allclose(usage.sum(dim=0), torch.ones(2), atol=1.0e-6)
+    # Aggregate metrics should use actual sample counts (6 teacher, 2 student),
+    # rather than giving unequal environment groups equal weight.
+    for suffix in ["gate_entropy"] + ["expert_%d_usage" % i for i in range(8)]:
+        overall = torch.tensor([event.value for event in events.Scalars("ActorExperts/" + suffix)])
+        teacher = torch.tensor([event.value for event in events.Scalars("ActorExperts/teacher_" + suffix)])
+        student = torch.tensor([event.value for event in events.Scalars("ActorExperts/student_" + suffix)])
+        assert torch.allclose(overall, 0.75 * teacher + 0.25 * student, atol=1.0e-6)
+
+
+def test_legacy_mlp_checkpoint_without_actor_metadata_still_resumes(tmp_path):
+    config = runner_config()
+    config["policy"].pop("actor_type")
+    config["policy"].pop("actor_expert_num")
+    runner = MoECTSOnPolicyRunner(FakeVectorEnv(), config)
+    runner.learn(1)
+    path = tmp_path / "legacy_mlp.pt"
+    runner.save(path)
+    checkpoint = load_cts_checkpoint(path)
+    checkpoint["policy_config"].pop("actor_type")
+    checkpoint["policy_config"].pop("actor_expert_num")
+    checkpoint["train_config"]["policy"].pop("actor_type", None)
+    checkpoint["train_config"]["policy"].pop("actor_expert_num", None)
+    torch.save(checkpoint, path)
+
+    restored = MoECTSOnPolicyRunner(FakeVectorEnv(), config)
+    restored.load(path)
+    assert restored.alg.actor_critic.actor_type == "mlp"
+    assert restored.alg.actor_critic.actor_expert_num == 0
+    assert restored.current_learning_iteration == 1
+    assert_nested_equal(runner.alg.optimizer.state_dict(), restored.alg.optimizer.state_dict())
+    assert_nested_equal(runner.alg.optimizer_stu_enc.state_dict(), restored.alg.optimizer_stu_enc.state_dict())
+    policy = policy_from_checkpoint(load_cts_checkpoint(path))
+    history = torch.randn(3, 228)
+    with torch.no_grad():
+        assert torch.allclose(policy.act_inference(history), runner.get_inference_policy()(history))
+        assert torch.allclose(restored.get_inference_policy()(history), policy.act_inference(history))
+    restored.learn(1)
+    assert restored.current_learning_iteration == 2
+
+
+@pytest.fixture
+def cpu_task_registry(monkeypatch):
+    """Load the real registry/helpers without importing simulator-only utils.
+
+    These tests exercise make_alg_runner, so Gym simulation bindings are never
+    called. A private package keeps the normal legged_gym imports untouched.
+    """
+    package_name = "_cts_registry_cpu_test"
+    package = ModuleType(package_name)
+    package.__path__ = []
+    monkeypatch.setitem(sys.modules, package_name, package)
+    gym = ModuleType("isaacgym")
+    gym.gymapi = SimpleNamespace()
+    gym.gymutil = SimpleNamespace()
+    monkeypatch.setitem(sys.modules, "isaacgym", gym)
+    utils_dir = Path(__file__).resolve().parents[1] / "utils"
+    for name in ("helpers", "task_registry"):
+        qualified_name = package_name + "." + name
+        spec = importlib.util.spec_from_file_location(qualified_name, utils_dir / (name + ".py"))
+        module = importlib.util.module_from_spec(spec)
+        monkeypatch.setitem(sys.modules, qualified_name, module)
+        spec.loader.exec_module(module)
+    return module.TaskRegistry()
+
+
+@pytest.mark.parametrize("requested_run_name", [None, "explicit_resume"])
+def test_registry_resume_legacy_mlp_overrides_new_moe_defaults_and_preserves_run_name(
+        tmp_path, cpu_task_registry, requested_run_name):
+    old_config = runner_config("mlp")
+    old_config["runner"]["run_name"] = "saved_mlp_baseline"
+    old_config["runner"]["wandb_tags"] = ["nezha", "moe-cts", "baseline"]
+    old_config["runner"]["wandb_notes"] = "Original MLP actor baseline"
+    original = MoECTSOnPolicyRunner(FakeVectorEnv(), old_config)
+    original.learn(1)
+    checkpoint_path = tmp_path / "legacy_mlp.pt"
+    original.save(checkpoint_path)
+    checkpoint = load_cts_checkpoint(checkpoint_path)
+    for section in (checkpoint["policy_config"], checkpoint["train_config"]["policy"]):
+        section.pop("actor_type")
+        section.pop("actor_expert_num")
+    torch.save(checkpoint, checkpoint_path)
+
+    defaults = runner_config("moe")
+    defaults["policy"]["actor_hidden_dims"] = [64]
+    defaults["algorithm"]["learning_rate"] = 9.0e-4
+    defaults["runner"].update(
+        resume=False, resume_path=str(checkpoint_path), run_name="actor_moe",
+        experiment_name="nezha_moe_cts", num_steps_per_env=9,
+        load_run=-1, checkpoint=-1,
+        wandb_tags=["nezha", "actor-moe"], wandb_notes="8-expert MoE actor",
+    )
+    train_config = SimpleNamespace(
+        seed=10, runner_class_name="MoECTSOnPolicyRunner",
+        **{key: SimpleNamespace(**value) for key, value in defaults.items()},
+    )
+    cpu_task_registry.register("test_cts", FakeVectorEnv, SimpleNamespace(), train_config)
+    args = SimpleNamespace(
+        seed=None, max_iterations=None, resume=True, experiment_name=None,
+        run_name=requested_run_name, load_run=None, checkpoint=None, rl_device="cpu",
+    )
+    restored, config = cpu_task_registry.make_alg_runner(
+        FakeVectorEnv(), name="test_cts", args=args, log_root=str(tmp_path / "resumed"),
+    )
+    assert config.policy.actor_type == "mlp"
+    assert config.policy.actor_expert_num == 0
+    assert config.policy.actor_hidden_dims == old_config["policy"]["actor_hidden_dims"]
+    assert config.algorithm.learning_rate == 3.0e-4
+    assert restored.num_steps_per_env == 3
+    assert restored.current_learning_iteration == 1
+    assert restored.alg.actor_critic.actor_type == "mlp"
+    expected_name = requested_run_name or "saved_mlp_baseline"
+    assert config.runner.run_name == expected_name
+    assert config.runner.wandb_tags == old_config["runner"]["wandb_tags"]
+    assert config.runner.wandb_notes == old_config["runner"]["wandb_notes"]
+    assert Path(restored.log_dir).name.endswith("_" + expected_name)
+    assert_nested_equal(original.alg.optimizer.state_dict(), restored.alg.optimizer.state_dict())
+    assert_nested_equal(original.alg.optimizer_stu_enc.state_dict(), restored.alg.optimizer_stu_enc.state_dict())
+    assert_nested_equal(original.alg.actor_critic.state_dict(), restored.alg.actor_critic.state_dict())
+    # Restoring one run must not turn a later fresh experiment into the baseline.
+    assert train_config.policy.actor_type == "moe"
+    assert train_config.policy.actor_expert_num == 8
+    assert train_config.runner.run_name == "actor_moe"
+    assert "actor-moe" in train_config.runner.wandb_tags
+    restored.learn(1)
+    assert restored.current_learning_iteration == 2
+    for optimizer in (restored.alg.optimizer, restored.alg.optimizer_stu_enc):
+        assert all(state["step"].item() == 4 for state in optimizer.state.values())
 
 
 def test_reward_command_range_checkpoint_restores_expansion_before_reset(tmp_path):
