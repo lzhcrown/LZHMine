@@ -6,6 +6,7 @@ from typing import Sequence, Tuple
 import torch
 
 from rsl_rl.utils.cts_observations import CTSObservationHistory, build_proprioception
+from rsl_rl.utils.cts_checkpoint import validate_checkpoint_policy
 
 NUM_ACTIONS = 16
 
@@ -31,6 +32,7 @@ class NezhaCTSPolicyRuntime:
         control_dt: float = 0.02,
         joint_names: Sequence[str] = None,
         policy=None,
+        expected_policy=None,
     ):
         self.device = torch.device(device)
         self.policy = (
@@ -40,6 +42,20 @@ class NezhaCTSPolicyRuntime:
         if not hasattr(self.policy, "get_architecture") or self.policy.get_architecture() != "nezha_moe_cts":
             raise ValueError("Expected a nezha_moe_cts student export")
         self.architecture = "nezha_moe_cts"
+        self.num_experts = int(self.policy.get_num_experts())
+        self.student_encoder_type = (
+            self.policy.get_student_encoder_type()
+            if hasattr(self.policy, "get_student_encoder_type") else "moe"
+        )
+        self.policy_config = {
+            "student_encoder_type": self.student_encoder_type,
+            "expert_num": self.num_experts,
+            "actor_type": self.policy.get_actor_type() if hasattr(self.policy, "get_actor_type") else "mlp",
+            "actor_expert_num": self.policy.get_num_actor_experts() if hasattr(self.policy, "get_num_actor_experts") else 0,
+            "critic_type": self.policy.get_critic_type() if hasattr(self.policy, "get_critic_type") else "mlp",
+            "critic_expert_num": self.policy.get_num_critic_experts() if hasattr(self.policy, "get_num_critic_experts") else 0,
+        }
+        validate_checkpoint_policy({"policy_config": self.policy_config}, expected_policy)
         self.observation_config = json.loads(self.policy.get_observation_config_json())
         self.control_config = json.loads(self.policy.get_control_config_json())
         self.clip_actions = float(self.control_config.get("clip_actions", 100.0))
@@ -94,7 +110,6 @@ class NezhaCTSPolicyRuntime:
         self.wheel_velocity_scale = float(wheel_velocity_scale)
         self.wheel_ids = torch.tensor(self.observation_config["wheel_indices"], dtype=torch.long, device=self.device)
         self.previous_actions = torch.zeros(NUM_ACTIONS, device=self.device)
-        self.num_experts = int(self.policy.get_num_experts())
         self.expert_names = tuple("expert_{}".format(i) for i in range(self.num_experts))
         self.last_expert_probabilities = torch.zeros(self.num_experts, device=self.device)
 

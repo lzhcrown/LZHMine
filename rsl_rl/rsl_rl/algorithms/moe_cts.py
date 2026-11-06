@@ -140,6 +140,7 @@ class MoECTS:
                 self.actor_critic.action_mean, self.actor_critic.action_std,
                 self.actor_critic.entropy,
                 self.actor_critic.actor_gate_weights,
+                self.actor_critic.critic_gate_weights,
             ))
         return [torch.cat(parts, dim=0) for parts in zip(*results)]
 
@@ -160,17 +161,26 @@ class MoECTS:
     def update(self):
         totals = {key: 0.0 for key in (
             "value", "surrogate", "teacher_surrogate", "student_surrogate",
-            "entropy", "mean_latent_loss", "mean_load_balance_loss", "gate_entropy",
+            "entropy", "mean_latent_loss",
         )}
+        student_experts = self.actor_critic.expert_num
+        if student_experts:
+            totals.update(mean_load_balance_loss=0.0, gate_entropy=0.0)
         ppo_updates = student_updates = 0
-        actor_experts = self.actor_critic.actor_expert_num
-        actor_weight_sums = torch.zeros(2, actor_experts, device=self.device)
-        actor_entropy_sums = torch.zeros(2, device=self.device)
-        actor_samples = [0, 0]
+        routing_stats = {
+            name: {
+                "weights": torch.zeros(2, count, device=self.device),
+                "entropy": torch.zeros(2, device=self.device),
+                "samples": [0, 0],
+            }
+            for name, count in (("actor", self.actor_critic.actor_expert_num),
+                                ("critic", self.actor_critic.critic_expert_num))
+            if count
+        }
         self.optimizer_stu_enc.zero_grad(set_to_none=True)
         # Finish all PPO updates before deriving targets from the new teacher.
         for batch in self.storage.mini_batch_generator(self.num_mini_batches, self.num_learning_epochs):
-            log_probs, values, means, stds, entropy, actor_weights = self._batch_results(batch)
+            log_probs, values, means, stds, entropy, actor_weights, critic_weights = self._batch_results(batch)
             self._adapt_learning_rate(means, stds, batch["mu"], batch["sigma"])
             advantages = batch["advantages"].squeeze(-1)
             if self.normalize_advantage_per_mini_batch:
@@ -193,17 +203,20 @@ class MoECTS:
             loss.backward()
             nn.utils.clip_grad_norm_(self.ppo_parameters, self.max_grad_norm, error_if_nonfinite=True)
             self.optimizer.step()
-            if actor_experts:
+            for name, routing_weights in (("actor", actor_weights), ("critic", critic_weights)):
+                if name not in routing_stats:
+                    continue
                 # Diagnostics use the routing already computed for PPO. Keep
                 # the teacher and student distributions visible separately.
-                weights = actor_weights.detach()
+                stats = routing_stats[name]
+                weights = routing_weights.detach()
                 for group, selection in enumerate((slice(None, split), slice(split, None))):
                     group_weights = weights[selection]
-                    actor_weight_sums[group] += group_weights.sum(dim=0)
-                    actor_entropy_sums[group] -= (
+                    stats["weights"][group] += group_weights.sum(dim=0)
+                    stats["entropy"][group] -= (
                         group_weights * group_weights.clamp_min(1.0e-8).log()
                     ).sum()
-                    actor_samples[group] += group_weights.shape[0]
+                    stats["samples"][group] += group_weights.shape[0]
             for key, value in (("value", value_loss), ("surrogate", surrogate),
                                ("teacher_surrogate", teacher_surrogate), ("student_surrogate", student_surrogate),
                                ("entropy", entropy_mean)):
@@ -211,7 +224,7 @@ class MoECTS:
             ppo_updates += 1
 
         self.optimizer.zero_grad(set_to_none=True)
-        expert_usage = torch.zeros(self.actor_critic.expert_num, device=self.device)
+        expert_usage = torch.zeros(student_experts, device=self.device)
         student_samples = 0
         for observations, privileged in self.storage.student_mini_batch_generator(
                 self.num_mini_batches, self.num_learning_epochs):
@@ -219,35 +232,40 @@ class MoECTS:
             with torch.no_grad():
                 teacher_latent = self.actor_critic.teacher_encoder(privileged)
             latent_loss = (student_latent - teacher_latent).square().mean()
-            load_balance = (weights.mean(dim=0) - 1.0 / weights.shape[-1]).square().mean()
+            student_loss = latent_loss
+            if student_experts:
+                load_balance = (weights.mean(dim=0) - 1.0 / student_experts).square().mean()
+                student_loss = student_loss + self.load_balance_coef * load_balance
             self.optimizer_stu_enc.zero_grad(set_to_none=True)
-            (latent_loss + self.load_balance_coef * load_balance).backward()
+            student_loss.backward()
             nn.utils.clip_grad_norm_(self.actor_critic.student_moe_encoder.parameters(),
                                      self.max_grad_norm, error_if_nonfinite=True)
             self.optimizer_stu_enc.step()
-            detached_weights = weights.detach()
             totals["mean_latent_loss"] += latent_loss.item()
-            totals["mean_load_balance_loss"] += load_balance.item()
-            totals["gate_entropy"] += -(detached_weights * detached_weights.clamp_min(1.0e-8).log()).sum().item()
-            expert_usage += detached_weights.sum(dim=0)
+            if student_experts:
+                detached_weights = weights.detach()
+                totals["mean_load_balance_loss"] += load_balance.item()
+                totals["gate_entropy"] += -(detached_weights * detached_weights.clamp_min(1.0e-8).log()).sum().item()
+                expert_usage += detached_weights.sum(dim=0)
             student_samples += observations.shape[0]
             student_updates += 1
 
         for key in ("value", "surrogate", "teacher_surrogate", "student_surrogate", "entropy"):
             totals[key] /= ppo_updates
-        for key in ("mean_latent_loss", "mean_load_balance_loss"):
-            totals[key] /= student_updates
-        totals["gate_entropy"] /= student_samples
-        for index, usage in enumerate((expert_usage / student_samples).tolist()):
-            totals["expert_%d_usage" % index] = usage
-        if actor_experts:
-            sample_count = sum(actor_samples)
-            totals["actor_gate_entropy"] = actor_entropy_sums.sum().item() / sample_count
-            for index, usage in enumerate((actor_weight_sums.sum(dim=0) / sample_count).tolist()):
-                totals["actor_expert_%d_usage" % index] = usage
+        totals["mean_latent_loss"] /= student_updates
+        if student_experts:
+            totals["mean_load_balance_loss"] /= student_updates
+            totals["gate_entropy"] /= student_samples
+            for index, usage in enumerate((expert_usage / student_samples).tolist()):
+                totals["expert_%d_usage" % index] = usage
+        for network, stats in routing_stats.items():
+            sample_count = sum(stats["samples"])
+            totals["%s_gate_entropy" % network] = stats["entropy"].sum().item() / sample_count
+            for index, usage in enumerate((stats["weights"].sum(dim=0) / sample_count).tolist()):
+                totals["%s_expert_%d_usage" % (network, index)] = usage
             for group, name in enumerate(("teacher", "student")):
-                totals["actor_%s_gate_entropy" % name] = actor_entropy_sums[group].item() / actor_samples[group]
-                for index, usage in enumerate((actor_weight_sums[group] / actor_samples[group]).tolist()):
-                    totals["actor_%s_expert_%d_usage" % (name, index)] = usage
+                totals["%s_%s_gate_entropy" % (network, name)] = stats["entropy"][group].item() / stats["samples"][group]
+                for index, usage in enumerate((stats["weights"][group] / stats["samples"][group]).tolist()):
+                    totals["%s_%s_expert_%d_usage" % (network, name, index)] = usage
         self.storage.clear()
         return totals

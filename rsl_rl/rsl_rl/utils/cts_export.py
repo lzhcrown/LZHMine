@@ -32,9 +32,12 @@ class CTSStudentExporter(nn.Module):
         self.num_actor_obs = int(actor_critic.num_actor_obs)
         self.num_actions = int(actor_critic.num_actions)
         self.num_experts = int(actor_critic.expert_num)
+        self.student_encoder_type = actor_critic.student_encoder_type
         self.actor_type = actor_critic.actor_type
         self.actor_is_moe = self.actor_type == "moe"
         self.actor_expert_num = int(actor_critic.actor_expert_num)
+        self.critic_type = actor_critic.critic_type
+        self.critic_expert_num = int(actor_critic.critic_expert_num)
         self.history_length = int(actor_critic.history_length)
         self.observation_config_json = json.dumps(observation_config, sort_keys=True)
         self.control_config_json = json.dumps(control_config or {}, sort_keys=True)
@@ -49,7 +52,7 @@ class CTSStudentExporter(nn.Module):
     @torch.jit.export
     def get_expert_probabilities(self, history: torch.Tensor) -> torch.Tensor:
         # Keep the established deployment API referring to student experts.
-        return self.student_encoder.moe.gating_network(history)
+        return self.student_encoder.get_expert_probabilities(history)
 
     @torch.jit.export
     def get_actor_expert_probabilities(self, history: torch.Tensor) -> torch.Tensor:
@@ -62,6 +65,18 @@ class CTSStudentExporter(nn.Module):
     @torch.jit.export
     def get_actor_type(self) -> str:
         return self.actor_type
+
+    @torch.jit.export
+    def get_student_encoder_type(self) -> str:
+        return self.student_encoder_type
+
+    @torch.jit.export
+    def get_critic_type(self) -> str:
+        return self.critic_type
+
+    @torch.jit.export
+    def get_num_critic_experts(self) -> int:
+        return self.critic_expert_num
 
     @torch.jit.export
     def get_num_actor_experts(self) -> int:
@@ -107,8 +122,11 @@ class CTSStudentExporter(nn.Module):
             "num_actor_obs": self.num_actor_obs,
             "num_actions": self.num_actions,
             "num_experts": self.num_experts,
+            "student_encoder_type": self.student_encoder_type,
             "actor_type": self.actor_type,
             "actor_expert_num": self.actor_expert_num,
+            "critic_type": self.critic_type,
+            "critic_expert_num": self.critic_expert_num,
             "observation_config": json.loads(self.observation_config_json),
             "control_config": json.loads(self.control_config_json),
         }

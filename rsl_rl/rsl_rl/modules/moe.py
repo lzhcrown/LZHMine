@@ -112,3 +112,18 @@ class MoEActor(nn.Module):
 
     def get_expert_probabilities(self, inputs: torch.Tensor) -> torch.Tensor:
         return self.moe.gating_network(inputs)
+
+
+class MoECritic(nn.Module):
+    """Independent dense mixture of scalar value estimates."""
+
+    def __init__(self, expert_num, input_dim, hidden_dims, activation="elu"):
+        super().__init__()
+        self.moe = MoE(expert_num, input_dim, hidden_dims, 1, activation)
+
+    def forward(self, inputs: torch.Tensor) -> torch.Tensor:
+        value, _ = self.moe(inputs)
+        return value
+
+    def get_expert_probabilities(self, inputs: torch.Tensor) -> torch.Tensor:
+        return self.moe.gating_network(inputs)

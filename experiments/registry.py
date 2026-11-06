@@ -5,7 +5,11 @@ import importlib
 from pathlib import Path
 
 
-EXPERIMENT_KEYS = ("exp01_baseline", "exp02_actor_moe")
+EXPERIMENT_KEYS = (
+    "g0_mlp", "g1_student_moe", "g2_actor_moe", "g3_student_actor_moe",
+    "g4_critic_moe", "g5_student_critic_moe", "g6_actor_critic_moe", "g7_all_moe",
+)
+DEFAULT_EXPERIMENT = "g1_student_moe"
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
 

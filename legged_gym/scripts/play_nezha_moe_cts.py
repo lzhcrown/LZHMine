@@ -16,11 +16,13 @@ import torch
 from legged_gym.envs import *  # noqa: F401,F403 - registers tasks
 from legged_gym.utils import get_args, task_registry, update_class_from_dict
 from legged_gym.scripts.export_nezha_moe_cts import DEFAULT_EXPORT_PATH, resolve_checkpoint
-from rsl_rl.utils.cts_checkpoint import load_cts_checkpoint, policy_from_checkpoint, validate_checkpoint_actor
+from rsl_rl.utils.cts_checkpoint import (
+    load_cts_checkpoint, policy_from_checkpoint, validate_checkpoint_actor, validate_checkpoint_policy,
+)
 from rsl_rl.utils.cts_export import CTSStudentExporter
 
 
-TASK_NAME = "nezha_moe_cts"
+TASK_NAME = "nezha_cts_g1_student_moe"
 PLAY_ARGUMENTS = [
     {"name": "--checkpoint_path", "type": str, "help": "Explicit CTS model_<iteration>.pt path."},
     {"name": "--command_x", "type": float, "default": 1.0},
@@ -56,7 +58,7 @@ def _fixed_commands(env, observations, command):
 
 
 def play(args, task_name=TASK_NAME, export_path=None,
-         expected_actor_type=None, expected_actor_expert_num=None):
+         expected_actor_type=None, expected_actor_expert_num=None, expected_policy=None):
     if args.play_num_envs < 1 or args.play_steps < 1:
         raise ValueError("play_num_envs and play_steps must be positive")
     if args.terrain not in ("plane", "heightfield", "trimesh"):
@@ -72,6 +74,10 @@ def play(args, task_name=TASK_NAME, export_path=None,
         filename = "best_policy.pt" if args.checkpoint == "best_policy" else "model_{}.pt".format(args.checkpoint)
         path = os.path.join(os.path.dirname(path), filename)
     checkpoint = load_cts_checkpoint(path, map_location="cpu")
+    if expected_policy is None:
+        from experiments.registry import get_experiment
+        expected_policy = get_experiment(train_cfg.runner.experiment_key).POLICY
+    validate_checkpoint_policy(checkpoint, expected_policy)
     validate_checkpoint_actor(checkpoint, expected_actor_type, expected_actor_expert_num)
     if checkpoint.get("environment_config"):
         update_class_from_dict(env_cfg, checkpoint["environment_config"])

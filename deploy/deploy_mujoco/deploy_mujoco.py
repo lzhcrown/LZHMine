@@ -336,7 +336,7 @@ def _settle_robot(
     mujoco.mj_forward(model, data)
 
 
-def run(args):
+def run(args, expected_policy=None):
     if args.headless and args.duration <= 0:
         raise ValueError(
             "Headless simulation requires --duration to be greater than zero."
@@ -386,8 +386,9 @@ def run(args):
         joint_names=cfg["joint_names"],
         torque_limits=cfg["torque_limits"],
         device=args.device,
+        expected_policy=expected_policy,
     )
-    print(f"CTS student: {runtime.num_experts} experts, observation schema loaded from model")
+    print(f"CTS student: {runtime.student_encoder_type}, {runtime.num_experts} experts, observation schema loaded from model")
     initial_base_height = float(cfg.get("initial_base_height", 0.60))
     initial_base_position, terrain_description = _terrain_course_spawn(
         mujoco, model, cfg, initial_base_height
@@ -551,7 +552,7 @@ def run(args):
                 dof_pos,
                 dof_vel,
             )
-            if gate_log_interval > 0 and policy_step % gate_log_interval == 0:
+            if runtime.num_experts > 0 and gate_log_interval > 0 and policy_step % gate_log_interval == 0:
                 expert_probs = runtime.expert_probabilities().cpu().numpy()
                 selected_expert = runtime.expert_names[int(np.argmax(expert_probs))]
                 print(

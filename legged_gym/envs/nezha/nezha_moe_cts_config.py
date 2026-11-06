@@ -40,9 +40,12 @@ class NezhaMoECTSCfgPPO(LeggedRobotCfgPPO):
     runner_class_name = "MoECTSOnPolicyRunner"
 
     class policy:
+        student_encoder_type = "moe"
+        critic_type = "mlp"
+        critic_expert_num = 0
         init_noise_std = 1.0
         # Shared defaults preserve the original baseline. Experiment-specific
-        # overrides live in experiments/exp01_baseline and exp02_actor_moe.
+        # overrides live in the eight experiments/g* directories.
         actor_type = "mlp"
         actor_expert_num = 0
         actor_hidden_dims = [512, 256, 128]

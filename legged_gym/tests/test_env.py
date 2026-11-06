@@ -42,7 +42,7 @@ def run_env_smoke(args):
     from legged_gym.utils import task_registry, class_to_dict, update_class_from_dict
     from rsl_rl.utils.cts_observations import extract_current_observation
 
-    args.task = "nezha_moe_cts"
+    args.task = "nezha_cts_g1_student_moe"
     args.resume = False
     args.headless = True
     args.num_envs = min(args.num_envs or 16, 16)

@@ -176,7 +176,7 @@ def get_args(extra_custom_parameters=None):
     the CLI without adding their controls to every training/play script.
     """
     custom_parameters = [
-        {"name": "--task", "type": str, "default": "nezha_moe_cts", "help": "Registered task to train or play."},
+        {"name": "--task", "type": str, "default": "nezha_cts_g1_student_moe", "help": "Registered task to train or play."},
         {"name": "--resume", "action": "store_true", "default": False,  "help": "Resume training from a checkpoint"},
         {"name": "--experiment_name", "type": str,  "help": "Name of the experiment to run or load. Overrides config file if provided."},
         {"name": "--run_name", "type": str,  "help": "Name of the run. Overrides config file if provided."},

@@ -1,4 +1,4 @@
-"""Keep the original CTS baseline and actor-MoE experiment independently usable."""
+"""Exercise all eight CTS ablations through configuration, resume and export."""
 
 import copy
 import importlib.util
@@ -9,15 +9,50 @@ from types import ModuleType, SimpleNamespace
 
 import pytest
 import torch
+from tensorboard.backend.event_processing.event_accumulator import EventAccumulator
 
 from experiments.registry import EXPERIMENT_KEYS, configure_experiment, export_path, get_experiment
 from experiments.common import export_main
+from deploy.deploy_mujoco.runtime import NezhaCTSPolicyRuntime
 from legged_gym.scripts import export_nezha_moe_cts as export_script
 from rsl_rl.runners.on_policy_runner_cts import MoECTSOnPolicyRunner
-from rsl_rl.utils.cts_checkpoint import load_cts_checkpoint
+from rsl_rl.utils import cts_checkpoint
 from test_cts_runner import (
     FakeVectorEnv, assert_nested_equal, cpu_task_registry, runner_config,
 )
+
+
+GROUPS = {
+    "g0_mlp": ("mlp", "mlp", "mlp"),
+    "g1_student_moe": ("moe", "mlp", "mlp"),
+    "g2_actor_moe": ("mlp", "moe", "mlp"),
+    "g3_student_actor_moe": ("moe", "moe", "mlp"),
+    "g4_critic_moe": ("mlp", "mlp", "moe"),
+    "g5_student_critic_moe": ("moe", "mlp", "moe"),
+    "g6_actor_critic_moe": ("mlp", "moe", "moe"),
+    "g7_all_moe": ("moe", "moe", "moe"),
+}
+STRUCTURE_FIELDS = (
+    "student_encoder_type", "expert_num", "actor_type", "actor_expert_num",
+    "critic_type", "critic_expert_num",
+)
+
+
+def expected_policy(key):
+    student, actor, critic = GROUPS[key]
+    return {
+        "student_encoder_type": student, "expert_num": 8 if student == "moe" else 0,
+        "actor_type": actor, "actor_expert_num": 8 if actor == "moe" else 0,
+        "critic_type": critic, "critic_expert_num": 8 if critic == "moe" else 0,
+    }
+
+
+@pytest.fixture(scope="module", autouse=True)
+def small_cpu_thread_pool():
+    previous = torch.get_num_threads()
+    torch.set_num_threads(2)
+    yield
+    torch.set_num_threads(previous)
 
 
 @pytest.fixture
@@ -48,68 +83,86 @@ def config_dict(cpu_task_registry, value):
     return copy.deepcopy(sys.modules[helpers_name].class_to_dict(value))
 
 
-def test_experiments_only_change_actor_and_run_metadata(actual_config_module, cpu_task_registry):
+def test_complete_factorial_only_changes_structure_and_run_metadata(actual_config_module, cpu_task_registry):
+    assert tuple(EXPERIMENT_KEYS) == tuple(GROUPS)
     base = actual_config_module.NezhaMoECTSCfgPPO()
     initial = config_dict(cpu_task_registry, base)
-    configs = [configure_experiment(base, key) for key in EXPERIMENT_KEYS]
-    baseline, actor_moe = [config_dict(cpu_task_registry, cfg) for cfg in configs]
-    assert baseline["policy"]["actor_type"] == "mlp"
-    assert baseline["policy"]["actor_expert_num"] == 0
-    assert actor_moe["policy"]["actor_type"] == "moe"
-    assert actor_moe["policy"]["actor_expert_num"] == 8
-    for value, key in zip((baseline, actor_moe), EXPERIMENT_KEYS):
+    common = []
+    for key in GROUPS:
         experiment = get_experiment(key)
+        assert experiment.TASK_NAME == "nezha_cts_" + key
+        assert experiment.POLICY == expected_policy(key)
+        value = config_dict(cpu_task_registry, configure_experiment(base, key))
+        assert {field: value["policy"][field] for field in STRUCTURE_FIELDS} == expected_policy(key)
         assert value["runner"]["experiment_key"] == key
         assert value["runner"]["experiment_name"] == "nezha_moe_cts/" + key
         assert export_path(key).endswith("/nezha/policy/" + key + "/policy.pt")
-        for field in experiment.POLICY:
+        for field in STRUCTURE_FIELDS:
             value["policy"].pop(field)
         for field in experiment.RUNNER:
             value["runner"].pop(field)
-    assert baseline == actor_moe
+        common.append(value)
+    assert all(value == common[0] for value in common)
     assert config_dict(cpu_task_registry, base) == initial
-    assert baseline["runner"]["save_interval"] == 1000
-    assert baseline["policy"]["expert_num"] == 8  # Both keep the student MoE.
+    assert common[0]["policy"]["latent_dim"] == 32
+    assert common[0]["policy"]["teacher_encoder_hidden_dims"] == [512, 256]
+    assert common[0]["runner"]["save_interval"] == 1000
+    assert common[0]["algorithm"]["teacher_env_ratio"] == 0.75
 
 
 def test_mutating_one_experiment_cannot_change_other_or_shared_defaults(actual_config_module):
     base = actual_config_module.NezhaMoECTSCfgPPO()
-    baseline = configure_experiment(base, "exp01_baseline")
-    actor_moe = configure_experiment(base, "exp02_actor_moe")
-    baseline.policy.actor_hidden_dims.append(17)
-    baseline.runner.wandb_tags.append("temporary-test-tag")
-    baseline.algorithm.learning_rate = 0.2
-    assert actor_moe.policy.actor_hidden_dims == [512, 256, 128]
+    configs = {key: configure_experiment(base, key) for key in GROUPS}
+    changed = configs["g0_mlp"]
+    for field in ("actor_hidden_dims", "critic_hidden_dims", "student_encoder_hidden_dims"):
+        getattr(changed.policy, field).append(17)
+    changed.runner.wandb_tags.append("temporary-test-tag")
+    changed.algorithm.learning_rate = 0.2
+    for key, config in configs.items():
+        if key == "g0_mlp":
+            continue
+        assert config.policy.actor_hidden_dims == [512, 256, 128]
+        assert config.policy.critic_hidden_dims == [512, 256, 128]
+        assert config.policy.student_encoder_hidden_dims == [512, 256, 256]
+        assert "temporary-test-tag" not in config.runner.wandb_tags
+        assert config.algorithm.learning_rate == base.algorithm.learning_rate == 1e-3
     assert base.policy.actor_hidden_dims == [512, 256, 128]
-    assert actual_config_module.NezhaMoECTSCfgPPO().policy.actor_hidden_dims == [512, 256, 128]
-    assert "temporary-test-tag" not in actor_moe.runner.wandb_tags
-    assert "temporary-test-tag" not in get_experiment("exp01_baseline").RUNNER["wandb_tags"]
-    assert actor_moe.algorithm.learning_rate == base.algorithm.learning_rate == 1e-3
+    assert actual_config_module.NezhaMoECTSCfgPPO().policy.critic_hidden_dims == [512, 256, 128]
+    assert "temporary-test-tag" not in get_experiment("g0_mlp").RUNNER["wandb_tags"]
 
 
-def test_registered_environment_and_training_configs_remain_independent(
-        actual_config_module, cpu_task_registry):
-    source_env = actual_config_module.NezhaMoECTSCfg()
-    source_train = actual_config_module.NezhaMoECTSCfgPPO()
-    original_env = config_dict(cpu_task_registry, source_env)
-    for key in EXPERIMENT_KEYS:
-        cpu_task_registry.register(
-            key, FakeVectorEnv, source_env, configure_experiment(source_train, key),
-        )
-    baseline_env, baseline_train = cpu_task_registry.get_cfgs("exp01_baseline")
-    actor_env, actor_train = cpu_task_registry.get_cfgs("exp02_actor_moe")
-    assert config_dict(cpu_task_registry, baseline_env) == config_dict(cpu_task_registry, actor_env)
-    baseline_env.commands.ranges.lin_vel_x[0] = -99.0
-    baseline_env.terrain.wf_sub_terrains.clear()
-    baseline_train.policy.student_encoder_hidden_dims.append(17)
-    for key in EXPERIMENT_KEYS:
-        env, train = cpu_task_registry.get_cfgs(key)
-        assert env.commands.ranges.lin_vel_x == [-1.0, 1.0]
-        assert env.terrain.wf_sub_terrains
-        assert train.policy.student_encoder_hidden_dims == [512, 256, 256]
-    assert actor_env.commands.ranges.lin_vel_x == [-1.0, 1.0]
-    assert actor_train.policy.student_encoder_hidden_dims == [512, 256, 256]
-    assert config_dict(cpu_task_registry, source_env) == original_env
+def test_real_task_registration_preserves_environment_and_training_isolation(
+        actual_config_module, cpu_task_registry, monkeypatch):
+    """Execute envs/__init__, replacing only classes that import the simulator."""
+    robot_module = ModuleType("legged_gym.envs.base.legged_robot")
+    robot_module.LeggedRobot = FakeVectorEnv
+    monkeypatch.setitem(sys.modules, robot_module.__name__, robot_module)
+    nezha = sys.modules["legged_gym.envs.nezha"]
+    nezha.NezhaMoECTSCfg = actual_config_module.NezhaMoECTSCfg
+    nezha.NezhaMoECTSCfgPPO = actual_config_module.NezhaMoECTSCfgPPO
+    nezha.NezhaMoECTSEnv = FakeVectorEnv
+    registry_module = ModuleType("legged_gym.utils.task_registry")
+    registry_module.task_registry = cpu_task_registry
+    monkeypatch.setitem(sys.modules, registry_module.__name__, registry_module)
+    init_path = Path(__file__).resolve().parents[1] / "envs" / "__init__.py"
+    package = sys.modules["legged_gym.envs"]
+    exec(compile(init_path.read_text(), str(init_path), "exec"), package.__dict__)
+    tasks = {get_experiment(key).TASK_NAME for key in GROUPS}
+    assert tasks <= set(cpu_task_registry.task_classes)
+    unchanged = []
+    for key in GROUPS:
+        env, train = cpu_task_registry.get_cfgs(get_experiment(key).TASK_NAME)
+        unchanged.append(config_dict(cpu_task_registry, env))
+        assert {field: getattr(train.policy, field) for field in STRUCTURE_FIELDS} == expected_policy(key)
+    assert all(env == unchanged[0] for env in unchanged)
+    env, train = cpu_task_registry.get_cfgs(get_experiment("g0_mlp").TASK_NAME)
+    env.commands.ranges.lin_vel_x[0] = -99.0
+    env.terrain.wf_sub_terrains.clear()
+    train.policy.student_encoder_hidden_dims.append(17)
+    for key in GROUPS:
+        fresh_env, fresh_train = cpu_task_registry.get_cfgs(get_experiment(key).TASK_NAME)
+        assert config_dict(cpu_task_registry, fresh_env) == unchanged[0]
+        assert fresh_train.policy.student_encoder_hidden_dims == [512, 256, 256]
 
 
 def training_config(key, checkpoint=None):
@@ -130,14 +183,14 @@ def training_args():
     )
 
 
-@pytest.mark.parametrize("key", EXPERIMENT_KEYS)
+@pytest.mark.parametrize("key", GROUPS)
 def test_latest_resolution_stays_inside_selected_experiment(
         tmp_path, monkeypatch, cpu_task_registry, key):
     registry_module = sys.modules[type(cpu_task_registry).__module__]
     monkeypatch.setattr(registry_module, "LEGGED_GYM_ROOT_DIR", str(tmp_path))
     monkeypatch.setattr(export_script, "REPO_ROOT", str(tmp_path))
     expected = {}
-    for i, candidate_key in enumerate(EXPERIMENT_KEYS):
+    for i, candidate_key in enumerate(GROUPS):
         root = tmp_path / "logs" / get_experiment(candidate_key).RUNNER["experiment_name"]
         older = root / "20260101_000000_run"
         newest = root / "20260201_000000_run"
@@ -147,7 +200,6 @@ def test_latest_resolution_stays_inside_selected_experiment(
         (older / "model_9000.pt").touch()
         (newest / "model_2.pt").touch()
         (newest / "model_10.pt").touch()
-        # Other experiment and unfinished run are newer, but must never win.
         for offset, directory in enumerate((older, newest, incomplete)):
             os.utime(directory, (1000 + i * 100 + offset, 1000 + i * 100 + offset))
         expected[candidate_key] = str(newest / "model_10.pt")
@@ -161,37 +213,56 @@ def test_latest_resolution_stays_inside_selected_experiment(
 
 @pytest.fixture(scope="module")
 def experiment_checkpoints(tmp_path_factory):
+    """Run real PPO and distillation before exercising persistence boundaries."""
     root = tmp_path_factory.mktemp("cts_experiment_checkpoints")
     result = {}
-    for label, actor_type, count in (("legacy_mlp", "mlp", 0), ("moe8", "moe", 8),
-                                     ("moe4", "moe", 4)):
-        settings = runner_config(actor_type)
-        settings["policy"]["actor_expert_num"] = count
-        settings["runner"]["run_name"] = "original_" + label
+    specifications = {key: expected_policy(key) for key in GROUPS}
+    for field in ("expert_num", "actor_expert_num", "critic_expert_num"):
+        specifications[field + "_4"] = {**expected_policy("g7_all_moe"), field: 4}
+    for i, (label, policy_config) in enumerate(specifications.items()):
+        torch.manual_seed(100 + i)
+        settings = runner_config()
+        settings["policy"].update(policy_config)
+        settings["runner"].update(
+            run_name="original_" + label,
+            wandb_tags=["saved-checkpoint", label], wandb_notes="Prior run metadata",
+        )
         runner = MoECTSOnPolicyRunner(FakeVectorEnv(), settings)
         runner.learn(1)
         path = root / (label + ".pt")
         runner.save(path)
-        if label == "legacy_mlp":
-            checkpoint = load_cts_checkpoint(path)
-            for section in (checkpoint["policy_config"], checkpoint["train_config"]["policy"]):
-                section.pop("actor_type")
-                section.pop("actor_expert_num")
-            torch.save(checkpoint, path)
         result[label] = (path, runner)
+    for key in ("g1_student_moe", "g3_student_actor_moe"):
+        source, runner = result[key]
+        checkpoint = cts_checkpoint.load_cts_checkpoint(source)
+        for section in (checkpoint["policy_config"], checkpoint["train_config"]["policy"]):
+            for field in ("student_encoder_type", "critic_type", "critic_expert_num"):
+                section.pop(field, None)
+            if key == "g1_student_moe":
+                section.pop("actor_type", None)
+                section.pop("actor_expert_num", None)
+        path = root / ("legacy_" + key + ".pt")
+        torch.save(checkpoint, path)
+        result["legacy_" + key] = (path, runner)
     return result
 
 
 MISMATCHES = (
-    ("exp01_baseline", "moe8", "actor_type"),
-    ("exp02_actor_moe", "legacy_mlp", "actor_type"),
-    ("exp02_actor_moe", "moe4", "actor_expert_num"),
+    ("g0_mlp", "g1_student_moe", "student_encoder_type"),
+    ("g1_student_moe", "g0_mlp", "student_encoder_type"),
+    ("g0_mlp", "g2_actor_moe", "actor_type"),
+    ("g2_actor_moe", "g0_mlp", "actor_type"),
+    ("g0_mlp", "g4_critic_moe", "critic_type"),
+    ("g4_critic_moe", "g0_mlp", "critic_type"),
+    ("g7_all_moe", "expert_num_4", "expert_num"),
+    ("g7_all_moe", "actor_expert_num_4", "actor_expert_num"),
+    ("g7_all_moe", "critic_expert_num_4", "critic_expert_num"),
 )
 
 
 @pytest.mark.parametrize("key,checkpoint_name,error", MISMATCHES)
 @pytest.mark.parametrize("entry", ["make_env", "make_alg_runner"])
-def test_explicit_resume_rejects_other_experiment_before_allocating_or_restoring(
+def test_explicit_resume_rejects_mismatched_structure_before_allocating_or_restoring(
         tmp_path, cpu_task_registry, experiment_checkpoints, key, checkpoint_name, error, entry):
     path, _ = experiment_checkpoints[checkpoint_name]
     config = training_config(key, str(path))
@@ -201,8 +272,6 @@ def test_explicit_resume_rejects_other_experiment_before_allocating_or_restoring
     output_root = tmp_path / "new_run"
     with pytest.raises(ValueError, match=error):
         if entry == "make_env":
-            # No simulator API is stubbed: a missing check would reach real
-            # environment initialization and fail outside this expected error.
             cpu_task_registry.make_env("test", args=args)
         else:
             cpu_task_registry.make_alg_runner(
@@ -213,23 +282,123 @@ def test_explicit_resume_rejects_other_experiment_before_allocating_or_restoring
     assert not hasattr(args, "cts_resume_path")
 
 
-@pytest.mark.parametrize("key,checkpoint_name", [
-    ("exp01_baseline", "legacy_mlp"), ("exp02_actor_moe", "moe8"),
-])
-def test_matching_experiment_resumes_legacy_weights_and_optimizers(
-        tmp_path, cpu_task_registry, experiment_checkpoints, key, checkpoint_name):
-    path, original = experiment_checkpoints[checkpoint_name]
+@pytest.mark.parametrize("key", GROUPS)
+def test_each_group_trains_resumes_both_optimizers_and_exports(
+        tmp_path, monkeypatch, cpu_task_registry, experiment_checkpoints, key):
+    path, original = experiment_checkpoints[key]
+    checkpoint = cts_checkpoint.load_cts_checkpoint(path)
+    expected = expected_policy(key)
+    assert {field: checkpoint["policy_config"][field] for field in STRUCTURE_FIELDS} == expected
+    cts_checkpoint.validate_checkpoint_policy(checkpoint, expected)
     config = training_config(key, str(path))
-    config.policy.actor_hidden_dims = [64]  # Checkpoint dimensions are authoritative.
+    config.policy.actor_hidden_dims = [64]  # Saved widths are authoritative on resume.
     cpu_task_registry.register("test", FakeVectorEnv, SimpleNamespace(), config)
     restored, restored_config = cpu_task_registry.make_alg_runner(
-        FakeVectorEnv(), "test", args=training_args(), log_root=str(tmp_path),
+        FakeVectorEnv(), "test", args=training_args(), log_root=str(tmp_path / "resume"),
     )
     assert restored_config.runner.experiment_key == key
     assert restored_config.runner.experiment_name == get_experiment(key).RUNNER["experiment_name"]
+    for field in ("wandb_group", "wandb_tags", "wandb_notes"):
+        assert getattr(restored_config.runner, field) == get_experiment(key).RUNNER[field]
     assert restored.current_learning_iteration == original.current_learning_iteration == 1
-    assert restored.alg.actor_critic.actor_type == get_experiment(key).POLICY["actor_type"]
-    assert restored.alg.actor_critic.actor_expert_num == get_experiment(key).POLICY["actor_expert_num"]
+    assert_nested_equal(original.alg.actor_critic.state_dict(), restored.alg.actor_critic.state_dict())
+    assert_nested_equal(original.alg.optimizer.state_dict(), restored.alg.optimizer.state_dict())
+    assert_nested_equal(original.alg.optimizer_stu_enc.state_dict(), restored.alg.optimizer_stu_enc.state_dict())
+    restored.learn(1)
+    assert restored.current_learning_iteration == 2
+    for optimizer in (restored.alg.optimizer, restored.alg.optimizer_stu_enc):
+        assert optimizer.state
+        assert all(state["step"].item() == 4 for state in optimizer.state.values())
+    events = EventAccumulator(restored.log_dir).Reload()
+    tags = events.Tags()["scalars"]
+    assert "Loss/mean_latent_loss" in tags
+    for prefix, count in (
+        ("Experts/", expected["expert_num"]),
+        ("ActorExperts/", expected["actor_expert_num"]),
+        ("CriticExperts/", expected["critic_expert_num"]),
+    ):
+        if not count:
+            assert not any(tag.startswith(prefix) for tag in tags)
+            continue
+        entropy = events.Scalars(prefix + "gate_entropy")[-1].value
+        assert 0 <= entropy <= float(torch.log(torch.tensor(float(count)))) + 1e-6
+        usage = [events.Scalars(prefix + "expert_%d_usage" % i)[-1].value for i in range(count)]
+        assert all(0 <= value <= 1 for value in usage)
+        assert sum(usage) == pytest.approx(1.0, abs=1e-6)
+    saved = tmp_path / "continued.pt"
+    restored.save(saved)
+    output = tmp_path / "deployment" / "policy.pt"
+    monkeypatch.setattr(sys, "argv", ["export.py", "--checkpoint", str(saved), "--output", str(output)])
+    assert export_main(key) == str(output)
+    deployed = torch.jit.load(str(output))
+    history = torch.randn(3, FakeVectorEnv.num_obs)
+    privileged = torch.randn(3, FakeVectorEnv.num_privileged_obs)
+    policy = restored.alg.actor_critic
+    assert deployed.get_student_encoder_type() == expected["student_encoder_type"]
+    assert deployed.get_num_experts() == expected["expert_num"]
+    assert deployed.get_actor_type() == expected["actor_type"]
+    assert deployed.get_num_actor_experts() == expected["actor_expert_num"]
+    assert not any(name.startswith(("critic.", "teacher_encoder.")) for name, _ in deployed.named_parameters())
+    with torch.no_grad():
+        actions = policy.act_inference(history)
+        assert actions.shape == (3, FakeVectorEnv.num_actions)
+        assert torch.isfinite(actions).all()
+        assert torch.allclose(deployed(history), actions, atol=1e-6, rtol=1e-5)
+        for teacher in (True, False):
+            values = policy.evaluate(history, privileged, is_teacher=teacher)
+            assert values.shape == (3, 1)
+            assert torch.isfinite(values).all()
+        for actual, reference, count in (
+            (deployed.get_expert_probabilities(history), policy.get_expert_probabilities(history), expected["expert_num"]),
+            (deployed.get_actor_expert_probabilities(history), policy.get_actor_expert_probabilities(history), expected["actor_expert_num"]),
+        ):
+            assert actual.shape == (3, count)
+            assert torch.allclose(actual, reference, atol=1e-6, rtol=1e-5)
+            if count:
+                assert torch.allclose(actual.sum(dim=-1), torch.ones(3), atol=1e-6)
+    runtime_kwargs = {
+        "default_dof_pos": [0.0] * 16, "p_gains": [10.0] * 16,
+        "d_gains": [2.0] * 16, "torque_limits": [100.0] * 16,
+    }
+    runtime = NezhaCTSPolicyRuntime(str(output), expected_policy=expected, **runtime_kwargs)
+    assert {field: runtime.policy_config[field] for field in STRUCTURE_FIELDS} == expected
+    for step in range(3):
+        if step == 2:
+            runtime.reset()
+        actions, torques = runtime.step(
+            [0.0, 0.0, 0.0], [0.0, 0.0, -1.0], [0.5, 0.0, 0.0],
+            [0.0] * 16, [0.1 * step] * 16,
+        )
+        assert actions.shape == torques.shape == (16,)
+        assert torch.isfinite(actions).all() and torch.isfinite(torques).all()
+        assert runtime.expert_probabilities().shape == (expected["expert_num"],)
+    for type_field, count_field in (
+        ("student_encoder_type", "expert_num"),
+        ("actor_type", "actor_expert_num"),
+        ("critic_type", "critic_expert_num"),
+    ):
+        wrong = dict(expected)
+        wrong[type_field] = "mlp" if expected[type_field] == "moe" else "moe"
+        wrong[count_field] = 0 if wrong[type_field] == "mlp" else 8
+        with pytest.raises(ValueError, match=type_field):
+            NezhaCTSPolicyRuntime(str(output), expected_policy=wrong, **runtime_kwargs)
+        if expected[type_field] == "moe":
+            wrong = {**expected, count_field: 4}
+            with pytest.raises(ValueError, match=count_field):
+                NezhaCTSPolicyRuntime(str(output), expected_policy=wrong, **runtime_kwargs)
+
+
+@pytest.mark.parametrize("key", ["g1_student_moe", "g3_student_actor_moe"])
+def test_legacy_student_moe_mlp_critic_checkpoint_keeps_weights_and_optimizers(
+        tmp_path, cpu_task_registry, experiment_checkpoints, key):
+    path, original = experiment_checkpoints["legacy_" + key]
+    checkpoint = cts_checkpoint.load_cts_checkpoint(path)
+    assert {field: checkpoint["policy_config"][field] for field in STRUCTURE_FIELDS} == expected_policy(key)
+    config = training_config(key, str(path))
+    cpu_task_registry.register("test", FakeVectorEnv, SimpleNamespace(), config)
+    restored, _ = cpu_task_registry.make_alg_runner(
+        FakeVectorEnv(), "test", args=training_args(), log_root=str(tmp_path),
+    )
     assert_nested_equal(original.alg.actor_critic.state_dict(), restored.alg.actor_critic.state_dict())
     assert_nested_equal(original.alg.optimizer.state_dict(), restored.alg.optimizer.state_dict())
     assert_nested_equal(original.alg.optimizer_stu_enc.state_dict(), restored.alg.optimizer_stu_enc.state_dict())
@@ -239,7 +408,7 @@ def test_matching_experiment_resumes_legacy_weights_and_optimizers(
 
 @pytest.mark.parametrize("key,checkpoint_name,error", MISMATCHES)
 @pytest.mark.parametrize("existing_output", [False, True])
-def test_wrong_experiment_export_cannot_create_or_overwrite_policy(
+def test_wrong_group_export_cannot_create_or_overwrite_policy(
         tmp_path, monkeypatch, experiment_checkpoints, key, checkpoint_name, error, existing_output):
     checkpoint_path, _ = experiment_checkpoints[checkpoint_name]
     output = tmp_path / "exported" / "policy.pt"
@@ -258,20 +427,16 @@ def test_wrong_experiment_export_cannot_create_or_overwrite_policy(
         assert not output.parent.exists()
 
 
-@pytest.mark.parametrize("key,checkpoint_name", [
-    ("exp01_baseline", "legacy_mlp"), ("exp02_actor_moe", "moe8"),
+@pytest.mark.parametrize("module_field,count_field,prefix", [
+    ("student_encoder_type", "expert_num", "student"),
+    ("actor_type", "actor_expert_num", "actor"),
+    ("critic_type", "critic_expert_num", "critic"),
 ])
-def test_matching_experiment_export_preserves_actions_and_actor_metadata(
-        tmp_path, monkeypatch, experiment_checkpoints, key, checkpoint_name):
-    checkpoint_path, runner = experiment_checkpoints[checkpoint_name]
-    output = tmp_path / key / "policy.pt"
-    monkeypatch.setattr(sys, "argv", ["export.py", "--checkpoint", str(checkpoint_path),
-                                     "--output", str(output)])
-    expected = get_experiment(key).POLICY
-    assert export_main(key) == str(output)
-    policy = torch.jit.load(str(output))
-    history = torch.randn(3, FakeVectorEnv.num_obs)
-    assert policy.get_actor_type() == expected["actor_type"]
-    assert policy.get_num_actor_experts() == expected["actor_expert_num"]
-    with torch.no_grad():
-        assert torch.allclose(policy(history), runner.get_inference_policy()(history), atol=1e-6, rtol=1e-5)
+def test_checkpoint_cannot_relabel_saved_moe_weights_as_mlp(
+        experiment_checkpoints, module_field, count_field, prefix):
+    path, _ = experiment_checkpoints["g7_all_moe"]
+    checkpoint = cts_checkpoint.load_cts_checkpoint(path)
+    checkpoint["policy_config"][module_field] = "mlp"
+    checkpoint["policy_config"][count_field] = 0
+    with pytest.raises(ValueError, match=prefix):
+        cts_checkpoint.validate_cts_checkpoint(checkpoint)

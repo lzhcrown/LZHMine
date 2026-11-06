@@ -13,7 +13,7 @@ from legged_gym.envs import *  # noqa: F401,F403 - registers the task
 from legged_gym.utils import get_args, task_registry
 
 
-def train(args, task_name="nezha_moe_cts"):
+def train(args, task_name="nezha_cts_g1_student_moe"):
     if args.num_envs is not None and args.num_envs < 2:
         raise ValueError("CTS training requires at least two environments")
     if args.max_iterations is not None and args.max_iterations < 1:
@@ -25,10 +25,11 @@ def train(args, task_name="nezha_moe_cts"):
     print("Nezha MoE-CTS | current={} history={} privileged={} actions={}".format(
         env.num_one_step_obs, env.num_obs, env.num_privileged_obs, env.num_actions,
     ))
-    print("Teacher envs={} | Student envs={} | Student experts={} | Actor={} | Actor experts={} | Logs={}".format(
+    print("Teacher envs={} | Student envs={} | Student={} ({}) | Actor={} ({}) | Critic={} ({}) | Logs={}".format(
         runner.alg.teacher_env_idxs.numel(), runner.alg.student_env_idxs.numel(),
-        runner.alg.actor_critic.expert_num, runner.alg.actor_critic.actor_type,
-        runner.alg.actor_critic.actor_expert_num, runner.log_dir,
+        runner.alg.actor_critic.student_encoder_type, runner.alg.actor_critic.expert_num,
+        runner.alg.actor_critic.actor_type, runner.alg.actor_critic.actor_expert_num,
+        runner.alg.actor_critic.critic_type, runner.alg.actor_critic.critic_expert_num, runner.log_dir,
     ))
     print("Terrain={} | Curriculum={} | Speed ranges={} | Episode={} s | TensorBoard=enabled".format(
         env_cfg.terrain.generator_profile,

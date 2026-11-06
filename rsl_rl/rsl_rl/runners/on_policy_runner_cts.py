@@ -190,6 +190,8 @@ class MoECTSOnPolicyRunner:
         for key, value in losses.items():
             if key.startswith("actor_"):
                 metrics["ActorExperts/" + key[len("actor_"):]] = float(value)
+            elif key.startswith("critic_"):
+                metrics["CriticExperts/" + key[len("critic_"):]] = float(value)
             else:
                 prefix = "Experts" if key.startswith(("expert_", "gate_")) else "Loss"
                 metrics[prefix + "/" + key] = float(value)

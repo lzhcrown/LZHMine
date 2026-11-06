@@ -1,6 +1,10 @@
 # Local Python environments
 .venv/
 .venv-*/
+venv/
+venv-*/
+.tox/
+.nox/
 
 # Local agent/account state
 /.agents/
@@ -44,6 +48,7 @@ __pycache__/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
+.hypothesis/
 .cache/
 .ipynb_checkpoints/
 

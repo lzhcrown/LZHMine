@@ -23,8 +23,7 @@ def play_main(key):
         args,
         task_name=experiment.TASK_NAME,
         export_path=export_path(key),
-        expected_actor_type=experiment.POLICY["actor_type"],
-        expected_actor_expert_num=experiment.POLICY["actor_expert_num"],
+        expected_policy=experiment.POLICY,
     )
 
 
@@ -39,8 +38,7 @@ def export_main(key):
     )
     return export(
         args,
-        expected_actor_type=experiment.POLICY["actor_type"],
-        expected_actor_expert_num=experiment.POLICY["actor_expert_num"],
+        expected_policy=experiment.POLICY,
     )
 
 
@@ -51,4 +49,4 @@ def simulate_main(key):
     args = parse_args()
     if args.policy is None:
         args.policy = export_path(key)
-    return run(args)
+    return run(args, expected_policy=get_experiment(key).POLICY)

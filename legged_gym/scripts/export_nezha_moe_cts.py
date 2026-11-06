@@ -14,13 +14,15 @@ configure_runtime()
 
 import torch
 
-from rsl_rl.utils.cts_checkpoint import load_cts_checkpoint, policy_from_checkpoint, validate_checkpoint_actor
+from rsl_rl.utils.cts_checkpoint import (
+    load_cts_checkpoint, policy_from_checkpoint, validate_checkpoint_actor, validate_checkpoint_policy,
+)
 from rsl_rl.utils.cts_export import CTSStudentExporter
 
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
-EXPERIMENT = "nezha_moe_cts/exp01_baseline"
-DEFAULT_EXPORT_PATH = os.path.join(REPO_ROOT, "deploy", "deploy_mujoco", "nezha", "policy", "policy.pt")
+EXPERIMENT = "nezha_moe_cts/g1_student_moe"
+DEFAULT_EXPORT_PATH = os.path.join(REPO_ROOT, "deploy", "deploy_mujoco", "nezha", "policy", "g1_student_moe", "policy.pt")
 
 
 def resolve_checkpoint(checkpoint=None, run=None, experiment=EXPERIMENT):
@@ -49,9 +51,10 @@ def resolve_checkpoint(checkpoint=None, run=None, experiment=EXPERIMENT):
     raise ValueError("No model_<iteration>.pt checkpoints in {}".format(root))
 
 
-def export(args, expected_actor_type=None, expected_actor_expert_num=None):
+def export(args, expected_actor_type=None, expected_actor_expert_num=None, expected_policy=None):
     path = resolve_checkpoint(args.checkpoint, args.run, getattr(args, "experiment", EXPERIMENT))
     checkpoint = load_cts_checkpoint(path, map_location="cpu")
+    validate_checkpoint_policy(checkpoint, expected_policy)
     validate_checkpoint_actor(checkpoint, expected_actor_type, expected_actor_expert_num)
     policy = policy_from_checkpoint(checkpoint, device="cpu").eval()
     output = os.path.abspath(args.output or DEFAULT_EXPORT_PATH)
@@ -62,12 +65,14 @@ def export(args, expected_actor_type=None, expected_actor_expert_num=None):
         expected = policy.act_inference(probe)
         actual = scripted(probe)
         probabilities = scripted.get_expert_probabilities(probe)
+        expected_probabilities = policy.get_expert_probabilities(probe)
         actor_probabilities = scripted.get_actor_expert_probabilities(probe)
         expected_actor_probabilities = policy.get_actor_expert_probabilities(probe)
     if actual.shape != (3, policy.num_actions) or not torch.allclose(actual, expected, atol=1e-6, rtol=1e-5):
         raise RuntimeError("Exported student differs from the checkpoint policy")
-    if probabilities.shape != (3, scripted.get_num_experts()):
-        raise RuntimeError("Exported expert probabilities have invalid dimensions")
+    if (probabilities.shape != (3, scripted.get_num_experts())
+            or not torch.allclose(probabilities, expected_probabilities, atol=1e-6, rtol=1e-5)):
+        raise RuntimeError("Exported student expert probabilities differ from the checkpoint policy")
     if (actor_probabilities.shape != (3, scripted.get_num_actor_experts())
             or not torch.allclose(actor_probabilities, expected_actor_probabilities, atol=1e-6, rtol=1e-5)):
         raise RuntimeError("Exported actor expert probabilities differ from the checkpoint policy")
@@ -91,4 +96,15 @@ def parse_args(default_experiment=EXPERIMENT, default_output=None):
 
 
 if __name__ == "__main__":
-    export(parse_args())
+    from experiments.registry import EXPERIMENT_KEYS, get_experiment
+
+    args = parse_args()
+    matching = [get_experiment(key) for key in EXPERIMENT_KEYS
+                if get_experiment(key).RUNNER["experiment_name"] == args.experiment]
+    if matching:
+        experiment = matching[0]
+        if args.output is None:
+            args.output = os.path.join(REPO_ROOT, experiment.EXPORT_PATH)
+        export(args, expected_policy=experiment.POLICY)
+    else:
+        export(args)

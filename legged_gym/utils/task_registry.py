@@ -33,7 +33,7 @@ import os
 from datetime import datetime
 
 from rsl_rl.runners import MoECTSOnPolicyRunner
-from rsl_rl.utils.cts_checkpoint import DIMENSION_KEYS, load_cts_checkpoint, validate_checkpoint_actor
+from rsl_rl.utils.cts_checkpoint import DIMENSION_KEYS, load_cts_checkpoint, validate_checkpoint_policy
 
 from legged_gym import LEGGED_GYM_ROOT_DIR
 from experiments.registry import clone_config
@@ -79,9 +79,7 @@ class TaskRegistry:
     @staticmethod
     def _validate_experiment_checkpoint(train_cfg, checkpoint):
         if getattr(train_cfg.runner, "experiment_key", None):
-            validate_checkpoint_actor(
-                checkpoint, train_cfg.policy.actor_type, train_cfg.policy.actor_expert_num,
-            )
+            validate_checkpoint_policy(checkpoint, class_to_dict(train_cfg.policy))
 
     def make_env(self, name, args=None, env_cfg=None):
         args = get_args() if args is None else args
@@ -125,25 +123,24 @@ class TaskRegistry:
         if resume_path is not None:
             checkpoint = load_cts_checkpoint(resume_path)
             self._validate_experiment_checkpoint(train_cfg, checkpoint)
-            # The loader makes legacy actor_type='mlp' explicit, so restoring
-            # its config also overrides a newer task default of actor_type='moe'.
+            # Architecture was checked before restoring the saved training settings.
             for key, value in checkpoint["policy_config"].items():
                 if key not in DIMENSION_KEYS:
                     setattr(train_cfg.policy, key, copy.deepcopy(value))
             update_class_from_dict(train_cfg.algorithm, checkpoint["train_config"]["algorithm"])
             saved_runner = checkpoint["train_config"]["runner"]
             train_cfg.runner.num_steps_per_env = saved_runner["num_steps_per_env"]
-            if getattr(args, "run_name", None) is None:
+            if (getattr(args, "run_name", None) is None
+                    and not getattr(train_cfg.runner, "experiment_key", None)):
                 train_cfg.runner.run_name = saved_runner.get("run_name") or (
                     "cts_actor_moe" if train_cfg.policy.actor_type == "moe" else "cts_mlp_baseline"
                 )
-            actor_is_moe = train_cfg.policy.actor_type == "moe"
-            default_tags = ["nezha", "moe-cts", "isaac-gym"] + (["actor-moe"] if actor_is_moe else [])
-            train_cfg.runner.wandb_tags = copy.deepcopy(saved_runner.get("wandb_tags", default_tags))
-            train_cfg.runner.wandb_notes = saved_runner.get("wandb_notes", (
-                "CTS student MoE + MoE actor; MLP critic on Nezha" if actor_is_moe
-                else "WF MoE concurrent teacher-student training with an MLP actor on Nezha"
-            ))
+            # Keep this experiment's labels, including when resuming a compatible
+            # legacy checkpoint whose old directory is no longer an active group.
+            if not getattr(train_cfg.runner, "experiment_key", None):
+                for key in ("wandb_tags", "wandb_notes"):
+                    if key in saved_runner:
+                        setattr(train_cfg.runner, key, copy.deepcopy(saved_runner[key]))
         if log_root == "default":
             log_root = os.path.join(LEGGED_GYM_ROOT_DIR, "logs", train_cfg.runner.experiment_name)
         log_dir = None if log_root is None else os.path.join(

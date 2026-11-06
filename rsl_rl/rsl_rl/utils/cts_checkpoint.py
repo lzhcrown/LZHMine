@@ -11,25 +11,46 @@ DIMENSION_KEYS = (
     "num_actor_obs", "num_critic_obs", "num_one_step_obs", "num_actions",
     "history_length", "observation_dims",
 )
+STRUCTURE_KEYS = (
+    "student_encoder_type", "expert_num", "actor_type", "actor_expert_num",
+    "critic_type", "critic_expert_num",
+)
 
 
 def normalize_policy_config(policy_config):
-    """Make the actor architecture explicit, including pre-MoE checkpoints.
-
-    Format-v1 checkpoints without actor metadata used an MLP. Never inherit
-    the current task's actor default while restoring one of those policies.
-    """
+    """Make all CTS module types explicit, preserving legacy checkpoint defaults."""
     policy = copy.deepcopy(policy_config)
-    actor_type = policy.setdefault("actor_type", "mlp")
-    if actor_type not in ("mlp", "moe"):
-        raise ValueError("Unsupported CTS actor_type: {}".format(actor_type))
-    if actor_type == "mlp":
-        policy["actor_expert_num"] = 0
-    else:
-        count = policy.setdefault("actor_expert_num", 8)
-        if isinstance(count, bool) or not isinstance(count, int) or count < 1:
-            raise ValueError("MoE actor_expert_num must be a positive integer")
+    for type_key, count_key, legacy_type in (
+        ("student_encoder_type", "expert_num", "moe"),
+        ("actor_type", "actor_expert_num", "mlp"),
+        ("critic_type", "critic_expert_num", "mlp"),
+    ):
+        module_type = policy.setdefault(type_key, legacy_type)
+        if module_type not in ("mlp", "moe"):
+            raise ValueError("Unsupported CTS {}: {}".format(type_key, module_type))
+        if module_type == "mlp":
+            policy[count_key] = 0
+        else:
+            count = policy.setdefault(count_key, 8)
+            if isinstance(count, bool) or not isinstance(count, int) or count < 1:
+                raise ValueError("MoE {} must be a positive integer".format(count_key))
     return policy
+
+
+def validate_checkpoint_policy(checkpoint, expected_policy):
+    """Reject any student/actor/critic mismatch before restoring an experiment."""
+    if expected_policy is None:
+        return checkpoint
+    policy = normalize_policy_config(checkpoint["policy_config"])
+    expected = normalize_policy_config(expected_policy)
+    for key in STRUCTURE_KEYS:
+        if policy[key] != expected[key]:
+            raise ValueError(
+                "Checkpoint {}={!r} does not match this experiment's {}={!r}. "
+                "Use the matching experiment entry point or start a fresh training run."
+                .format(key, policy[key], key, expected[key])
+            )
+    return checkpoint
 
 
 def validate_checkpoint_actor(checkpoint, expected_actor_type, expected_actor_expert_num=None):
@@ -61,11 +82,15 @@ def validate_cts_checkpoint(checkpoint):
         if key not in checkpoint:
             raise ValueError("MoE-CTS checkpoint is missing " + key)
     policy = normalize_policy_config(checkpoint["policy_config"])
-    # New Actor MoE weights must carry architecture metadata. A missing or
-    # incorrect declaration must fail before resume/export instantiates an MLP.
-    has_actor_moe = any(key.startswith("actor.moe.") for key in checkpoint["model_state_dict"])
-    if has_actor_moe != (policy["actor_type"] == "moe"):
-        raise ValueError("Checkpoint actor_type disagrees with saved actor weights")
+    # Detect metadata/weight disagreement before constructing any network.
+    for type_key, prefix in (
+        ("student_encoder_type", "student_moe_encoder.moe."),
+        ("actor_type", "actor.moe."),
+        ("critic_type", "critic.moe."),
+    ):
+        has_moe = any(key.startswith(prefix) for key in checkpoint["model_state_dict"])
+        if has_moe != (policy[type_key] == "moe"):
+            raise ValueError("Checkpoint {} disagrees with saved weights".format(type_key))
     spec = checkpoint["observation_config"]
     validate_observation_config(spec)
     for key in DIMENSION_KEYS:
