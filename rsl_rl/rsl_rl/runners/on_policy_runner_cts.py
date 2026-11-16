@@ -205,6 +205,7 @@ class MoECTSOnPolicyRunner:
                 episode_values.setdefault(name, []).append(scalar)
         for name, values in episode_values.items():
             metrics["Episode/" + name] = statistics.mean(values)
+        metrics.update(self._terrain_metrics())
         metrics.update({
             "Perf/fps": self.num_steps_per_env * self.env.num_envs / max(collected + learned, 1e-8),
             "Perf/collection_seconds": collected,
@@ -226,6 +227,33 @@ class MoECTSOnPolicyRunner:
             " | ".join("{}={:.5f}".format(k, float(v)) for k, v in losses.items()
                        if "expert_" not in k),
         ))
+
+    def _terrain_metrics(self):
+        """Snapshot current curriculum levels, pooling columns of the same type."""
+        terrain_cfg = getattr(getattr(self.env, "cfg", None), "terrain", None)
+        column_types = getattr(getattr(self.env, "terrain", None), "column_types", None)
+        levels = getattr(self.env, "terrain_levels", None)
+        columns = getattr(self.env, "terrain_types", None)
+        # Without curriculum, WF tiles are randomized independently of their
+        # column. Legacy terrains do not expose reliable type names.
+        if (not getattr(terrain_cfg, "curriculum", False)
+                or column_types is None or levels is None or columns is None):
+            return {}
+        # One small transfer per training iteration; do not aggregate on every
+        # simulation step or average per-reset maxima through Episode metrics.
+        levels, columns = torch.stack((levels, columns)).detach().cpu()
+        grouped = {}
+        for column, kind in enumerate(column_types):
+            grouped.setdefault(kind, []).append(levels[columns == column])
+        metrics = {}
+        for kind, parts in grouped.items():
+            values = torch.cat(parts)
+            if values.numel() == 0:
+                continue
+            prefix = "Terrain/{}/".format(kind)
+            metrics[prefix + "level_mean"] = values.float().mean().item()
+            metrics[prefix + "level_max"] = values.max().item()
+        return metrics
 
     def _control_config(self):
         env = self.env

@@ -456,6 +456,59 @@ def test_tensorboard_starts_before_rollout_and_covers_repeated_learn_calls(tmp_p
     assert (tmp_path / "model_3.pt").is_file()
 
 
+def test_terrain_levels_are_logged_per_type_each_iteration_without_episode_end(tmp_path, monkeypatch):
+    env = FakeVectorEnv()
+    env.max_episode_length = 100
+    env.cfg = SimpleNamespace(terrain=SimpleNamespace(curriculum=True))
+    # Two columns of stairs have unequal environment counts; pool environments
+    # instead of averaging column means. No environment is assigned to gap.
+    env.terrain = SimpleNamespace(column_types=["stairs_up", "flat", "stairs_up", "gap"])
+    env.terrain_types = torch.tensor([0, 0, 1, 2, 2, 2, 1, 2])
+    env.terrain_levels = torch.tensor([1, 3, 2, 5, 7, 9, 4, 3])
+    next_levels = torch.tensor([0, 0, 4, 0, 1, 2, 6, 3])
+    original_step = env.step
+
+    def change_levels(actions):
+        if env.common_step_counter == 3:
+            env.terrain_levels.copy_(next_levels)
+        return original_step(actions)
+
+    monkeypatch.setattr(env, "step", change_levels)
+    runner = MoECTSOnPolicyRunner(env, runner_config(), log_dir=str(tmp_path))
+    runner.learn(2)
+    events = EventAccumulator(str(tmp_path)).Reload()
+    expected = {
+        "Terrain/stairs_up/level_mean": [28 / 6, 1],
+        "Terrain/stairs_up/level_max": [9, 3],
+        "Terrain/flat/level_mean": [3, 5],
+        "Terrain/flat/level_max": [4, 6],
+    }
+    terrain_tags = {tag for tag in events.Tags()["scalars"] if tag.startswith("Terrain/")}
+    assert terrain_tags == set(expected)
+    for tag, values in expected.items():
+        samples = events.Scalars(tag)
+        assert [sample.step for sample in samples] == [0, 1]
+        assert [sample.value for sample in samples] == pytest.approx(values)
+    assert not any(tag.startswith("Episode/") for tag in events.Tags()["scalars"])
+    assert torch.equal(env.terrain_levels, next_levels)
+    assert torch.equal(env.terrain_types, torch.tensor([0, 0, 1, 2, 2, 2, 1, 2]))
+
+
+@pytest.mark.parametrize("terrain_mode", ["plane", "legacy", "randomized"])
+def test_terrain_metrics_skip_unsupported_type_mappings(terrain_mode):
+    env = FakeVectorEnv()
+    env.cfg = SimpleNamespace(terrain=SimpleNamespace(curriculum=True))
+    if terrain_mode != "plane":
+        env.terrain = SimpleNamespace()
+        env.terrain_levels = torch.arange(env.num_envs)
+        env.terrain_types = torch.zeros(env.num_envs, dtype=torch.long)
+    if terrain_mode == "randomized":
+        env.cfg.terrain.curriculum = False
+        env.terrain.column_types = ["flat"]
+    runner = MoECTSOnPolicyRunner(env, runner_config())
+    assert runner._terrain_metrics() == {}
+
+
 @pytest.mark.parametrize("interruption", [RuntimeError, KeyboardInterrupt])
 def test_tensorboard_persists_completed_iterations_on_interruption(tmp_path, monkeypatch, interruption):
     env = FakeVectorEnv()
