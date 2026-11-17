@@ -515,13 +515,15 @@ class NezhaRobot(LeggedRobot):
                 f"Unknown controller type: {self.cfg.control.control_type}"
             )
 
-        torque_scale = torch_rand_float(
-            0.8,
-            1.1,
-            (self.num_envs, self.num_dof),
-            device=self.device,
-        )
-        torques *= torque_scale
+        # Keep legacy training behavior; fixed-protocol evaluation disables it.
+        if getattr(self.cfg.domain_rand, "randomize_torque_scale", True):
+            torque_scale = torch_rand_float(
+                0.8,
+                1.1,
+                (self.num_envs, self.num_dof),
+                device=self.device,
+            )
+            torques *= torque_scale
         if self.cfg.domain_rand.randomize_motor_strength:
             torques *= self.motor_strength_factors
         return torch.clip(torques, -self.torque_limits, self.torque_limits)

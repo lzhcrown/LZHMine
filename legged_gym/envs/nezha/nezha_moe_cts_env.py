@@ -102,11 +102,13 @@ class NezhaMoECTSEnv(NezhaRobot):
         for substep in range(self.cfg.control.decimation):
             self.torques.copy_(self._compute_torques(self.delayed_actions[:, substep]).view(self.torques.shape))
             self.gym.set_dof_actuation_force_tensor(self.sim, gymtorch.unwrap_tensor(self.torques))
+            self._before_physics_substep()
             self.gym.simulate(self.sim)
             if self.device == "cpu":
                 self.gym.fetch_results(self.sim, True)
             self.gym.refresh_dof_state_tensor(self.sim)
             self.gym.refresh_net_contact_force_tensor(self.sim)
+            self._after_physics_substep()
             self.dof_acc[:] = (self.dof_vel - self.physics_dof_vel) / self.sim_params.dt
             self.physics_dof_vel.copy_(self.dof_vel)
             self.wheel_contact_history[:, 1:] = self.wheel_contact_history[:, :-1].clone()
@@ -114,6 +116,12 @@ class NezhaMoECTSEnv(NezhaRobot):
         termination_ids, termination_privileged = self.post_physics_step()
         return (self.obs_buf, self.privileged_obs_buf, self.rew_buf, self.reset_buf,
                 self.extras, termination_ids, termination_privileged)
+
+    def _before_physics_substep(self):
+        """Evaluation hook after torque application, before integration."""
+
+    def _after_physics_substep(self):
+        """Evaluation hook after simulator DOF state refresh, before reset."""
 
     def _refresh_base_kinematics(self):
         self.base_quat[:] = self.root_states[:, 3:7]

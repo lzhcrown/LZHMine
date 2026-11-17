@@ -3,6 +3,7 @@
 import copy
 import json
 import os
+from typing import Tuple
 
 import torch
 from torch import nn
@@ -41,13 +42,51 @@ class CTSStudentExporter(nn.Module):
         self.history_length = int(actor_critic.history_length)
         self.observation_config_json = json.dumps(observation_config, sort_keys=True)
         self.control_config_json = json.dumps(control_config or {}, sort_keys=True)
+        self.residual_enabled = bool(actor_critic.residual_enabled)
+        self.residual_hidden_dims = list(actor_critic.residual_hidden_dims)
+        self.residual_action_scales_json = json.dumps(actor_critic.residual_action_scales)
+        self.residual_config_json = json.dumps({
+            "residual_enabled": self.residual_enabled,
+            "residual_hidden_dims": self.residual_hidden_dims,
+            "residual_action_scales": actor_critic.residual_action_scales,
+        }, sort_keys=True)
 
     def forward(self, history: torch.Tensor) -> torch.Tensor:
+        mean, _, _, _, _ = self.forward_with_diagnostics(history)
+        return mean
+
+    @torch.jit.export
+    def forward_with_diagnostics(
+            self, history: torch.Tensor
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         if history.dim() != 2 or history.shape[1] != self.num_actor_obs:
             raise ValueError("CTS student expects a batch of flattened observation histories")
-        latent, _ = self.student_encoder(history)
+        latent, student_weights = self.student_encoder(history)
         current = history.index_select(-1, self.current_obs_indices)
-        return self.actor(torch.cat((latent, current), dim=-1))
+        inputs = torch.cat((latent, current), dim=-1)
+        if self.actor_is_moe:
+            mean, actor_weights, coarse, correction = self.actor.forward_with_diagnostics(inputs)
+        else:
+            mean = self.actor(inputs)
+            actor_weights = inputs.new_empty((inputs.shape[0], 0))
+            coarse, correction = mean, torch.zeros_like(mean)
+        return mean, student_weights, actor_weights, coarse, correction
+
+    @torch.jit.export
+    def get_residual_enabled(self) -> bool:
+        return self.residual_enabled
+
+    @torch.jit.export
+    def get_residual_config_json(self) -> str:
+        # Preserve original Python decimal values rather than reconstructing
+        # metadata from float32 buffers (0.1 would become 0.10000000149...).
+        return self.residual_config_json
+
+    @torch.jit.export
+    def get_residual_action_scales(self) -> torch.Tensor:
+        if self.actor_is_moe:
+            return self.actor.residual_action_scales.clone()
+        return self.current_obs_indices.new_empty((0,), dtype=torch.float32)
 
     @torch.jit.export
     def get_expert_probabilities(self, history: torch.Tensor) -> torch.Tensor:
@@ -127,6 +166,9 @@ class CTSStudentExporter(nn.Module):
             "actor_expert_num": self.actor_expert_num,
             "critic_type": self.critic_type,
             "critic_expert_num": self.critic_expert_num,
+            "residual_enabled": self.residual_enabled,
+            "residual_hidden_dims": self.residual_hidden_dims,
+            "residual_action_scales": json.loads(self.residual_action_scales_json),
             "observation_config": json.loads(self.observation_config_json),
             "control_config": json.loads(self.control_config_json),
         }

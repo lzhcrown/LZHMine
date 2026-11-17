@@ -6,7 +6,7 @@ from typing import Sequence, Tuple
 import torch
 
 from rsl_rl.utils.cts_observations import CTSObservationHistory, build_proprioception
-from rsl_rl.utils.cts_checkpoint import validate_checkpoint_policy
+from rsl_rl.utils.cts_checkpoint import normalize_policy_config, validate_checkpoint_policy
 
 NUM_ACTIONS = 16
 
@@ -54,7 +54,29 @@ class NezhaCTSPolicyRuntime:
             "actor_expert_num": self.policy.get_num_actor_experts() if hasattr(self.policy, "get_num_actor_experts") else 0,
             "critic_type": self.policy.get_critic_type() if hasattr(self.policy, "get_critic_type") else "mlp",
             "critic_expert_num": self.policy.get_num_critic_experts() if hasattr(self.policy, "get_num_critic_experts") else 0,
+            "num_actions": NUM_ACTIONS,
         }
+        if hasattr(self.policy, "get_residual_config_json"):
+            residual_config = json.loads(self.policy.get_residual_config_json())
+            for name in ("residual_enabled", "residual_hidden_dims", "residual_action_scales"):
+                if name not in residual_config:
+                    raise ValueError("Export is missing residual metadata: " + name)
+                self.policy_config[name] = residual_config[name]
+        # Legacy exports have neither residual parameters nor metadata.
+        self.policy_config = normalize_policy_config(self.policy_config)
+        exported_residual = (self.policy.get_residual_enabled()
+                             if hasattr(self.policy, "get_residual_enabled") else False)
+        if exported_residual != self.policy_config["residual_enabled"]:
+            raise ValueError("Export residual flag disagrees with metadata")
+        if exported_residual:
+            if not hasattr(self.policy, "get_residual_action_scales"):
+                raise ValueError("Residual export is missing its action scale interface")
+            actual_scales = self.policy.get_residual_action_scales().detach().cpu()
+            saved_scales = torch.tensor(self.policy_config["residual_action_scales"],
+                                        dtype=actual_scales.dtype)
+            if actual_scales.shape != saved_scales.shape or not torch.allclose(
+                    actual_scales, saved_scales, rtol=1e-6, atol=1e-8):
+                raise ValueError("Export residual scales disagree with metadata")
         validate_checkpoint_policy({"policy_config": self.policy_config}, expected_policy)
         self.observation_config = json.loads(self.policy.get_observation_config_json())
         self.control_config = json.loads(self.policy.get_control_config_json())

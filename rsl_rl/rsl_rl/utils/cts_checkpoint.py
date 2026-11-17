@@ -1,6 +1,7 @@
 """Versioned MoE-CTS checkpoints shared by training, play and export."""
 
 import copy
+import math
 import torch
 from rsl_rl.utils.cts_observations import validate_observation_config
 
@@ -14,6 +15,7 @@ DIMENSION_KEYS = (
 STRUCTURE_KEYS = (
     "student_encoder_type", "expert_num", "actor_type", "actor_expert_num",
     "critic_type", "critic_expert_num",
+    "residual_enabled", "residual_hidden_dims", "residual_action_scales",
 )
 
 
@@ -34,6 +36,29 @@ def normalize_policy_config(policy_config):
             count = policy.setdefault(count_key, 8)
             if isinstance(count, bool) or not isinstance(count, int) or count < 1:
                 raise ValueError("MoE {} must be a positive integer".format(count_key))
+    enabled = policy.setdefault("residual_enabled", False)
+    if not isinstance(enabled, bool):
+        raise ValueError("residual_enabled must be a boolean")
+    widths = policy.setdefault("residual_hidden_dims", [128, 64])
+    if not isinstance(widths, (list, tuple)) or not widths or any(
+            isinstance(width, bool) or not isinstance(width, int) or width < 1
+            for width in widths):
+        raise ValueError("Residual hidden dimensions must be positive integers")
+    policy["residual_hidden_dims"] = list(widths)
+    scales = policy.setdefault("residual_action_scales", None)
+    if enabled:
+        if policy["actor_type"] != "moe":
+            raise ValueError("Action residual experiments require a MoE Actor")
+        if not isinstance(scales, (list, tuple)) or not scales:
+            raise ValueError("Enabled residual requires explicit per-action scales")
+        if any(isinstance(scale, bool) or not math.isfinite(float(scale)) or float(scale) <= 0
+               for scale in scales):
+            raise ValueError("Residual scales must be finite and strictly positive")
+        if "num_actions" in policy and len(scales) != policy["num_actions"]:
+            raise ValueError("Residual action scales must have one entry per action")
+        policy["residual_action_scales"] = [float(scale) for scale in scales]
+    elif scales is not None:
+        raise ValueError("Disabled residual must not configure action scales")
     return policy
 
 
@@ -91,6 +116,17 @@ def validate_cts_checkpoint(checkpoint):
         has_moe = any(key.startswith(prefix) for key in checkpoint["model_state_dict"])
         if has_moe != (policy[type_key] == "moe"):
             raise ValueError("Checkpoint {} disagrees with saved weights".format(type_key))
+    state = checkpoint["model_state_dict"]
+    has_residual = any(key.startswith("actor.residual.") for key in state)
+    has_scales = "actor.residual_action_scales" in state
+    if has_residual != policy["residual_enabled"] or has_scales != policy["residual_enabled"]:
+        raise ValueError("Checkpoint residual configuration disagrees with saved weights")
+    if has_scales:
+        scales = state["actor.residual_action_scales"].detach().cpu()
+        expected_scales = torch.tensor(policy["residual_action_scales"], dtype=scales.dtype)
+        if scales.shape != expected_scales.shape or not torch.allclose(
+                scales, expected_scales, rtol=1e-6, atol=1e-8):
+            raise ValueError("Checkpoint residual action scales disagree with metadata")
     spec = checkpoint["observation_config"]
     validate_observation_config(spec)
     for key in DIMENSION_KEYS:

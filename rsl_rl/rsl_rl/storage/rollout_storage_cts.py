@@ -27,7 +27,8 @@ class RolloutStorageCTS:
             self.__init__()
 
     def __init__(self, num_envs, teacher_num_envs, num_transitions_per_env,
-                 obs_shape, critic_obs_shape, actions_shape, device="cpu"):
+                 obs_shape, critic_obs_shape, actions_shape, device="cpu",
+                 collect_temporal_pairs=False):
         if not 0 < teacher_num_envs < num_envs:
             raise ValueError("CTS storage requires both teacher and student environments")
         if num_transitions_per_env < 1:
@@ -50,6 +51,14 @@ class RolloutStorageCTS:
         self.advantages = torch.zeros_like(self.rewards)
         self.actions_log_prob = torch.zeros_like(self.rewards)
         self.step = 0
+        self.collect_temporal_pairs = bool(collect_temporal_pairs)
+        if self.collect_temporal_pairs:
+            # Carry the preceding action's input across rollout boundaries.
+            # Full previous histories cannot be reconstructed by slicing the
+            # current history: its oldest frame has already been discarded.
+            self._carry_observations = torch.zeros(num_envs, *obs_shape, device=device)
+            self._carry_privileged = torch.zeros(num_envs, *critic_obs_shape, device=device)
+            self._carry_valid = torch.zeros(num_envs, dtype=torch.bool, device=device)
 
     def add_transitions(self, transition):
         if self.step >= self.num_transitions_per_env:
@@ -70,7 +79,19 @@ class RolloutStorageCTS:
     add_transition = add_transitions
 
     def clear(self):
+        if self.collect_temporal_pairs and self.step:
+            last = self.step - 1
+            self._carry_observations.copy_(self.observations[last])
+            self._carry_privileged.copy_(self.privileged_observations[last])
+            self._carry_valid.copy_(~self.dones[last, :, 0])
         self.step = 0
+
+    def reset_temporal_history(self):
+        """Invalidate predecessor states after an external simulator reset/load."""
+        if self.collect_temporal_pairs:
+            self._carry_observations.zero_()
+            self._carry_privileged.zero_()
+            self._carry_valid.zero_()
 
     def _require_full(self):
         if self.step != self.num_transitions_per_env:
@@ -105,6 +126,30 @@ class RolloutStorageCTS:
         time_ids = indices % self.num_transitions_per_env
         return tensor[time_ids, env_ids]
 
+    def _temporal_batch(self, indices):
+        """Pair each shuffled sample with the preceding state of its own env.
+
+        A previous transition's done flag masks the new episode's first state.
+        The first ever rollout has no predecessor; later rollouts use carry
+        buffers populated by clear(), including their terminal boundary mask.
+        """
+        env_ids = indices // self.num_transitions_per_env
+        time_ids = indices % self.num_transitions_per_env
+        previous_times = (time_ids - 1).clamp_min(0)
+        previous_obs = self.observations[previous_times, env_ids].clone()
+        previous_privileged = self.privileged_observations[previous_times, env_ids].clone()
+        valid = ~self.dones[previous_times, env_ids, 0]
+        first = time_ids == 0
+        first_envs = env_ids[first]
+        previous_obs[first] = self._carry_observations[first_envs]
+        previous_privileged[first] = self._carry_privileged[first_envs]
+        valid[first] = self._carry_valid[first_envs]
+        return {
+            "previous_observations": previous_obs,
+            "previous_critic_observations": previous_privileged,
+            "temporal_mask": valid,
+        }
+
     def mini_batch_generator(self, num_mini_batches, num_epochs=1):
         self._require_full()
         teacher_count = self.teacher_num_envs * self.num_transitions_per_env
@@ -124,6 +169,8 @@ class RolloutStorageCTS:
                 ids = torch.cat((teacher_ids, teacher_count + student_ids))
                 batch = {name: self._gather(data, ids) for name, data in fields.items()}
                 batch["teacher_count"] = teacher_ids.numel()
+                if self.collect_temporal_pairs:
+                    batch.update(self._temporal_batch(ids))
                 yield batch
 
     def student_mini_batch_generator(self, num_mini_batches, num_epochs=1):

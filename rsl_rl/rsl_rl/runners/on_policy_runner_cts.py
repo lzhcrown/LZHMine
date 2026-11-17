@@ -3,17 +3,20 @@
 import copy
 import json
 import os
+import random
 import statistics
 import time
 from collections import deque
 
 import torch
+import numpy as np
 
 from rsl_rl.algorithms.moe_cts import MoECTS
 from rsl_rl.modules.actor_critic_moe_cts import ActorCriticMoECTS
 from rsl_rl.utils.cts_checkpoint import (
     ARCHITECTURE, FORMAT_VERSION, load_cts_checkpoint, normalize_policy_config,
 )
+from rsl_rl.utils.cts_initialization import base_policy_config, validate_initialization_source
 
 
 def _config_dict(value):
@@ -70,6 +73,7 @@ class MoECTSOnPolicyRunner:
         self.tot_time = 0.0
         self.writer = None
         self.wandb_run = None
+        self.initialization = None
         self.env.reset()
 
     def _open_logs(self):
@@ -86,6 +90,7 @@ class MoECTSOnPolicyRunner:
                     "environment": _config_dict(self.env.cfg) if hasattr(self.env, "cfg") else {},
                     "observations": self.observation_config,
                     "policy": self.policy_config,
+                    "initialization": self.initialization,
                 }, stream, ensure_ascii=False, indent=2)
             # Make the run discoverable before the first rollout. Loss and
             # episode metrics are only available after actual training steps.
@@ -192,6 +197,8 @@ class MoECTSOnPolicyRunner:
                 metrics["ActorExperts/" + key[len("actor_"):]] = float(value)
             elif key.startswith("critic_"):
                 metrics["CriticExperts/" + key[len("critic_"):]] = float(value)
+            elif key.startswith("residual_"):
+                metrics["Residual/" + key[len("residual_"):]] = float(value)
             else:
                 prefix = "Experts" if key.startswith(("expert_", "gate_")) else "Loss"
                 metrics[prefix + "/" + key] = float(value)
@@ -291,6 +298,7 @@ class MoECTSOnPolicyRunner:
             "total_time": self.tot_time,
             "env_common_step_counter": getattr(self.env, "common_step_counter", 0),
             "infos": infos,
+            "initialization": self.initialization,
         }
         curriculum = getattr(self.env, "wf_curriculum", None)
         if getattr(curriculum, "uses_reward_command_curriculum", False):
@@ -316,6 +324,58 @@ class MoECTSOnPolicyRunner:
             self.alg.optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
             self.alg.optimizer_stu_enc.load_state_dict(checkpoint["student_optimizer_state_dict"])
             self.alg.learning_rate = self.alg.optimizer.param_groups[0]["lr"]
+        self.initialization = checkpoint.get("initialization")
+        self._restore_training_progress(checkpoint)
+        return checkpoint.get("infos")
+
+    def initialize_from(self, path):
+        """Start a controlled fine-tuning run with fresh optimizers in every arm.
+
+        Common weights, training clock and command ranges are inherited. Only
+        the optional, zero-output residual may be absent in the source weights.
+        """
+        if (self.current_learning_iteration != 0 or self.alg.storage.step != 0
+                or self.alg.optimizer.state or self.alg.optimizer_stu_enc.state):
+            raise ValueError("initialize_from requires a fresh runner; use load to resume")
+        checkpoint = load_cts_checkpoint(path, map_location=self.device)
+        validate_initialization_source(checkpoint, self.policy_config)
+        if base_policy_config(checkpoint["policy_config"]) != base_policy_config(self.policy_config):
+            raise ValueError("Initialization must preserve the complete base policy configuration")
+        if checkpoint["observation_config"] != self.observation_config:
+            raise ValueError("Initialization observation schema differs from checkpoint")
+        if checkpoint["train_config"]["runner"]["num_steps_per_env"] != self.num_steps_per_env:
+            raise ValueError("Initialization must preserve the rollout length")
+        current = self.alg.actor_critic.state_dict()
+        source = checkpoint["model_state_dict"]
+        unexpected = set(source) - set(current)
+        missing = set(current) - set(source)
+        allowed = {key for key in current if key.startswith("actor.residual.")
+                   or key == "actor.residual_action_scales"}
+        if unexpected or missing - allowed:
+            raise ValueError("Initialization weights differ beyond the action residual")
+        # Strict loading of the complete merged state prevents silent partial
+        # loads. Fresh constructor values supply the zero-output residual.
+        current.update(source)
+        self.alg.actor_critic.load_state_dict(current, strict=True)
+        self.initialization = {
+            "source_checkpoint": os.path.abspath(os.fspath(path)),
+            "source_iteration": int(checkpoint.get("next_iter", checkpoint["iter"])),
+            "optimizer": "reset_both_adam",
+            "curriculum": "restore_clock_and_command_ranges",
+            "seed": int(self.train_cfg.get("seed", 10)),
+        }
+        # Extra residual parameters must not change the random stream used to
+        # reset the physical environments and collect the first rollout.
+        seed = self.initialization["seed"]
+        random.seed(seed)
+        np.random.seed(seed)
+        torch.manual_seed(seed)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(seed)
+        self._restore_training_progress(checkpoint)
+        return self.initialization
+
+    def _restore_training_progress(self, checkpoint):
         self.current_learning_iteration = int(checkpoint.get("next_iter", checkpoint["iter"]))
         self.tot_timesteps = int(checkpoint.get("total_timesteps", 0))
         self.tot_time = float(checkpoint.get("total_time", 0.0))
@@ -329,8 +389,11 @@ class MoECTSOnPolicyRunner:
             self.env.command_ranges.update(copy.deepcopy(command_state["ranges"]))
             curriculum.update_command_ranges()
         # Physics and per-environment histories are intentionally reinitialised.
+        self.alg.storage.clear()
+        if hasattr(self.alg.storage, "reset_temporal_history"):
+            self.alg.storage.reset_temporal_history()
+        self.alg.transition.clear()
         self.env.reset()
-        return checkpoint.get("infos")
 
     def get_inference_policy(self, device=None):
         policy = self.alg.actor_critic.eval()

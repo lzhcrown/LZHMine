@@ -34,9 +34,10 @@ from datetime import datetime
 
 from rsl_rl.runners import MoECTSOnPolicyRunner
 from rsl_rl.utils.cts_checkpoint import DIMENSION_KEYS, load_cts_checkpoint, validate_checkpoint_policy
+from rsl_rl.utils.cts_initialization import RESIDUAL_POLICY_KEYS, validate_initialization_source
 
 from legged_gym import LEGGED_GYM_ROOT_DIR
-from experiments.registry import clone_config
+from experiments.registry import RESIDUAL_EXPERIMENT_KEYS, clone_config
 from .helpers import (
     get_args, update_cfg_from_args, class_to_dict, update_class_from_dict,
     get_load_path, set_seed, parse_sim_params,
@@ -78,8 +79,61 @@ class TaskRegistry:
 
     @staticmethod
     def _validate_experiment_checkpoint(train_cfg, checkpoint):
-        if getattr(train_cfg.runner, "experiment_key", None):
+        experiment_key = getattr(train_cfg.runner, "experiment_key", None)
+        if experiment_key:
             validate_checkpoint_policy(checkpoint, class_to_dict(train_cfg.policy))
+        if experiment_key in RESIDUAL_EXPERIMENT_KEYS:
+            saved = checkpoint.get("train_config", {})
+            source_key = saved.get("runner", {}).get("experiment_key")
+            if source_key != experiment_key:
+                raise ValueError(
+                    "Comparison resume requires the same experiment_key: "
+                    "checkpoint={!r}, target={!r}. Use --init_from for a new comparison arm."
+                    .format(source_key, experiment_key)
+                )
+            factors = class_to_dict(getattr(train_cfg.runner, "comparison_factors", {}))
+            expected_temporal = factors.get("temporal")
+            temporal_coef = saved.get("algorithm", {}).get("temporal_loss_coef", 0.0)
+            if not isinstance(expected_temporal, bool) or (temporal_coef > 0) != expected_temporal:
+                raise ValueError(
+                    "Checkpoint temporal_loss_coef={!r} disagrees with target comparison "
+                    "factor temporal={!r}".format(temporal_coef, expected_temporal)
+                )
+
+    @staticmethod
+    def _restore_asset_path(env_cfg):
+        """Relocate a stale checkout path without replacing an existing asset."""
+        asset = getattr(env_cfg, "asset", None)
+        configured_path = getattr(asset, "file", None)
+        if configured_path is None:
+            return
+        resolved_path = os.fspath(configured_path).format(LEGGED_GYM_ROOT_DIR=LEGGED_GYM_ROOT_DIR)
+        if os.path.isfile(resolved_path):
+            return
+        marker = os.sep + "resources" + os.sep
+        if os.path.isabs(resolved_path) and marker in resolved_path:
+            suffix = resolved_path.split(marker, 1)[1]
+            relocated_path = os.path.join(LEGGED_GYM_ROOT_DIR, "resources", suffix)
+            if os.path.isfile(relocated_path):
+                asset.file = relocated_path
+                return
+            raise FileNotFoundError(
+                "Checkpoint asset does not exist: {}. Relocated asset also missing: {}"
+                .format(resolved_path, relocated_path)
+            )
+        raise FileNotFoundError("Checkpoint asset does not exist: " + resolved_path)
+
+    @staticmethod
+    def _initialization_path(train_cfg, args):
+        path = getattr(args, "cts_init_from", None) or getattr(args, "init_from", None)
+        if path is None:
+            return None
+        if train_cfg.runner.resume or getattr(args, "from_scratch", False):
+            raise ValueError("--init_from cannot be combined with --resume or --from_scratch")
+        path = os.path.abspath(os.path.expanduser(path))
+        if not os.path.isfile(path):
+            raise FileNotFoundError("Initialization checkpoint does not exist: " + path)
+        return path
 
     def make_env(self, name, args=None, env_cfg=None):
         args = get_args() if args is None else args
@@ -89,16 +143,25 @@ class TaskRegistry:
         if env_cfg is None:
             env_cfg = default_env_cfg
         _, train_cfg = update_cfg_from_args(None, train_cfg, args)
+        init_path = self._initialization_path(train_cfg, args)
         resume_path = self._resume_path(train_cfg)
-        if resume_path is not None:
-            checkpoint = load_cts_checkpoint(resume_path)
-            self._validate_experiment_checkpoint(train_cfg, checkpoint)
+        source_path = init_path or resume_path
+        if source_path is not None:
+            checkpoint = load_cts_checkpoint(source_path)
+            if init_path:
+                validate_initialization_source(checkpoint, class_to_dict(train_cfg.policy))
+            else:
+                self._validate_experiment_checkpoint(train_cfg, checkpoint)
             if "environment_config" in checkpoint:
                 update_class_from_dict(env_cfg, checkpoint["environment_config"])
+            self._restore_asset_path(env_cfg)
             # Restore the schema before simulator buffers are allocated.
             env_cfg.env.observation_config = copy.deepcopy(checkpoint["observation_config"])
             # Keep the resolved file even after a new run directory exists.
-            args.cts_resume_path = resume_path
+            if init_path:
+                args.cts_init_from = init_path
+            else:
+                args.cts_resume_path = resume_path
         env_cfg, _ = update_cfg_from_args(env_cfg, None, args)
         set_seed(env_cfg.seed)
         sim_params = parse_sim_params(args, {"sim": class_to_dict(env_cfg.sim)})
@@ -119,6 +182,7 @@ class TaskRegistry:
         _, train_cfg = update_cfg_from_args(None, train_cfg, args)
         if train_cfg.runner_class_name != "MoECTSOnPolicyRunner":
             raise ValueError("This branch trains Nezha with MoECTSOnPolicyRunner")
+        init_path = self._initialization_path(train_cfg, args)
         resume_path = getattr(args, "cts_resume_path", None) or self._resume_path(train_cfg, log_root)
         if resume_path is not None:
             checkpoint = load_cts_checkpoint(resume_path)
@@ -141,6 +205,18 @@ class TaskRegistry:
                 for key in ("wandb_tags", "wandb_notes"):
                     if key in saved_runner:
                         setattr(train_cfg.runner, key, copy.deepcopy(saved_runner[key]))
+        if init_path is not None:
+            checkpoint = load_cts_checkpoint(init_path)
+            validate_initialization_source(checkpoint, class_to_dict(train_cfg.policy))
+            # Restore the base architecture/hyperparameters in all four arms;
+            # retain only the intended residual and temporal experiment factors.
+            for key, value in checkpoint["policy_config"].items():
+                if key not in DIMENSION_KEYS and key not in RESIDUAL_POLICY_KEYS:
+                    setattr(train_cfg.policy, key, copy.deepcopy(value))
+            temporal_coef = getattr(train_cfg.algorithm, "temporal_loss_coef", 0.0)
+            update_class_from_dict(train_cfg.algorithm, checkpoint["train_config"]["algorithm"])
+            train_cfg.algorithm.temporal_loss_coef = temporal_coef
+            train_cfg.runner.num_steps_per_env = checkpoint["train_config"]["runner"]["num_steps_per_env"]
         if log_root == "default":
             log_root = os.path.join(LEGGED_GYM_ROOT_DIR, "logs", train_cfg.runner.experiment_name)
         log_dir = None if log_root is None else os.path.join(
@@ -150,6 +226,9 @@ class TaskRegistry:
         if resume_path is not None:
             print("Loading model from: " + resume_path)
             runner.load(resume_path)
+        elif init_path is not None:
+            print("Initializing all-MoE comparison with fresh optimizers from: " + init_path)
+            runner.initialize_from(init_path)
         return runner, train_cfg
 
 

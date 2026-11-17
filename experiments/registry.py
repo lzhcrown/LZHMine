@@ -5,10 +5,16 @@ import importlib
 from pathlib import Path
 
 
-EXPERIMENT_KEYS = (
+LEGACY_EXPERIMENT_KEYS = (
     "g0_mlp", "g1_student_moe", "g2_actor_moe", "g3_student_actor_moe",
     "g4_critic_moe", "g5_student_critic_moe", "g6_actor_critic_moe", "g7_all_moe",
 )
+RESIDUAL_EXPERIMENT_KEYS = (
+    "g8_all_moe_control", "g9_all_moe_residual", "g10_all_moe_temporal",
+    "g11_all_moe_residual_temporal",
+)
+EXPERIMENT_KEYS = LEGACY_EXPERIMENT_KEYS + RESIDUAL_EXPERIMENT_KEYS
+ALL_MOE_EXPERIMENT_KEYS = ("g7_all_moe",) + RESIDUAL_EXPERIMENT_KEYS
 DEFAULT_EXPERIMENT = "g1_student_moe"
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -42,7 +48,11 @@ def configure_experiment(train_cfg, key):
     """Create isolated config instances while keeping common PPO defaults."""
     experiment = get_experiment(key)
     train_cfg = clone_config(train_cfg)
-    for section, overrides in (("policy", experiment.POLICY), ("runner", experiment.RUNNER)):
+    for section, overrides in (("policy", experiment.POLICY),
+                               ("algorithm", getattr(experiment, "ALGORITHM", {})),
+                               ("runner", experiment.RUNNER)):
+        if not overrides:
+            continue
         target = getattr(train_cfg, section)
         for name, value in overrides.items():
             setattr(target, name, copy.deepcopy(value))

@@ -11,7 +11,8 @@ import pytest
 import torch
 from tensorboard.backend.event_processing.event_accumulator import EventAccumulator
 
-from experiments.registry import EXPERIMENT_KEYS, configure_experiment, export_path, get_experiment
+from experiments.registry import (EXPERIMENT_KEYS, LEGACY_EXPERIMENT_KEYS, RESIDUAL_EXPERIMENT_KEYS,
+                                  configure_experiment, export_path, get_experiment)
 from experiments.common import export_main
 from deploy.deploy_mujoco.runtime import NezhaCTSPolicyRuntime
 from legged_gym.scripts import export_nezha_moe_cts as export_script
@@ -84,7 +85,7 @@ def config_dict(cpu_task_registry, value):
 
 
 def test_complete_factorial_only_changes_structure_and_run_metadata(actual_config_module, cpu_task_registry):
-    assert tuple(EXPERIMENT_KEYS) == tuple(GROUPS)
+    assert tuple(LEGACY_EXPERIMENT_KEYS) == tuple(GROUPS)
     base = actual_config_module.NezhaMoECTSCfgPPO()
     initial = config_dict(cpu_task_registry, base)
     common = []
@@ -131,6 +132,20 @@ def test_mutating_one_experiment_cannot_change_other_or_shared_defaults(actual_c
     assert "temporary-test-tag" not in get_experiment("g0_mlp").RUNNER["wandb_tags"]
 
 
+def test_residual_factorial_preserves_g7_common_training_settings(actual_config_module, cpu_task_registry):
+    base = actual_config_module.NezhaMoECTSCfgPPO()
+    configurations = []
+    for key in ("g7_all_moe",) + RESIDUAL_EXPERIMENT_KEYS:
+        value = config_dict(cpu_task_registry, configure_experiment(base, key))
+        for field in ("residual_enabled", "residual_hidden_dims", "residual_action_scales"):
+            value["policy"].pop(field, None)
+        value["algorithm"].pop("temporal_loss_coef", None)
+        for field in get_experiment(key).RUNNER:
+            value["runner"].pop(field)
+        configurations.append(value)
+    assert all(value == configurations[0] for value in configurations)
+
+
 def test_real_task_registration_preserves_environment_and_training_isolation(
         actual_config_module, cpu_task_registry, monkeypatch):
     """Execute envs/__init__, replacing only classes that import the simulator."""
@@ -147,7 +162,8 @@ def test_real_task_registration_preserves_environment_and_training_isolation(
     init_path = Path(__file__).resolve().parents[1] / "envs" / "__init__.py"
     package = sys.modules["legged_gym.envs"]
     exec(compile(init_path.read_text(), str(init_path), "exec"), package.__dict__)
-    tasks = {get_experiment(key).TASK_NAME for key in GROUPS}
+    tasks = {get_experiment(key).TASK_NAME for key in EXPERIMENT_KEYS}
+    assert len(tasks) == 12
     assert tasks <= set(cpu_task_registry.task_classes)
     unchanged = []
     for key in GROUPS:
@@ -155,6 +171,12 @@ def test_real_task_registration_preserves_environment_and_training_isolation(
         unchanged.append(config_dict(cpu_task_registry, env))
         assert {field: getattr(train.policy, field) for field in STRUCTURE_FIELDS} == expected_policy(key)
     assert all(env == unchanged[0] for env in unchanged)
+    for key in RESIDUAL_EXPERIMENT_KEYS:
+        env, train = cpu_task_registry.get_cfgs(get_experiment(key).TASK_NAME)
+        assert config_dict(cpu_task_registry, env) == unchanged[0]
+        assert all(getattr(train.policy, field) == value
+                   for field, value in get_experiment(key).POLICY.items())
+        assert train.algorithm.temporal_loss_coef == get_experiment(key).ALGORITHM["temporal_loss_coef"]
     env, train = cpu_task_registry.get_cfgs(get_experiment("g0_mlp").TASK_NAME)
     env.commands.ranges.lin_vel_x[0] = -99.0
     env.terrain.wf_sub_terrains.clear()

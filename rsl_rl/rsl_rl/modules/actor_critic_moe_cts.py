@@ -60,6 +60,8 @@ class ActorCriticMoECTS(nn.Module):
         actor_obs_normalization=False, critic_obs_normalization=False,
         actor_type="mlp", actor_expert_num=8,
         student_encoder_type="moe", critic_type="mlp", critic_expert_num=8,
+        residual_enabled=False, residual_hidden_dims=(128, 64),
+        residual_action_scales=None,
     ):
         super().__init__()
         if history_length < 1 or sum(observation_dims) != num_one_step_obs:
@@ -78,6 +80,16 @@ class ActorCriticMoECTS(nn.Module):
             raise ValueError("This WF policy uses a shared scalar standard deviation per action")
         if actor_obs_normalization or critic_obs_normalization:
             raise ValueError("WF baseline disables empirical observation normalization")
+        if not isinstance(residual_enabled, bool):
+            raise ValueError("residual_enabled must be a boolean")
+        if residual_enabled and actor_type != "moe":
+            raise ValueError("Action residual experiments require a MoE Actor")
+        if not residual_enabled and residual_action_scales is not None:
+            raise ValueError("Disabled residual must not configure action scales")
+        if not isinstance(residual_hidden_dims, (list, tuple)) or not residual_hidden_dims or any(
+                isinstance(width, bool) or not isinstance(width, int) or width < 1
+                for width in residual_hidden_dims):
+            raise ValueError("Residual hidden dimensions must be positive integers")
         for name, network_type, count in (
                 ("student_encoder", student_encoder_type, expert_num),
                 ("actor", actor_type, actor_expert_num),
@@ -104,6 +116,10 @@ class ActorCriticMoECTS(nn.Module):
         self.actor_expert_num = int(actor_expert_num) if actor_type == "moe" else 0
         self.critic_type = critic_type
         self.critic_expert_num = int(critic_expert_num) if critic_type == "moe" else 0
+        self.residual_enabled = residual_enabled
+        self.residual_hidden_dims = list(residual_hidden_dims)
+        self.residual_action_scales = (list(residual_action_scales)
+                                       if residual_action_scales is not None else None)
 
         indices = []
         offset = 0
@@ -131,7 +147,11 @@ class ActorCriticMoECTS(nn.Module):
             )
         if actor_type == "moe":
             self.actor = MoEActor(self.actor_expert_num, latent_dim + num_one_step_obs,
-                                  actor_hidden_dims, num_actions, activation)
+                                  actor_hidden_dims, num_actions, activation,
+                                  residual_enabled=residual_enabled,
+                                  num_current_obs=num_one_step_obs,
+                                  residual_hidden_dims=residual_hidden_dims,
+                                  residual_action_scales=residual_action_scales)
         else:
             self.actor = MLP(latent_dim + num_one_step_obs, num_actions,
                              actor_hidden_dims, activation)
@@ -144,6 +164,8 @@ class ActorCriticMoECTS(nn.Module):
         self.distribution = None
         self.actor_gate_weights = torch.empty(0)
         self.critic_gate_weights = torch.empty(0)
+        self.coarse_action_mean = torch.empty(0)
+        self.action_residual = torch.empty(0)
 
     def reset(self, dones=None):
         pass
@@ -166,7 +188,8 @@ class ActorCriticMoECTS(nn.Module):
     def entropy(self):
         return self.distribution.entropy().sum(dim=-1)
 
-    def act(self, observations, critic_obs=None, is_teacher=False):
+    def action_mean_with_diagnostics(self, observations, critic_obs=None, is_teacher=False):
+        """PPO mean path; student latents retain their stop-gradient boundary."""
         if is_teacher:
             if critic_obs is None:
                 raise ValueError("Teacher actions require current privileged observations")
@@ -178,17 +201,35 @@ class ActorCriticMoECTS(nn.Module):
                 latent, _ = self.student_moe_encoder(observations)
         inputs = torch.cat((latent, self.get_current_observations(observations)), dim=-1)
         if self.actor_type == "moe":
-            mean, self.actor_gate_weights = self.actor.moe(inputs)
-        else:
-            mean = self.actor(inputs)
-            self.actor_gate_weights = inputs.new_empty((inputs.shape[0], 0))
+            return self.actor.forward_with_diagnostics(inputs)
+        mean = self.actor(inputs)
+        return mean, inputs.new_empty((inputs.shape[0], 0)), mean, torch.zeros_like(mean)
+
+    def act(self, observations, critic_obs=None, is_teacher=False):
+        mean, weights, coarse, correction = self.action_mean_with_diagnostics(
+            observations, critic_obs, is_teacher)
+        self.actor_gate_weights = weights
+        self.coarse_action_mean = coarse
+        self.action_residual = correction
         self.distribution = Normal(mean, self.std.clamp_min(1.0e-6).expand_as(mean),
                                    validate_args=False)
         return self.distribution.sample()
 
     def act_inference(self, observations):
-        latent, _ = self.student_moe_encoder(observations)
-        return self.actor(torch.cat((latent, self.get_current_observations(observations)), dim=-1))
+        mean, _, _, _, _ = self.act_inference_with_diagnostics(observations)
+        return mean
+
+    def act_inference_with_diagnostics(self, observations):
+        """One deployment forward for actions and all routing/residual diagnostics."""
+        latent, student_weights = self.student_moe_encoder(observations)
+        inputs = torch.cat((latent, self.get_current_observations(observations)), dim=-1)
+        if self.actor_type == "moe":
+            mean, actor_weights, coarse, correction = self.actor.forward_with_diagnostics(inputs)
+        else:
+            mean = self.actor(inputs)
+            actor_weights = inputs.new_empty((inputs.shape[0], 0))
+            coarse, correction = mean, torch.zeros_like(mean)
+        return mean, student_weights, actor_weights, coarse, correction
 
     def evaluate(self, observations, critic_obs, is_teacher=False):
         # The value function cannot train either latent encoder.

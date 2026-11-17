@@ -5,6 +5,7 @@ venv/
 venv-*/
 .tox/
 .nox/
+__pypackages__/
 
 # Local agent/account state
 /.agents/
@@ -13,6 +14,7 @@ venv-*/
 
 # Training logs and experiment trackers
 logs/
+evaluations/
 runs/
 wandb/
 .tensorboard-info/
@@ -48,9 +50,17 @@ __pycache__/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
+.pytype/
+.pyre/
 .hypothesis/
 .cache/
 .ipynb_checkpoints/
+
+# Local GPU/compiler caches (the default Gym extension cache lives in /tmp)
+/.triton/
+/.nv/
+/.torch_extensions/
+/torch_extensions/
 
 # Python package/build artifacts
 *.egg-info/
@@ -58,6 +68,15 @@ __pycache__/
 build/
 dist/
 *.whl
+*.egg
+
+# Compiled native extensions and Ninja state; keep mesh formats such as *.obj.
+*.so
+*.so.[0-9]*
+*.o
+*.a
+.ninja_deps
+.ninja_log
 
 # Test and coverage outputs
 .coverage
@@ -78,7 +97,13 @@ tmp/
 *.tmp
 *.temp
 *.bak
+*.orig
+*.rej
 *~
+
+# Root-level process crash dumps; avoid a broad core.* rule that hides source.
+/core
+/core.[0-9]*
 
 # Local secrets
 .env
@@ -92,5 +117,9 @@ Thumbs.db
 # Keep robot descriptions and their mesh/material dependencies versioned.
 # Do not add blanket rules for resources/, URDF, MJCF/XML, STL, OBJ or BIN:
 # the simulation scenes load the tracked terrain heightfields as well.
+# Keep source/config/test data (including CSV, JSON, PNG and PDF) eligible too.
+# Put custom evaluation/export output under evaluations/, logs/, tmp/, or the
+# existing deploy/**/policy/ directory instead of ignoring those file formats.
+# .python-version, requirements/ and lock files belong in version control.
 !*.urdf
 !*.xacro
