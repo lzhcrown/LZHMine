@@ -13,12 +13,12 @@
     <texture type="2d" name="roughtex" builtin="checker" mark="edge" rgb1="0.28 0.32 0.24" rgb2="0.16 0.20 0.13" markrgb="0.55 0.6 0.45" width="300" height="300" />
     <material name="roughground" texture="roughtex" texuniform="true" texrepeat="8 8" reflectance="0.1" />
 
-    <hfield name="training_curriculum" file="../mjcf/assets/nezha_training_curriculum.bin" size="70.0 115.0 4.455 0.1" />
+    <hfield name="training_curriculum" file="../mjcf/assets/nezha_training_curriculum.bin" size="115.0 115.0 7.28 0.1" />
   </asset>
 
   <worldbody>
     <light pos="0 0 2" dir="0 0 -1" directional="true" />
 
-    <geom name="training_terrain" type="hfield" hfield="training_curriculum" pos="45.0 90.0 -2.25" material="roughground" contype="2" conaffinity="1" friction="1.0 0.01 0.001" />
+    <geom name="training_terrain" type="hfield" hfield="training_curriculum" pos="90.0 90.0 -3.64" material="roughground" contype="2" conaffinity="1" friction="1.0 0.01 0.001" />
   </worldbody>
 </mujoco>

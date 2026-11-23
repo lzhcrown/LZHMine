@@ -1,0 +1,101 @@
+"""Exercise training-only terrain labels through G7 initialization and PPO."""
+
+import torch
+from tensorboard.backend.event_processing.event_accumulator import EventAccumulator
+
+from rsl_rl.runners.on_policy_runner_cts import MoECTSOnPolicyRunner
+from rsl_rl.utils.cts_checkpoint import load_cts_checkpoint, policy_from_checkpoint
+from rsl_rl.utils.cts_export import CTSStudentExporter
+from test_cts_initialization import all_moe_config
+from test_cts_runner import FakeVectorEnv
+
+
+def test_task_episode_metrics_use_completed_terrain_before_reset(tmp_path):
+    class ResettingTerrainEnv(FakeVectorEnv):
+        def __init__(self):
+            super().__init__()
+            self.high_platform_mask = torch.arange(self.num_envs) % 2 == 0
+
+        def step(self, actions):
+            rewards = torch.where(self.high_platform_mask, 4., 1.)
+            obs, privileged, _, dones, *rest = super().step(actions)
+            self.high_platform_mask[dones] = ~self.high_platform_mask[dones]
+            return obs, privileged, rewards, dones, *rest
+
+    cfg = all_moe_config()
+    cfg["policy"]["critic_task_count"] = 2
+    env = ResettingTerrainEnv()
+    runner = MoECTSOnPolicyRunner(env, cfg, log_dir=str(tmp_path))
+    # Partial first episodes have only one observed step and must be excluded.
+    env.episode_length_buf[:2] = env.max_episode_length - 1
+    runner.learn(1)
+    events = EventAccumulator(str(tmp_path)).Reload()
+    for group, reward in (("ordinary", 3.), ("high_platform", 12.)):
+        assert events.Scalars("Train/" + group + "_reward")[-1].value == reward
+        assert events.Scalars("Train/" + group + "_length")[-1].value == 3.
+
+
+def test_platform_labels_follow_pre_step_samples_through_ppo(tmp_path):
+    env = FakeVectorEnv()
+    env.high_platform_mask = torch.arange(env.num_envs) % 3 == 0
+    cfg = all_moe_config()
+    cfg["policy"]["critic_task_count"] = 2
+    cfg["runner"]["num_steps_per_env"] = 1
+    runner = MoECTSOnPolicyRunner(env, cfg)
+    alg = runner.alg
+    policy = alg.actor_critic
+    heads = policy.critic.moe.experts.experts
+    with torch.no_grad():
+        heads.weight.zero_()
+        heads.bias.view(-1, 2).copy_(torch.tensor([1., 5.]))
+
+    # Half the envs time out; simulate an in-place change of their terrain at reset.
+    labels = env.high_platform_mask.clone()
+    obs, privileged = env.observations, env.privileged
+    alg.act(obs, privileged, env.high_platform_mask)
+    timeout = torch.arange(env.num_envs) % 2 == 0
+    env.high_platform_mask[timeout] = ~env.high_platform_mask[timeout]
+    alg.process_env_step(torch.ones(env.num_envs), timeout, {"time_outs": timeout})
+    alg.compute_returns(obs, privileged, env.high_platform_mask)
+    ordered = labels[alg.env_order]
+    values = torch.where(ordered, 5., 1.)
+    torch.testing.assert_close(alg.storage.platform_mask[0], ordered)
+    torch.testing.assert_close(alg.storage.values[0, :, 0], values)
+    torch.testing.assert_close(alg.storage.returns[0, :, 0], 1 + alg.gamma * values)
+    for batch in alg.storage.mini_batch_generator(2, 1):
+        new_values = alg._batch_results(batch)[1][:, 0]
+        torch.testing.assert_close(new_values, torch.where(batch["platform_mask"], 5., 1.))
+    alg.update()
+
+    # A saved, trained two-head checkpoint still deploys without a terrain label.
+    path = tmp_path / "platform.pt"
+    runner.save(path)
+    loaded = policy_from_checkpoint(load_cts_checkpoint(path))
+    exported = torch.jit.script(CTSStudentExporter(loaded, env.observation_config))
+    with torch.no_grad():
+        torch.testing.assert_close(exported(obs), policy.act_inference(obs))
+
+
+def test_g7_warm_start_initializes_both_value_heads(tmp_path):
+    env = FakeVectorEnv()
+    source = MoECTSOnPolicyRunner(env, all_moe_config())
+    path = tmp_path / "g7.pt"
+    source.save(path)
+    cfg = all_moe_config()
+    cfg["policy"]["critic_task_count"] = 2
+    env.high_platform_mask = torch.arange(env.num_envs) % 2 == 0
+    target = MoECTSOnPolicyRunner(env, cfg)
+    target.initialize_from(path)
+    obs = torch.randn_like(env.observations)
+    privileged = torch.randn_like(env.privileged)
+    with torch.no_grad():
+        expected = source.alg.actor_critic.evaluate(obs, privileged)
+        for labels in (env.high_platform_mask, ~env.high_platform_mask):
+            actual = target.alg.actor_critic.evaluate(obs, privileged, platform_mask=labels)
+            torch.testing.assert_close(actual, expected)
+    target.learn(1)
+    trained = tmp_path / "trained.pt"
+    target.save(trained)
+    restored = MoECTSOnPolicyRunner(env, cfg)
+    restored.load(trained)
+    restored.learn(1)

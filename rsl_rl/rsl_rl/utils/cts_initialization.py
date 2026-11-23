@@ -14,15 +14,17 @@ BASE_STRUCTURE_KEYS = (
 
 def base_policy_config(config):
     return {key: value for key, value in normalize_policy_config(config).items()
-            if key not in RESIDUAL_POLICY_KEYS}
+            if key not in RESIDUAL_POLICY_KEYS and key != "critic_task_count"}
 
 
 def validate_initialization_source(checkpoint, target_policy):
-    """Unlike resume, allow adding a zero-initialized action residual only."""
+    """Initialize a compatible all-MoE arm from a non-residual source."""
     source = normalize_policy_config(checkpoint["policy_config"])
     target = normalize_policy_config(target_policy)
     if source["residual_enabled"]:
         raise ValueError("--init_from requires a non-residual all-MoE checkpoint; use --resume for a residual run")
+    if source["critic_task_count"] > target["critic_task_count"]:
+        raise ValueError("Initialization cannot discard a trained task value head")
     for name in ("student_encoder_type", "actor_type", "critic_type"):
         if source[name] != "moe" or target[name] != "moe":
             raise ValueError("--init_from requires all-MoE source and target policies")

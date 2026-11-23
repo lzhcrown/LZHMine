@@ -61,7 +61,7 @@ class ActorCriticMoECTS(nn.Module):
         actor_type="mlp", actor_expert_num=8,
         student_encoder_type="moe", critic_type="mlp", critic_expert_num=8,
         residual_enabled=False, residual_hidden_dims=(128, 64),
-        residual_action_scales=None,
+        residual_action_scales=None, critic_task_count=1,
     ):
         super().__init__()
         if history_length < 1 or sum(observation_dims) != num_one_step_obs:
@@ -116,6 +116,9 @@ class ActorCriticMoECTS(nn.Module):
         self.actor_expert_num = int(actor_expert_num) if actor_type == "moe" else 0
         self.critic_type = critic_type
         self.critic_expert_num = int(critic_expert_num) if critic_type == "moe" else 0
+        if type(critic_task_count) is not int or critic_task_count not in (1, 2):
+            raise ValueError("critic_task_count must be 1 or 2")
+        self.critic_task_count = critic_task_count
         self.residual_enabled = residual_enabled
         self.residual_hidden_dims = list(residual_hidden_dims)
         self.residual_action_scales = (list(residual_action_scales)
@@ -157,9 +160,9 @@ class ActorCriticMoECTS(nn.Module):
                              actor_hidden_dims, activation)
         if critic_type == "moe":
             self.critic = MoECritic(self.critic_expert_num, latent_dim + num_critic_obs,
-                                    critic_hidden_dims, activation)
+                                    critic_hidden_dims, activation, critic_task_count)
         else:
-            self.critic = MLP(latent_dim + num_critic_obs, 1, critic_hidden_dims, activation)
+            self.critic = MLP(latent_dim + num_critic_obs, critic_task_count, critic_hidden_dims, activation)
         self.std = nn.Parameter(init_noise_std * torch.ones(num_actions))
         self.distribution = None
         self.actor_gate_weights = torch.empty(0)
@@ -231,7 +234,7 @@ class ActorCriticMoECTS(nn.Module):
             coarse, correction = mean, torch.zeros_like(mean)
         return mean, student_weights, actor_weights, coarse, correction
 
-    def evaluate(self, observations, critic_obs, is_teacher=False):
+    def evaluate(self, observations, critic_obs, is_teacher=False, platform_mask=None):
         # The value function cannot train either latent encoder.
         with torch.no_grad():
             if is_teacher:
@@ -244,6 +247,11 @@ class ActorCriticMoECTS(nn.Module):
         else:
             value = self.critic(inputs)
             self.critic_gate_weights = inputs.new_empty((inputs.shape[0], 0))
+        if self.critic_task_count == 2:
+            if (platform_mask is None or platform_mask.dtype != torch.bool
+                    or platform_mask.shape != (value.shape[0],)):
+                raise ValueError("Two task values require one boolean platform label per sample")
+            return torch.where(platform_mask[:, None], value[:, 1:2], value[:, :1])
         return value
 
     def get_actions_log_prob(self, actions):

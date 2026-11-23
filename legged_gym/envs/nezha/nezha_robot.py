@@ -13,6 +13,7 @@ from isaacgym.torch_utils import (
 )
 
 from legged_gym.envs.base.legged_robot import LeggedRobot
+from legged_gym.terrains.wf import PLATFORM_TYPES
 from rsl_rl.utils.wf_curriculum import WFCurriculum, configure_wf_timing, is_wf_profile
 
 
@@ -27,6 +28,29 @@ class NezhaRobot(LeggedRobot):
         cfg.domain_rand.rand_interval = np.ceil(
             cfg.domain_rand.rand_interval_s / self.dt
         )
+
+    def _get_env_origins(self):
+        super()._get_env_origins()
+        if (not self.cfg.terrain.curriculum or self.num_envs >= self.cfg.terrain.num_cols
+                or not getattr(self.cfg.rewards, "platform_scales", None)):
+            return
+        # A small G12 batch samples only some map columns. Include a climb
+        # alongside ordinary terrain, and both shapes when at least 3 slots fit.
+        columns = getattr(getattr(self, "terrain", None), "column_types", [])
+        if not all(kind in columns for kind in PLATFORM_TYPES):
+            return
+        selected = self.terrain_types.tolist()
+        for kind in PLATFORM_TYPES:
+            if any(columns[col] == kind for col in selected):
+                continue
+            ordinary = [i for i, col in enumerate(selected) if columns[col] not in PLATFORM_TYPES]
+            if len(ordinary) < 2:
+                break
+            target = columns.index(kind)
+            nearest = min(ordinary, key=lambda i: abs(selected[i] - target))
+            selected[nearest] = target
+        self.terrain_types.copy_(torch.as_tensor(selected, device=self.device))
+        self.env_origins.copy_(self.terrain_origins[self.terrain_levels, self.terrain_types])
 
     def _init_buffers(self):
         super()._init_buffers()
@@ -61,14 +85,57 @@ class NezhaRobot(LeggedRobot):
             raise ValueError("Nezha wheel contact bodies must be distinct valid rigid bodies")
         self.wheel_body_indices = torch.tensor(indices, dtype=torch.long, device=self.device)
         self.num_wheels = len(wheel_names)
+        self.platform_scales = {
+            name: scale * self.dt
+            for name, scale in getattr(self.cfg.rewards, "platform_scales", {}).items()
+            if scale != 0.0
+        }
+        self.high_platform_mask = None
+        tile_types = getattr(getattr(self, "terrain", None), "tile_types", None)
+        self.block_tiles = None
+        if tile_types is not None and np.any(tile_types == "platform_block"):
+            self.block_tiles = torch.as_tensor(tile_types == "platform_block", device=self.device)
+        if self.platform_scales:
+            self._init_platform_terrain_mask()
+            self.trunk_body_index = self.gym.find_actor_rigid_body_handle(
+                self.envs[0], self.actor_handles[0], "trunk"
+            )
+            if self.trunk_body_index < 0:
+                raise ValueError("Platform collision penalties require the Nezha trunk body")
         self.wf_curriculum = (
             WFCurriculum(self)
             if is_wf_profile(self.cfg)
             else None
         )
 
+    def _init_platform_terrain_mask(self):
+        self.high_platform_mask = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        terrain = getattr(self, "terrain", None)
+        # The WF generator records the actual type of each random or curriculum
+        # tile. The fixed evaluation generator instead stores one type per column.
+        names = getattr(terrain, "tile_types", None)
+        if names is None:
+            columns = getattr(terrain, "column_types", getattr(terrain, "type_names", None))
+            if columns is None:  # Plane or custom terrain without task annotations.
+                self.platform_tiles = None
+                return
+            names = np.broadcast_to(columns, (self.cfg.terrain.num_rows, len(columns)))
+        self.platform_tiles = torch.as_tensor(
+            np.isin(names, (*PLATFORM_TYPES, "high_platform", "platform_45cm")), device=self.device
+        )
+        self.high_platform_mask.copy_(self.platform_tiles[self.terrain_levels, self.terrain_types])
+
     def _prepare_reward_function(self):
         super()._prepare_reward_function()
+        for name in self.platform_scales:
+            if name not in self.reward_scales:
+                self.episode_sums[name] = torch.zeros_like(self.rew_buf)
+                if name != "termination":
+                    self.reward_names.append(name)
+                    self.reward_functions.append(getattr(self, "_reward_" + name))
+        if self.platform_scales:
+            # Preserve an additive accounting of the M20 sum-to-zero clipping.
+            self.episode_sums["platform_positive_clip"] = torch.zeros_like(self.rew_buf)
         if self.wf_curriculum is not None:
             self.wf_curriculum.update_reward_curriculum()
 
@@ -91,9 +158,21 @@ class NezhaRobot(LeggedRobot):
             if self.wf_curriculum is not None
             else self.episode_length_buf > self.max_episode_length
         )
-        self.reset_buf.copy_((
-            self.fail_buf > self.cfg.env.fail_to_terminal_time_s / self.dt
-        ) | self.time_out_buf)
+        failed = self.fail_buf > self.cfg.env.fail_to_terminal_time_s / self.dt
+        if self.platform_scales and self.wf_curriculum is not None and self.cfg.terrain.curriculum:
+            # The episode label belongs to its spawn tile. Truncate before a
+            # robot starts visiting another task; a simultaneous fall is a failure.
+            # A raised platform's spawn is on the approach, off the tile center.
+            length, width = self.cfg.terrain.terrain_length, self.cfg.terrain.terrain_width
+            center_x = (self.terrain_levels + 0.5) * length
+            center_y = (self.terrain_types + 0.5) * width
+            reached_edge = (
+                ((self.root_states[:, 0] - center_x).abs() >= 0.5 * length - 0.2)
+                | ((self.root_states[:, 1] - center_y).abs() >= 0.5 * width - 0.2)
+            )
+            self.time_out_buf |= reached_edge
+            self.time_out_buf &= ~failed
+        self.reset_buf.copy_(failed | self.time_out_buf)
 
     def compute_reward(self):
         self.rew_buf[:] = 0.0
@@ -101,14 +180,26 @@ class NezhaRobot(LeggedRobot):
         for name, reward_function in zip(
             self.reward_names, self.reward_functions
         ):
-            reward = reward_function() * self.reward_scales[name]
-            reward = torch.clip(reward, -clip, clip)
+            raw = reward_function()
+            reward = torch.clip(raw * self.reward_scales.get(name, 0.0), -clip, clip)
+            if self.platform_scales:
+                platform_reward = raw * self.platform_scales[name] if name in self.platform_scales else 0.0
+                reward = torch.where(self.high_platform_mask, platform_reward, reward)
             self.rew_buf += reward
             self.episode_sums[name] += reward
+        if self.platform_scales:
+            # M20 clips the total before adding termination. Ordinary terrain
+            # keeps G7's per-component clipping and signed sum.
+            adjustment = torch.where(self.high_platform_mask, (-self.rew_buf).clamp_min(0.0), 0.0)
+            self.episode_sums["platform_positive_clip"] += adjustment
+            self.rew_buf += adjustment
         if self.cfg.rewards.only_positive_rewards:
             self.rew_buf[:] = torch.clip(self.rew_buf, min=0.0)
-        if "termination" in self.reward_scales:
-            reward = self._reward_termination() * self.reward_scales["termination"]
+        if "termination" in self.reward_scales or "termination" in self.platform_scales:
+            rate = self.reward_scales.get("termination", 0.0)
+            if self.platform_scales:
+                rate = torch.where(self.high_platform_mask, self.platform_scales.get("termination", 0.0), rate)
+            reward = self._reward_termination() * rate
             self.rew_buf += reward
             self.episode_sums["termination"] += reward
 
@@ -129,6 +220,10 @@ class NezhaRobot(LeggedRobot):
         ):
             self.update_command_curriculum(env_ids)
 
+        if getattr(self, "platform_tiles", None) is not None:
+            self.high_platform_mask[env_ids] = self.platform_tiles[
+                self.terrain_levels[env_ids], self.terrain_types[env_ids]
+            ]
         self._randomize_dof_props(env_ids)
         self._refresh_actor_dof_props(env_ids)
         self._reset_dofs(env_ids)
@@ -218,6 +313,9 @@ class NezhaRobot(LeggedRobot):
             (len(env_ids), 1),
             device=self.device,
         )
+        if self.block_tiles is not None:
+            on_block = self.block_tiles[self.terrain_levels[env_ids], self.terrain_types[env_ids]]
+            initial_yaws.masked_fill_(on_block[:, None], 0.0)  # approach the near face along +X
         yaw_axis = torch.tensor([0.0, 0.0, 1.0], device=self.device)
         self.root_states[env_ids, 3:7] = quat_from_angle_axis(
             initial_yaws, yaw_axis
@@ -293,6 +391,12 @@ class NezhaRobot(LeggedRobot):
         ]
 
     def update_command_curriculum(self, env_ids):
+        if getattr(self, "high_platform_mask", None) is not None:
+            # The completed episode's mask is still current here. Only
+            # ordinary episodes track both XY and yaw for the global gates.
+            env_ids = env_ids[~self.high_platform_mask[env_ids]]
+            if len(env_ids) == 0:
+                return
         if self.wf_curriculum is not None:
             if self.wf_curriculum.uses_reward_command_curriculum:
                 self.wf_curriculum.update_reward_command_ranges(env_ids)
@@ -527,6 +631,17 @@ class NezhaRobot(LeggedRobot):
         if self.cfg.domain_rand.randomize_motor_strength:
             torques *= self.motor_strength_factors
         return torch.clip(torques, -self.torque_limits, self.torque_limits)
+
+    def _reward_ang_vel_xz(self):
+        return self.base_ang_vel[:, 0].square() + self.base_ang_vel[:, 2].square()
+
+    def _reward_collision(self):
+        contacts = super()._reward_collision()
+        if self.platform_scales:
+            # G7 penalizes hip/thigh/calf. M20 additionally counts base contact.
+            trunk_contact = self.contact_forces[:, self.trunk_body_index].norm(dim=1) > 0.1
+            contacts = contacts + (self.high_platform_mask & trunk_contact)
+        return contacts
 
     def _reward_dof_vel(self):
         # Penalize leg rates without corrupting measured wheel velocities.

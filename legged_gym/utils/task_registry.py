@@ -37,7 +37,8 @@ from rsl_rl.utils.cts_checkpoint import DIMENSION_KEYS, load_cts_checkpoint, val
 from rsl_rl.utils.cts_initialization import RESIDUAL_POLICY_KEYS, validate_initialization_source
 
 from legged_gym import LEGGED_GYM_ROOT_DIR
-from experiments.registry import RESIDUAL_EXPERIMENT_KEYS, clone_config
+from legged_gym.terrains.wf import PLATFORM_TYPES
+from experiments.registry import PLATFORM_EXPERIMENT, RESIDUAL_EXPERIMENT_KEYS, clone_config, get_experiment
 from .helpers import (
     get_args, update_cfg_from_args, class_to_dict, update_class_from_dict,
     get_load_path, set_seed, parse_sim_params,
@@ -135,6 +136,47 @@ class TaskRegistry:
             raise FileNotFoundError("Initialization checkpoint does not exist: " + path)
         return path
 
+    @staticmethod
+    def restore_environment_config(env_cfg, saved, warm_start=False):
+        """Load the saved WF map for replay or use the new map on a legacy warm start."""
+        saved_terrain = saved.get("terrain", {})
+        target = getattr(env_cfg, "terrain", None)
+        legacy_wf = (saved_terrain.get("generator_profile") == "legbot_wf"
+                     and getattr(target, "generator_profile", None) == "legbot_wf"
+                     and "num_rows" in saved_terrain and "difficulty_reference_rows" not in saved_terrain)
+        if legacy_wf:
+            saved_terrain = saved_terrain.copy()
+            if warm_start:
+                # New runs use the target curriculum; other source settings
+                # (including tuned commands and rewards) still transfer.
+                for key in ("num_rows", "wf_sub_terrains", "terrain_proportions"):
+                    saved_terrain.pop(key, None)
+                target_ranges = env_cfg.commands.wf_settings["terrain_max_command_ranges"]
+            else:
+                saved_terrain["difficulty_reference_rows"] = saved_terrain["num_rows"]
+            saved = dict(saved, terrain=saved_terrain)
+        elif warm_start and saved_terrain.get("generator_profile") == "legbot_wf":
+            # The first 20-row maps still used the original 10 cm stair grid.
+            # Transfer any tuned heights while adopting the target tread geometry.
+            specs = saved_terrain.get("wf_sub_terrains", {}).copy()
+            target_specs = getattr(target, "wf_sub_terrains", {})
+            for kind in ("stairs_up", "stairs_down"):
+                if (kind in specs and "horizontal_scale" not in specs[kind]
+                        and "horizontal_scale" in target_specs.get(kind, {})):
+                    specs[kind] = dict(specs[kind], step_width=target_specs[kind]["step_width"],
+                                       horizontal_scale=target_specs[kind]["horizontal_scale"])
+            if specs:
+                saved = dict(saved, terrain=dict(saved_terrain, wf_sub_terrains=specs))
+        update_class_from_dict(env_cfg, saved)
+        if legacy_wf and warm_start:
+            settings = env_cfg.commands.wf_settings
+            ranges = settings["terrain_max_command_ranges"].copy()
+            for kind in PLATFORM_TYPES:
+                if kind not in ranges:
+                    limits = ranges["obstacles"] if "obstacles" in ranges else target_ranges[kind]
+                    ranges[kind] = copy.deepcopy(limits)
+            env_cfg.commands.wf_settings = dict(settings, terrain_max_command_ranges=ranges)
+
     def make_env(self, name, args=None, env_cfg=None):
         args = get_args() if args is None else args
         if name not in self.task_classes:
@@ -153,7 +195,10 @@ class TaskRegistry:
             else:
                 self._validate_experiment_checkpoint(train_cfg, checkpoint)
             if "environment_config" in checkpoint:
-                update_class_from_dict(env_cfg, checkpoint["environment_config"])
+                self.restore_environment_config(env_cfg, checkpoint["environment_config"], warm_start=bool(init_path))
+            if init_path and getattr(train_cfg.runner, "experiment_key", None) == PLATFORM_EXPERIMENT:
+                # A G7 checkpoint carries its old terrain mix and command ranges.
+                get_experiment(PLATFORM_EXPERIMENT).configure_environment(env_cfg)
             self._restore_asset_path(env_cfg)
             # Restore the schema before simulator buffers are allocated.
             env_cfg.env.observation_config = copy.deepcopy(checkpoint["observation_config"])
@@ -211,7 +256,7 @@ class TaskRegistry:
             # Restore the base architecture/hyperparameters in all four arms;
             # retain only the intended residual and temporal experiment factors.
             for key, value in checkpoint["policy_config"].items():
-                if key not in DIMENSION_KEYS and key not in RESIDUAL_POLICY_KEYS:
+                if key not in DIMENSION_KEYS and key not in RESIDUAL_POLICY_KEYS and key != "critic_task_count":
                     setattr(train_cfg.policy, key, copy.deepcopy(value))
             temporal_coef = getattr(train_cfg.algorithm, "temporal_loss_coef", 0.0)
             update_class_from_dict(train_cfg.algorithm, checkpoint["train_config"]["algorithm"])

@@ -14,7 +14,7 @@ import isaacgym  # noqa: F401 - Isaac Gym must be imported before torch.
 import torch
 
 from legged_gym.envs import *  # noqa: F401,F403 - registers tasks
-from legged_gym.utils import get_args, task_registry, update_class_from_dict
+from legged_gym.utils import get_args, task_registry
 from legged_gym.scripts.export_nezha_moe_cts import DEFAULT_EXPORT_PATH, resolve_checkpoint
 from rsl_rl.utils.cts_checkpoint import (
     load_cts_checkpoint, policy_from_checkpoint, validate_checkpoint_actor, validate_checkpoint_policy,
@@ -80,7 +80,7 @@ def play(args, task_name=TASK_NAME, export_path=None,
     validate_checkpoint_policy(checkpoint, expected_policy)
     validate_checkpoint_actor(checkpoint, expected_actor_type, expected_actor_expert_num)
     if checkpoint.get("environment_config"):
-        update_class_from_dict(env_cfg, checkpoint["environment_config"])
+        task_registry.restore_environment_config(env_cfg, checkpoint["environment_config"])
     env_cfg.env.observation_config = checkpoint["observation_config"]
     env_cfg.env.num_envs = args.play_num_envs
     env_cfg.env.episode_length_s = max(env_cfg.env.episode_length_s, 30)

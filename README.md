@@ -44,6 +44,32 @@ PYTHONPATH="$PWD:$PWD/rsl_rl" OMP_NUM_THREADS=1 \
 
 ## 训练
 
+### G12 高台与常规地形混合训练
+
+Nezha 的 WF 训练地图有 20 行难度、20 列地形。原随机障碍占用的第 14–17 列依次改为两列凹台、两列凸台，合计占全图的 20%。每个 9 m × 9 m 的格子中央有一个 3.2 m × 3.2 m 方台，四周留出平地。凹台的出生点在坑底中央，凸台的出生点在台前低处，初始朝向正对台面。
+
+训练从原有的第 0–9 级延伸到第 19 级。第 `r` 级的难度按 `d = (r + u) / 10` 采样，`u` 在 [0, 1) 内均匀取值。上、下楼梯的单阶踏面均为 **35 cm**，沿行进方向占 7 个 5 cm 网格，各等级的单阶高度沿用 `0.05 + 0.207d` m。凹台深度和凸台高度在 G0–G11 中均为 `0.05 + 0.225d` m，在 G12 中均为 `0.20 + 0.50d` m。实际高度按 5 mm 栅格量化。
+
+G12 沿用 G7 的学生和 Actor。凹台和凸台共同使用高台奖励与 0.5–1.0 m/s 的前进命令。平地、楼梯及其余地形使用 G7 的奖励与命令采样。
+
+高台奖励配置在 [platform_rewards.py](legged_gym/terrains/platform_rewards.py)。平面线速度跟踪权重为 3，核分母为 0.25。高台惩罚机身系垂向速度平方和滚转、偏航角速度平方，允许机身俯仰。关节姿态、力矩平方、关节速度和加速度、碰撞、动作差分、软位置限位及失败终止使用 Dreamwaq M20 的权重。高台按 M20 先将普通项加总并截负为零，再加终止项。训练时按所分配的地形选择奖励和 Critic 价值输出，导出学生策略使用与 G7 相同的本体观测。
+
+从零训练：
+
+```bash
+.venv/bin/python experiments/g12_high_platform/train.py --from_scratch --num_envs 4096 --max_iterations 20000 --seed 10
+```
+
+从已有 G7 训练检查点微调，把路径换成实际的模型文件。两个价值输出均从 G7 的价值估计初始化。
+
+```bash
+.venv/bin/python experiments/g12_high_platform/train.py --init_from /path/to/g7/model_20000.pt --num_envs 4096 --max_iterations 5000 --seed 10
+```
+
+G12 的日志与检查点写入 `logs/nezha_moe_cts/g12_high_platform/`。从旧 G7 检查点用 `--init_from` 会启用新版 20 级地图。用 `--resume` 续训会恢复检查点保存的地图，包括旧版 10 级课程。TensorBoard 的 `Train/ordinary_reward` 和 `Train/high_platform_reward` 分别记录各自最近 100 个完整回合的平均累计奖励。机器人接近所属训练地形边界时按截断处理，以免驶入相邻地形后继续沿用前一地形的奖励。
+
+### G0–G11 对照实验
+
 基于 g7 的动作残差与时间平滑对照已增加为 g8–g11。四组配置、共同检查点初始化、训练/评估命令及结果判定见 [残差实验说明](experiments/RESIDUAL_EXPERIMENTS.md)。首轮使用 `--init_from` 从同一个 g7 checkpoint 公平微调。
 
 ```bash

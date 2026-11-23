@@ -15,6 +15,7 @@ class RolloutStorageCTS:
         def __init__(self):
             self.observations = None
             self.critic_observations = None
+            self.platform_mask = None
             self.actions = None
             self.rewards = None
             self.dones = None
@@ -28,7 +29,7 @@ class RolloutStorageCTS:
 
     def __init__(self, num_envs, teacher_num_envs, num_transitions_per_env,
                  obs_shape, critic_obs_shape, actions_shape, device="cpu",
-                 collect_temporal_pairs=False):
+                 collect_temporal_pairs=False, store_platform_mask=False):
         if not 0 < teacher_num_envs < num_envs:
             raise ValueError("CTS storage requires both teacher and student environments")
         if num_transitions_per_env < 1:
@@ -47,6 +48,7 @@ class RolloutStorageCTS:
         self.rewards = torch.zeros(*shape, 1, device=device)
         self.dones = torch.zeros(*shape, 1, device=device, dtype=torch.bool)
         self.values = torch.zeros_like(self.rewards)
+        self.platform_mask = torch.zeros(*shape, dtype=torch.bool, device=device) if store_platform_mask else None
         self.returns = torch.zeros_like(self.rewards)
         self.advantages = torch.zeros_like(self.rewards)
         self.actions_log_prob = torch.zeros_like(self.rewards)
@@ -74,6 +76,8 @@ class RolloutStorageCTS:
         )
         for target, source in pairs:
             target[self.step].copy_(source.detach())
+        if self.platform_mask is not None:
+            self.platform_mask[self.step].copy_(transition.platform_mask)
         self.step += 1
 
     add_transition = add_transitions
@@ -162,6 +166,8 @@ class RolloutStorageCTS:
             "actions_log_prob": self.actions_log_prob,
             "mu": self.mu, "sigma": self.sigma,
         }
+        if self.platform_mask is not None:
+            fields["platform_mask"] = self.platform_mask
         for _ in range(num_epochs):
             teachers = self._permuted_slices(teacher_count, num_mini_batches)
             students = self._permuted_slices(student_count, num_mini_batches)

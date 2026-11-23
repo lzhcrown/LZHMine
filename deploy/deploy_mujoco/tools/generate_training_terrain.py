@@ -6,6 +6,7 @@ Run it with LZHMine's training virtual environment whenever the training
 terrain configuration changes.
 """
 
+import copy
 import hashlib
 import json
 from pathlib import Path
@@ -70,29 +71,36 @@ def main():
     # task_registry.set_seed() runs before Terrain during training. Terrain
     # generation consumes NumPy's legacy global RNG, so reproduce that state.
     np.random.seed(NezhaMoECTSCfgPPO.seed)
-    terrain = Terrain(terrain_cfg, env_cfg.env.num_envs)
-    heights_m = terrain.height_field_raw.astype(np.float64) * terrain_cfg.vertical_scale
-    minimum = float(heights_m.min())
-    maximum = float(heights_m.max())
-    if maximum <= minimum:
+    # Export the finest physical grid, including the half-grid stair edges.
+    # The default Gym trimesh stores a separate coarser height observation grid.
+    export_cfg = copy.deepcopy(terrain_cfg)
+    export_cfg.mesh_type = "heightfield"
+    terrain = Terrain(export_cfg, env_cfg.env.num_envs)
+    sample_spacing = terrain.cfg.horizontal_scale
+    raw = terrain.height_field_raw
+    low, high = int(raw.min()), int(raw.max())
+    if high <= low:
         raise ValueError("Training terrain heightfield has no height range")
+    minimum, maximum = low * terrain_cfg.vertical_scale, high * terrain_cfg.vertical_scale
 
     # MuJoCo heightfield samples are normalized to [0, 1]. Use the training
     # extrema as the normalization extrema; the MJCF maps them back to metres.
-    normalized = (heights_m - minimum) / (maximum - minimum)
     # Training stores height_field_raw[x, y], while MuJoCo's row-major matrix
     # is hfield_data[y, x]. A float32 binary asset avoids PNG's 8-bit elevation
     # quantization, preserving every 0.005 m training height sample.
-    binary_data = np.ascontiguousarray(normalized.T, dtype=np.float32)
+    binary_data = np.ascontiguousarray(raw.T, dtype=np.float32)
+    binary_data -= low
+    binary_data /= high - low
     # Keep a conventional preview image for inspection only. MuJoCo flips PNG
     # rows when loading, so its display-oriented representation needs flipud.
-    pixels = np.rint(np.flipud(normalized.T) * 255.0).astype(np.uint8)
+    pixels = np.rint(np.flipud(binary_data) * 255.0).astype(np.uint8)
     ASSET_DIR.mkdir(parents=True, exist_ok=True)
     Image.fromarray(pixels, mode="L").save(IMAGE_PATH)
-    binary_header = np.asarray(binary_data.shape, dtype=np.int32).tobytes()
-    BINARY_PATH.write_bytes(binary_header + binary_data.tobytes())
+    with BINARY_PATH.open("wb") as stream:
+        np.asarray(binary_data.shape, dtype=np.int32).tofile(stream)
+        binary_data.tofile(stream)
 
-    raw_digest = hashlib.sha256(terrain.height_field_raw.tobytes()).hexdigest()
+    raw_digest = hashlib.sha256(raw).hexdigest()
     metadata = {
         "generator": "legged_gym.utils.terrain.Terrain",
         "profile": terrain_cfg.generator_profile,
@@ -103,13 +111,14 @@ def main():
         "num_cols": terrain_cfg.num_cols,
         "terrain_length_m": terrain_cfg.terrain_length,
         "terrain_width_m": terrain_cfg.terrain_width,
-        "horizontal_scale_m": terrain_cfg.horizontal_scale,
+        "horizontal_scale_m": sample_spacing,
         "vertical_scale_m": terrain_cfg.vertical_scale,
         "border_size_m": terrain_cfg.border_size,
         "terrain_proportions": terrain_cfg.terrain_proportions,
         "max_init_terrain_level": terrain_cfg.max_init_terrain_level,
         "column_types": _column_labels(terrain_cfg),
         "difficulty_range": getattr(terrain_cfg, "difficulty_range", [0.0, 1.0]),
+        "difficulty_reference_rows": getattr(terrain_cfg, "difficulty_reference_rows", terrain_cfg.num_rows),
         "tile_difficulties": terrain.difficulties.tolist() if hasattr(terrain, "difficulties") else None,
         "sub_terrain_border_width_m": getattr(terrain_cfg, "sub_terrain_border_width", 0.0),
         "env_origins": terrain.env_origins.tolist(),
@@ -121,7 +130,7 @@ def main():
         "encoding_min_m": minimum,
         "encoding_max_m": maximum,
         "height_field_sha256": raw_digest,
-        "binary_data_sha256": hashlib.sha256(binary_data.tobytes()).hexdigest(),
+        "binary_data_sha256": hashlib.sha256(binary_data).hexdigest(),
     }
     METADATA_PATH.write_text(
         json.dumps(metadata, indent=2, ensure_ascii=False) + "\n",
@@ -131,8 +140,8 @@ def main():
     # and elevation range instead of retaining the old 10x10 m Gym map values.
     scene = ET.parse(SCENE_PATH)
     scene.getroot().set("model", "nezha WF-CTS-MOE full-training-curriculum sim-to-sim")
-    span_x = (terrain.tot_rows - 1) * terrain_cfg.horizontal_scale
-    span_y = (terrain.tot_cols - 1) * terrain_cfg.horizontal_scale
+    span_x = (terrain.tot_rows - 1) * sample_spacing
+    span_y = (terrain.tot_cols - 1) * sample_spacing
     scene.find("./asset/hfield").set("size", "{} {} {} 0.1".format(span_x / 2, span_y / 2, maximum - minimum))
     scene.find("./worldbody/geom[@name='training_terrain']").set(
         "pos", "{} {} {}".format(span_x / 2 - terrain_cfg.border_size,

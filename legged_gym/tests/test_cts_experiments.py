@@ -163,8 +163,18 @@ def test_real_task_registration_preserves_environment_and_training_isolation(
     package = sys.modules["legged_gym.envs"]
     exec(compile(init_path.read_text(), str(init_path), "exec"), package.__dict__)
     tasks = {get_experiment(key).TASK_NAME for key in EXPERIMENT_KEYS}
-    assert len(tasks) == 12
+    assert len(tasks) == len(EXPERIMENT_KEYS)
     assert tasks <= set(cpu_task_registry.task_classes)
+    platform_env, platform_train = cpu_task_registry.get_cfgs(get_experiment("g12_high_platform").TASK_NAME)
+    general_env, _ = cpu_task_registry.get_cfgs(get_experiment("g7_all_moe").TASK_NAME)
+    for kind in ("platform_pit", "platform_block"):
+        assert platform_env.terrain.wf_sub_terrains[kind]["platform_height_range"] == [.20, .70]
+        assert general_env.terrain.wf_sub_terrains[kind]["platform_height_range"] == [.05, .275]
+    assert platform_env.terrain.num_rows == general_env.terrain.num_rows == 20
+    assert platform_env.rewards.platform_scales["ang_vel_xz"] == -0.05
+    assert platform_train.policy.critic_task_count == 2
+    assert "high_platform" not in general_env.terrain.wf_sub_terrains
+    assert not getattr(general_env.rewards, "platform_scales", None)
     unchanged = []
     for key in GROUPS:
         env, train = cpu_task_registry.get_cfgs(get_experiment(key).TASK_NAME)

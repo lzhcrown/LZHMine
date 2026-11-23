@@ -6,7 +6,7 @@ from types import SimpleNamespace as NS
 import pytest
 import torch
 
-from experiments.registry import (EXPERIMENT_KEYS, LEGACY_EXPERIMENT_KEYS, RESIDUAL_EXPERIMENT_KEYS,
+from experiments.registry import (LEGACY_EXPERIMENT_KEYS, RESIDUAL_EXPERIMENT_KEYS,
                                   configure_experiment, get_experiment)
 from legged_gym.evaluation.config import parse_args, protocol_dict, selected_groups
 from legged_gym.evaluation.experts import (act_with_expert_weights, apply_residual_scale,
@@ -24,7 +24,7 @@ def read(path):
 
 
 def test_four_new_arms_change_only_residual_temporal_and_metadata():
-    assert len(EXPERIMENT_KEYS) == 12
+    assert len(RESIDUAL_EXPERIMENT_KEYS) == 4
     assert selected_groups('all') == LEGACY_EXPERIMENT_KEYS
     assert selected_groups('residual') == RESIDUAL_EXPERIMENT_KEYS
     base = NS(policy=NS(actor_type='moe'), algorithm=NS(learning_rate=.001), runner=NS())

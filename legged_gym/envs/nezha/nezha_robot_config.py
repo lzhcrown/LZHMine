@@ -24,7 +24,8 @@ class NezhaRobotCfg(LeggedRobotCfg):
         sub_terrain_border_width = 0.5
         difficulty_range = [0.0, 1.0]
         seed = None
-        num_rows = 10
+        num_rows = 20
+        difficulty_reference_rows = 10  # the original 10 levels span difficulty_range
         num_cols = 20
         max_init_terrain_level = 5
         # legbot_lab WF-CTS-MOE daff9fb: TERRAIN_CFG, not DEFAULT_TERRAIN_CFG.

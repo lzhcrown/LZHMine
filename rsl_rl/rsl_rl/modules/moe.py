@@ -164,11 +164,11 @@ class MoEActor(nn.Module):
 
 
 class MoECritic(nn.Module):
-    """Independent dense mixture of scalar value estimates."""
+    """Dense mixture of per-task value estimates with a shared router."""
 
-    def __init__(self, expert_num, input_dim, hidden_dims, activation="elu"):
+    def __init__(self, expert_num, input_dim, hidden_dims, activation="elu", task_count=1):
         super().__init__()
-        self.moe = MoE(expert_num, input_dim, hidden_dims, 1, activation)
+        self.moe = MoE(expert_num, input_dim, hidden_dims, task_count, activation)
 
     def forward(self, inputs: torch.Tensor) -> torch.Tensor:
         value, _ = self.moe(inputs)

@@ -133,6 +133,11 @@ class MoECTSOnPolicyRunner:
             if wandb_run is not None:
                 wandb_run.finish()
 
+    def _platform_mask(self):
+        if self.policy_config["critic_task_count"] == 1:
+            return None
+        return self.env.high_platform_mask.to(self.device)
+
     def _learn(self, count, init_at_random_ep_len):
         if init_at_random_ep_len:
             self.env.episode_length_buf = torch.randint_like(
@@ -145,16 +150,28 @@ class MoECTSOnPolicyRunner:
         lengths_by_env = torch.zeros(self.env.num_envs, device=self.device)
         is_teacher = torch.zeros(self.env.num_envs, device=self.device, dtype=torch.bool)
         is_teacher[self.alg.teacher_env_idxs] = True
-        buffers = {name: deque(maxlen=100) for name in (
-            "teacher_reward", "student_reward", "teacher_length", "student_length",
-        )}
+        role_groups = (("teacher", is_teacher), ("student", ~is_teacher))
+        group_names = ["teacher", "student"]
+        if self.policy_config["critic_task_count"] == 2:
+            group_names.extend(("ordinary", "high_platform"))
+            # Training can start with a randomized episode clock or mid-episode.
+            # Include task totals only when we observed that episode from reset.
+            full_episode = (self.env.episode_length_buf == 0).to(self.device)
+        buffers = {name + "_" + metric: deque(maxlen=100)
+                   for name in group_names for metric in ("reward", "length")}
         final_iteration = self.current_learning_iteration + count
         for iteration in range(self.current_learning_iteration, final_iteration):
             start = time.perf_counter()
             episodes = []
             with torch.inference_mode():
                 for _ in range(self.num_steps_per_env):
-                    actions = self.alg.act(obs, critic_obs)
+                    platform = self._platform_mask()
+                    done_groups = role_groups
+                    if platform is not None:
+                        # Snapshot labels before step() can assign a new terrain.
+                        done_groups += (("ordinary", full_episode & ~platform),
+                                        ("high_platform", full_episode & platform))
+                    actions = self.alg.act(obs, critic_obs, platform)
                     result = self.env.step(actions)
                     obs, critic_obs, rewards, dones, infos = result[:5]
                     obs = obs.to(self.device)
@@ -168,15 +185,17 @@ class MoECTSOnPolicyRunner:
                     rewards_by_env += rewards
                     lengths_by_env += 1
                     done_mask = dones.bool().reshape(-1)
-                    for name, group in (("teacher", is_teacher), ("student", ~is_teacher)):
+                    for name, group in done_groups:
                         selected = done_mask & group
                         buffers[name + "_reward"].extend(rewards_by_env[selected].cpu().tolist())
                         buffers[name + "_length"].extend(lengths_by_env[selected].cpu().tolist())
+                    if platform is not None:
+                        full_episode |= done_mask
                     rewards_by_env[done_mask] = 0
                     lengths_by_env[done_mask] = 0
                     if "episode" in infos:
                         episodes.append(infos["episode"])
-                self.alg.compute_returns(obs, critic_obs)
+                self.alg.compute_returns(obs, critic_obs, self._platform_mask())
             collected = time.perf_counter() - start
             start = time.perf_counter()
             losses = self.alg.update()
@@ -331,8 +350,8 @@ class MoECTSOnPolicyRunner:
     def initialize_from(self, path):
         """Start a controlled fine-tuning run with fresh optimizers in every arm.
 
-        Common weights, training clock and command ranges are inherited. Only
-        the optional, zero-output residual may be absent in the source weights.
+        Common weights, training clock and command ranges are inherited. A new
+        platform value head starts from the corresponding ordinary value head.
         """
         if (self.current_learning_iteration != 0 or self.alg.storage.step != 0
                 or self.alg.optimizer.state or self.alg.optimizer_stu_enc.state):
@@ -346,7 +365,13 @@ class MoECTSOnPolicyRunner:
         if checkpoint["train_config"]["runner"]["num_steps_per_env"] != self.num_steps_per_env:
             raise ValueError("Initialization must preserve the rollout length")
         current = self.alg.actor_critic.state_dict()
-        source = checkpoint["model_state_dict"]
+        source = checkpoint["model_state_dict"].copy()
+        if checkpoint["policy_config"]["critic_task_count"] < self.policy_config["critic_task_count"]:
+            # Grouped Conv1d outputs are laid out [expert, task]. Duplicate
+            # each expert's G7 scalar, keeping both initial values identical.
+            for name in ("weight", "bias"):
+                key = "critic.moe.experts.experts." + name
+                source[key] = source[key].repeat_interleave(2, dim=0)
         unexpected = set(source) - set(current)
         missing = set(current) - set(source)
         allowed = {key for key in current if key.startswith("actor.residual.")

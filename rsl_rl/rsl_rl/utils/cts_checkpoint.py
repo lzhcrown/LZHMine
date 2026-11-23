@@ -15,6 +15,7 @@ DIMENSION_KEYS = (
 STRUCTURE_KEYS = (
     "student_encoder_type", "expert_num", "actor_type", "actor_expert_num",
     "critic_type", "critic_expert_num",
+    "critic_task_count",
     "residual_enabled", "residual_hidden_dims", "residual_action_scales",
 )
 
@@ -22,6 +23,9 @@ STRUCTURE_KEYS = (
 def normalize_policy_config(policy_config):
     """Make all CTS module types explicit, preserving legacy checkpoint defaults."""
     policy = copy.deepcopy(policy_config)
+    task_count = policy.setdefault("critic_task_count", 1)
+    if type(task_count) is not int or task_count not in (1, 2):
+        raise ValueError("critic_task_count must be 1 or 2")
     for type_key, count_key, legacy_type in (
         ("student_encoder_type", "expert_num", "moe"),
         ("actor_type", "actor_expert_num", "mlp"),

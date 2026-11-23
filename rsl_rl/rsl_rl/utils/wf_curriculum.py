@@ -53,7 +53,7 @@ def default_wf_command_config():
             "ang_vel_yaw": [-1.5, 1.5],
         }
     for kind in (
-        "stairs_up", "stairs_down", "obstacles", "stepping_stones", "gap",
+        "stairs_up", "stairs_down", "platform_pit", "platform_block", "obstacles", "stepping_stones", "gap",
         "pyramid_stairs", "pyramid_stairs_inv", "boxes",
     ):
         terrain_limits[kind] = {
@@ -169,8 +169,12 @@ class WFCurriculum:
         if env.cfg.commands.curriculum:
             if env.cfg.terrain.mesh_type in ("trimesh", "heightfield"):
                 column_types = env.terrain.column_types
+                terrain_limits = self.cfg["terrain_max_command_ranges"]
                 for column, kind in enumerate(column_types):
-                    if kind not in self.cfg["terrain_max_command_ranges"]:
+                    # Both physical shapes use G12's single climbing command profile.
+                    if kind in ("platform_pit", "platform_block") and "high_platform" in terrain_limits:
+                        kind = "high_platform"
+                    if kind not in terrain_limits:
                         raise ValueError(f"Missing WF command limits for terrain {kind!r}")
                     ids = (env.terrain_types == column).nonzero(as_tuple=False).flatten()
                     self._set_terrain_ranges(ids, kind)
@@ -253,6 +257,17 @@ class WFCurriculum:
             return
         env = self.env
         self.update_command_ranges()
+        if env.cfg.commands.curriculum and "high_platform" in self.cfg["terrain_max_command_ranges"]:
+            on_platform = env.high_platform_mask[env_ids]
+            platform_ids = env_ids[on_platform]
+            low, high = self.cfg["terrain_max_command_ranges"]["high_platform"]["lin_vel_x"]
+            env.commands[platform_ids, 0] = torch.empty(len(platform_ids), device=env.device).uniform_(low, high)
+            env.commands[platform_ids, 1:3] = 0.0
+            self.commands_xy_accumulation[platform_ids] += env.commands[platform_ids, :2]
+            self.time_left[platform_ids] = self.resampling_time
+            env_ids = env_ids[~on_platform]
+            if len(env_ids) == 0:
+                return
         previous = env.commands[env_ids, :3].clone()
         remaining_dist = torch.clamp(
             0.625 * self.terrain_length

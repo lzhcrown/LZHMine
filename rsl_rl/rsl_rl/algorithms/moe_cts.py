@@ -78,6 +78,7 @@ class MoECTS:
             num_envs, self.teacher_num_envs, num_transitions_per_env,
             actor_obs_shape, critic_obs_shape, action_shape, self.device,
             collect_temporal_pairs=self.temporal_loss_coef > 0,
+            store_platform_mask=self.actor_critic.critic_task_count == 2,
         )
 
     def train_mode(self):
@@ -87,15 +88,16 @@ class MoECTS:
         self.actor_critic.eval()
 
     @torch.no_grad()
-    def act(self, obs, critic_obs):
+    def act(self, obs, critic_obs, platform_mask=None):
         if self.transition.actions is not None:
             raise RuntimeError("Process the preceding environment step before requesting another action")
         results = []
         for indices, is_teacher in ((self.teacher_env_idxs, True), (self.student_env_idxs, False)):
             history, privileged = obs[indices], critic_obs[indices]
             actions = self.actor_critic.act(history, privileged, is_teacher=is_teacher)
+            labels = platform_mask[indices] if platform_mask is not None else None
             results.append((
-                actions, self.actor_critic.evaluate(history, privileged, is_teacher=is_teacher),
+                actions, self.actor_critic.evaluate(history, privileged, is_teacher, labels),
                 self.actor_critic.get_actions_log_prob(actions),
                 self.actor_critic.action_mean, self.actor_critic.action_std,
             ))
@@ -105,6 +107,8 @@ class MoECTS:
         # Indexing makes snapshots before an environment can mutate its buffers.
         self.transition.observations = obs[self.env_order]
         self.transition.critic_observations = critic_obs[self.env_order]
+        if platform_mask is not None:
+            self.transition.platform_mask = platform_mask[self.env_order]
         actions = torch.empty_like(self.transition.actions)
         actions[self.env_order] = self.transition.actions
         return actions
@@ -125,9 +129,10 @@ class MoECTS:
         self.actor_critic.reset(dones)
 
     @torch.no_grad()
-    def compute_returns(self, obs, critic_obs):
+    def compute_returns(self, obs, critic_obs, platform_mask=None):
         last_values = torch.cat([
-            self.actor_critic.evaluate(obs[indices], critic_obs[indices], is_teacher=is_teacher)
+            self.actor_critic.evaluate(obs[indices], critic_obs[indices], is_teacher,
+                                       platform_mask[indices] if platform_mask is not None else None)
             for indices, is_teacher in ((self.teacher_env_idxs, True), (self.student_env_idxs, False))
         ], dim=0)
         self.storage.compute_returns(last_values, self.gamma, self.lam,
@@ -139,10 +144,11 @@ class MoECTS:
         for selection, is_teacher in ((slice(None, split), True), (slice(split, None), False)):
             obs = batch["observations"][selection]
             privileged = batch["critic_observations"][selection]
+            labels = batch["platform_mask"][selection] if "platform_mask" in batch else None
             self.actor_critic.act(obs, privileged, is_teacher=is_teacher)
             results.append((
                 self.actor_critic.get_actions_log_prob(batch["actions"][selection]),
-                self.actor_critic.evaluate(obs, privileged, is_teacher=is_teacher),
+                self.actor_critic.evaluate(obs, privileged, is_teacher, labels),
                 self.actor_critic.action_mean, self.actor_critic.action_std,
                 self.actor_critic.entropy,
                 self.actor_critic.actor_gate_weights,

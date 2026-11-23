@@ -39,6 +39,12 @@ def train(args, task_name="nezha_cts_g1_student_moe"):
         runner.alg.actor_critic.actor_type, runner.alg.actor_critic.actor_expert_num,
         runner.alg.actor_critic.critic_type, runner.alg.actor_critic.critic_expert_num, runner.log_dir,
     ))
+    if getattr(env, "high_platform_mask", None) is not None:
+        mask = env.high_platform_mask
+        print("High-platform reward | Active envs={}/{} | Teacher={} | Student={}".format(
+            mask.sum().item(), env.num_envs, mask[runner.alg.teacher_env_idxs.to(mask.device)].sum().item(),
+            mask[runner.alg.student_env_idxs.to(mask.device)].sum().item(),
+        ))
     print("Action residual={} | Temporal coefficient={} | Start iteration={} | Additional iterations={}".format(
         runner.alg.actor_critic.residual_enabled, runner.alg.temporal_loss_coef,
         runner.current_learning_iteration, cfg.runner.max_iterations,

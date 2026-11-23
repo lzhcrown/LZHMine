@@ -30,4 +30,4 @@
 
 `tools/generate_terrain_course.py` 管理这些部署测试地形；运行 `.venv-mujoco/bin/python deploy/deploy_mujoco/tools/generate_terrain_course.py` 会同步生成 `course_geometry.xml`、高度场二进制和元数据。楼梯使用实体 box，坡道使用平整的凸楔形 mesh，坡道提高接触参数优先级以确保实际摩擦为 0.35；仅不平路面使用高度场。真实 MuJoCo 几何、接触及切换测试可运行 `.venv-mujoco/bin/python -m unittest discover -s deploy/deploy_mujoco/tests -v`。
 
-`tools/generate_training_terrain.py` 独立从 `NezhaMoECTSCfg` 生成 WF 训练高度场、元数据，并同步可选 `scene_training.xml` 的地图尺寸和高度范围。该完整训练地图仍使用高度场，台阶边缘碰撞不等价于 Gym 中经坡面修正的三角网格。短时仿真只验证接线，运动表现需使用训练完成的模型评估。
+`tools/generate_training_terrain.py` 从 `NezhaMoECTSCfg` 生成可选的完整训练地图 `scene_training.xml`，使用 G7 共用的 WF 高度配置。地图有 20 行难度、20 列地形，其中凹台和凸台各占 2 列。上下楼梯的相邻台沿间距均为 35 cm，在导出的 5 cm 水平栅格上对应 7 格。高度场元数据记录每格的实际难度、出生位置，以及原难度区间对应的 10 行参考跨度。MuJoCo 高度场在台沿处用一个栅格连接两级踏面，Gym 训练网格会将陡边修正为竖直面。
