@@ -13,6 +13,7 @@ from isaacgym.torch_utils import (
 )
 
 from legged_gym.envs.base.legged_robot import LeggedRobot
+from legged_gym.evaluation.presets import PATCH_HIGH_PLATFORM_HEIGHTS_M
 from legged_gym.terrains.wf import PLATFORM_TYPES
 from rsl_rl.utils.wf_curriculum import WFCurriculum, configure_wf_timing, is_wf_profile
 
@@ -121,7 +122,7 @@ class NezhaRobot(LeggedRobot):
                 return
             names = np.broadcast_to(columns, (self.cfg.terrain.num_rows, len(columns)))
         self.platform_tiles = torch.as_tensor(
-            np.isin(names, (*PLATFORM_TYPES, "high_platform", "platform_45cm")), device=self.device
+            np.isin(names, (*PLATFORM_TYPES, "high_platform", *PATCH_HIGH_PLATFORM_HEIGHTS_M)), device=self.device
         )
         self.high_platform_mask.copy_(self.platform_tiles[self.terrain_levels, self.terrain_types])
 

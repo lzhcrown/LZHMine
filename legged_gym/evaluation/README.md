@@ -20,6 +20,13 @@ cd /home/crown/LZHMine
   --group g1_student_moe --checkpoint 20000 --viewer --no-record \
   --terrain-types platform_45cm --episodes-per-env 3 --speed 1.0
 
+# G12 分别观看单阶高 35 cm 的凸形楼梯和顶面 5×5 m、高 50 cm 的方台
+for terrain in stairs_convex_35cm platform_50cm; do
+  .venv/bin/python legged_gym/scripts/evaluate_nezha_moe_cts.py \
+    --group g12_high_platform --checkpoint 20000 --viewer --no-record \
+    --terrain-types "$terrain" --speed 0.8 || break
+done
+
 # 单组同时展示十种地形，每种一个机器人
 .venv/bin/python legged_gym/scripts/evaluate_nezha_moe_cts.py \
   --group g0_mlp --checkpoint 20000 --viewer --no-record --episodes-per-env 3
@@ -38,7 +45,7 @@ for terrain in flat stairs_concave_{35,25,30}cm stairs_convex_{35,25,30}cm platf
 done
 ```
 
-组名可用 `g0_mlp`、`g1_student_moe`、`g2_actor_moe`、`g3_student_actor_moe`、`g4_critic_moe`、`g5_student_critic_moe`、`g6_actor_critic_moe`、`g7_all_moe`，或 `all`。
+组名可用 `g0_mlp`、`g1_student_moe`、`g2_actor_moe`、`g3_student_actor_moe`、`g4_critic_moe`、`g5_student_critic_moe`、`g6_actor_critic_moe`、`g7_all_moe`，或 `all`。G12 单独使用 `--group g12_high_platform`。观看单个 70 cm 高台时使用 `--terrain-types platform_70cm`。
 
 ## 采集：观看确认后手动执行
 
@@ -90,7 +97,7 @@ done
 
 权重来自生成实际动作的同一次前向计算，时间戳是控制区间起点的观测时刻；每行同时记录区间起止时间、`control_step`、`trial_id`、模型与地形。首次检测到进入测试区的区间仍排除，之后包含终止控制区间。此模式不计算 Critic，也不重复输出功率、COT、速度跟踪等详细采样文件；保留所有轮次结果、索引、通过时间和成功率。采集结束自动校验概率和、地形标注、时钟、样本数和成功轮次筛选。`--expert-weights-only` 仅允许 G7，不能与 `--no-record` 同用。
 
-- 十种地形如下；`concave` 先下后上，`convex` 先上后下。
+默认的十种地形含 45 cm 高台。其余高度可通过 `--terrain-types` 显式选择。楼梯名称中的 `concave` 表示先下后上，`convex` 表示先上后下。
 
 | 地形 | `--terrain-types` 名称 |
 |---|---|
@@ -98,12 +105,14 @@ done
 | 凹形楼梯，单阶 35/25/30 cm | `stairs_concave_35cm` / `stairs_concave_25cm` / `stairs_concave_30cm` |
 | 凸形楼梯，单阶 35/25/30 cm | `stairs_convex_35cm` / `stairs_convex_25cm` / `stairs_convex_30cm` |
 | 高台，顶面 5×5 m、高 45 cm | `platform_45cm` |
+| 可选高台，高 50、55、60、65 cm | `platform_50cm` / `platform_55cm` / `platform_60cm` / `platform_65cm` |
+| 可选高台，高 70、75、80 cm | `platform_70cm` / `platform_75cm` / `platform_80cm` |
 | 粗糙地面 | `rough` |
 | 20° 斜坡，水平长 6.5 m、宽 5.6 m | `slope` |
 
 - 除 `slope` 外，测试区为 **7.8×7.8 m**，前后各 1.5 m 支撑平台。阶梯每侧 8 级、踏面 0.3 m、中央平台 3 m；35/25/30 cm 是单级高度，对应中央平台总高度或深度 2.8/2.0/2.4 m。粗糙度幅值参数 0.04 m。
 - `slope` 为 **20°、水平长 6.5 m、实际宽 5.6 m** 的斜坡，测试区边界也为 6.5×5.6 m。前后平台各 1.5×5.6 m，含平台的评估走廊总水平长度 9.5 m；高端平台按 5 mm 高度网格量化后为 2.365 m，并向走廊外延伸同高支撑。两侧不再延伸坡面，外侧为零高度地面，侧缘存在落差。坡宽对齐 2 cm 网格，中心最多偏移半个网格；机器人出生和目标位置使用实际坡面中心线。通过判据仍允许四轮清空同一侧向边界，与原协议一致。
-- 高台居中放在 7.8×7.8 m 测试区内，顶面精确为 5×5 m，四周竖直台阶高 45 cm；区内前后各留 1.4 m 平地，不添加引导坡道。通过事件仍按整个测试区的四轮穿越判据统计，未另行增加“登顶”判据。
+- 所有高度的高台均居中放在 7.8×7.8 m 测试区内，台面为 5×5 m，四周为竖直台阶。区内前后各留 1.4 m 平地。通过事件按整个测试区的四轮穿越判据统计。
 - 默认机体坐标指令 `[vx, vy, wz]=[1,0,0]`，每次尝试最多 30 仿真秒，包含接近阶段。负 `--speed` 支持保持机体 yaw=0 的倒车。
 - 关闭观测噪声、课程、推扰、关节初始随机化、动作延迟及力矩随机缩放；训练的默认随机力矩缩放仍保留。
 - 第一只轮的碰撞圆柱 XY 投影进入测试区后开始计量，首次检测到进入的那个控制区间不计入。此后一直采样到成功、跌倒或超时，保留后退、再进入及前后轴之间的间隔。

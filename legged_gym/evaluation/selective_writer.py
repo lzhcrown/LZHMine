@@ -12,7 +12,7 @@ from .metrics import (CsvEvaluationWriter, ID_FIELDS, EPISODE_FIELDS, TRIAL_INDE
 from .timing import TIMING_FIELDS
 from .experts import (GATE_CLOCK, expert_fields, weight_columns,
                       residual_fields, residual_value_fields)
-from .presets import PATCH_TERRAIN_TYPES
+from .presets import PATCH_SUPPORTED_TERRAIN_TYPES
 
 SELECTION_FIELDS = ['metrics_selected', 'success_rank', 'recorded_control_samples', 'recorded_physics_samples']
 CONTROL_CLOCK = ['control_step', 'time_start_s', 'time_end_s', 'elapsed_s', 'control_dt_s',
@@ -48,7 +48,7 @@ class SelectiveCsvEvaluationWriter(CsvEvaluationWriter):
         if self.expert_counts and (set(self.expert_counts) != {'student', 'actor'} or
                 any(not isinstance(n, int) or n < 1 for n in self.expert_counts.values()) or
                 not self.terrains or len(set(self.terrains)) != len(self.terrains) or
-                set(self.terrains) - set(PATCH_TERRAIN_TYPES)):
+                set(self.terrains) - set(PATCH_SUPPORTED_TERRAIN_TYPES)):
             raise ValueError('Expert capture requires Student/Actor counts and unique known terrains')
         super().__init__(output_dir, num_joints=num_joints, run_id=run_id)
         self.physics_values = [name for name in physics_fields(num_joints)

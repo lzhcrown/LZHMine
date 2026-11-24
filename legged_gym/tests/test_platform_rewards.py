@@ -9,6 +9,7 @@ import numpy as np
 import pytest
 import torch
 
+from legged_gym.evaluation.presets import PATCH_HIGH_PLATFORM_HEIGHTS_M
 from legged_gym.terrains.platform_rewards import platform_reward_scales
 from legged_gym.terrains.wf import PLATFORM_TYPES, column_types, high_platform_wf_sub_terrains
 
@@ -17,7 +18,8 @@ from legged_gym.terrains.wf import PLATFORM_TYPES, column_types, high_platform_w
 def robot():
     # Load the Python classes without importing their native-simulator modules.
     root = Path(__file__).parents[1] / "envs"
-    namespace = {"BaseTask": object, "torch": torch, "np": np, "PLATFORM_TYPES": PLATFORM_TYPES}
+    namespace = {"BaseTask": object, "torch": torch, "np": np, "PLATFORM_TYPES": PLATFORM_TYPES,
+                 "PATCH_HIGH_PLATFORM_HEIGHTS_M": PATCH_HIGH_PLATFORM_HEIGHTS_M}
     for path in (root / "base/legged_robot.py", root / "nezha/nezha_robot.py"):
         tree = ast.parse(path.read_text())
         tree.body = [node for node in tree.body if isinstance(node, ast.ClassDef)]
@@ -86,10 +88,13 @@ def test_configured_rewards_match_m20_and_mujica_axes():
 
 
 def test_task_mask_with_evaluation_columns_and_plane(robot):
-    robot.terrain_types = torch.tensor([0, 1, 0])
-    robot.terrain = SimpleNamespace(type_names=["stairs_convex_35cm", "platform_45cm"])
+    platforms = [f"platform_{cm}cm" for cm in range(45, 81, 5)]
+    robot.terrain = SimpleNamespace(type_names=["stairs_convex_35cm"] + platforms)
+    robot.num_envs = len(robot.terrain.type_names)
+    robot.terrain_types = torch.arange(robot.num_envs)
+    robot.terrain_levels = torch.zeros_like(robot.terrain_types)
     robot._init_platform_terrain_mask()
-    assert robot.high_platform_mask.tolist() == [False, True, False]
+    assert robot.high_platform_mask.tolist() == [False] + [True] * len(platforms)
     del robot.terrain
     robot._init_platform_terrain_mask()
     assert not robot.high_platform_mask.any()

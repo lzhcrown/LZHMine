@@ -12,10 +12,11 @@ import math
 import numpy as np
 
 from .terrain import EvaluationTerrain, _grid_cells, _number
-from .presets import (PATCH_TERRAIN_TYPES, PATCH_SIZE_M,
+from .presets import (PATCH_TERRAIN_TYPES, PATCH_SUPPORTED_TERRAIN_TYPES, PATCH_SIZE_M,
                       PATCH_PLATFORM_LENGTH_M, PATCH_CORRIDOR_WIDTH_M,
                       PATCH_STAIR_TREAD_M, PATCH_STEPS_PER_SIDE, PATCH_STAIR_PLATFORM_M,
                       PATCH_STAIR_HEIGHTS_M, PATCH_HIGH_PLATFORM_SIZE_M, PATCH_HIGH_PLATFORM_HEIGHT_M,
+                      PATCH_HIGH_PLATFORM_HEIGHTS_M,
                       PATCH_SLOPE_ANGLE_DEG, PATCH_SLOPE_LENGTH_M, PATCH_SLOPE_WIDTH_M)
 
 
@@ -39,7 +40,7 @@ class PatchEvaluationTerrain(EvaluationTerrain):
         self.type_names = tuple(getattr(cfg, "type_names", PATCH_TERRAIN_TYPES))
         if not self.type_names or len(set(self.type_names)) != len(self.type_names):
             raise ValueError("type_names must be nonempty and unique")
-        if set(self.type_names) - set(PATCH_TERRAIN_TYPES):
+        if set(self.type_names) - set(PATCH_SUPPORTED_TERRAIN_TYPES):
             raise ValueError("Unsupported local patch terrain type")
         self.patch_size_m = float(getattr(cfg, "patch_size_m", getattr(cfg, "terrain_length", PATCH_SIZE_M)))
         length = float(getattr(cfg, "terrain_length", self.patch_size_m))
@@ -79,11 +80,17 @@ class PatchEvaluationTerrain(EvaluationTerrain):
             "rough_cell_size": _number(cfg, "rough_cell_size", .08, minimum=self.horizontal_scale),
             "step_heights_m": list(PATCH_STAIR_HEIGHTS_M),
             "high_platform_size_m": PATCH_HIGH_PLATFORM_SIZE_M,
-            "high_platform_height_m": PATCH_HIGH_PLATFORM_HEIGHT_M,
             "step_width": _number(cfg, "step_width", PATCH_STAIR_TREAD_M, minimum=self.horizontal_scale),
             "steps_per_side": PATCH_STEPS_PER_SIDE,
             "central_platform_size_m": PATCH_STAIR_PLATFORM_M,
         }
+        platform_heights = {name: PATCH_HIGH_PLATFORM_HEIGHTS_M[name] for name in self.type_names
+                            if name in PATCH_HIGH_PLATFORM_HEIGHTS_M}
+        if len(platform_heights) > 1:
+            self.parameters["high_platform_heights_m"] = platform_heights
+        else:
+            self.parameters["high_platform_height_m"] = next(
+                iter(platform_heights.values()), PATCH_HIGH_PLATFORM_HEIGHT_M)
         if self.parameters["slope_angle_deg"] >= 90:
             raise ValueError("slope_angle_deg must be <90")
         if self.parameters["slope_length_m"] > self.patch_size_m:
@@ -106,8 +113,8 @@ class PatchEvaluationTerrain(EvaluationTerrain):
         for name in self.type_names:
             if name.startswith("stairs_"):
                 _grid_cells(int(name.rsplit('_', 1)[1][:-2]) / 100., self.vertical_scale, "stair height")
-            elif name == "platform_45cm":
-                _grid_cells(PATCH_HIGH_PLATFORM_HEIGHT_M, self.vertical_scale, "platform height")
+            elif name in PATCH_HIGH_PLATFORM_HEIGHTS_M:
+                _grid_cells(PATCH_HIGH_PLATFORM_HEIGHTS_M[name], self.vertical_scale, "platform height")
                 _grid_cells(PATCH_HIGH_PLATFORM_SIZE_M, self.horizontal_scale, "platform size")
                 _grid_cells((self.patch_size_m - PATCH_HIGH_PLATFORM_SIZE_M) / 2,
                             self.horizontal_scale, "platform inset")
@@ -163,8 +170,11 @@ class PatchEvaluationTerrain(EvaluationTerrain):
         self.patch_bounds = np.zeros_like(self.tile_bounds)
         details = []
         previous_right = None
+        # Preserve the recorded seed order for maps created before taller platforms were added.
+        last_seed_index = max(PATCH_SUPPORTED_TERRAIN_TYPES.index(name) for name in self.type_names)
+        seed_order = PATCH_SUPPORTED_TERRAIN_TYPES[:max(len(PATCH_TERRAIN_TYPES), last_seed_index + 1)]
         for index, name in enumerate(self.type_names):
-            rng = np.random.default_rng(np.random.SeedSequence([self.seed, PATCH_TERRAIN_TYPES.index(name)]))
+            rng = np.random.default_rng(np.random.SeedSequence([self.seed, seed_order.index(name)]))
             patch, description = self._build_patch(name, slope_length_cells if name == "slope" else patch_cells, rng)
             y_cell = index * (ny + gap_cells)
             tile = np.zeros((nx + 1, ny + 1), dtype=np.float64)
@@ -224,7 +234,7 @@ class PatchEvaluationTerrain(EvaluationTerrain):
             "corridor_lengths_m": (self.tile_bounds[:, 1] - self.tile_bounds[:, 0]).tolist(),
             "corridor_widths_m": (self.tile_bounds[:, 3] - self.tile_bounds[:, 2]).tolist(),
             "platform_length": self.platform_length, "border_size": border_size, "gap_size": gap_size,
-            "curriculum": False, "type_seed_order": list(PATCH_TERRAIN_TYPES),
+            "curriculum": False, "type_seed_order": list(seed_order),
             "parameters": dict(self.parameters), "tiles": details,
             "wheel_geometry": dict(self.wheel_geometry), "wheel_geometry_source": geometry_source,
             "wheel_geometry_fallback_fields": fallback_fields,
@@ -289,15 +299,16 @@ class PatchEvaluationTerrain(EvaluationTerrain):
                                terrace_inset_edges_m=[round(tread * i, 12) for i in range(1, step_count + 1)],
                                heightfield_transition_width_m=self.horizontal_scale,
                                centerline_height_levels_m=[sign * height * level for level in centerline_levels])
-        elif name == "platform_45cm":
+        elif name in PATCH_HIGH_PLATFORM_HEIGHTS_M:
             # The mesh converter aligns the lower endpoint with the higher
             # one, giving vertical faces at the exact 5 m square footprint.
             inset = (self.patch_size_m - PATCH_HIGH_PLATFORM_SIZE_M) / 2
             inside = (x >= inset - 1e-9) & (x <= self.patch_size_m - inset + 1e-9)
-            patch[np.ix_(inside, inside)] = PATCH_HIGH_PLATFORM_HEIGHT_M
-            description.update(profile="centered square platform with vertical 45 cm faces",
+            height = PATCH_HIGH_PLATFORM_HEIGHTS_M[name]
+            patch[np.ix_(inside, inside)] = height
+            description.update(profile="centered square platform with vertical {:g} cm faces".format(height * 100),
                                platform_size_xy_m=[PATCH_HIGH_PLATFORM_SIZE_M] * 2,
-                               platform_height_m=PATCH_HIGH_PLATFORM_HEIGHT_M,
+                               platform_height_m=height,
                                platform_bounds_local_xy=[inset, self.patch_size_m - inset] * 2,
                                approach_length_inside_roi_m=inset)
         elif name == "rough":

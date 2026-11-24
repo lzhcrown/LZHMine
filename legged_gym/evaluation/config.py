@@ -8,7 +8,7 @@ from types import SimpleNamespace
 
 from experiments.registry import (EXPERIMENT_KEYS, LEGACY_EXPERIMENT_KEYS,
                                   RESIDUAL_EXPERIMENT_KEYS, ALL_MOE_EXPERIMENT_KEYS, REPO_ROOT)
-from .presets import (PATCH_TERRAIN_TYPES, PATCH_SIZE_M, PATCH_PLATFORM_LENGTH_M,
+from .presets import (PATCH_TERRAIN_TYPES, PATCH_SUPPORTED_TERRAIN_TYPES, PATCH_SIZE_M, PATCH_PLATFORM_LENGTH_M,
                       PATCH_CORRIDOR_WIDTH_M, PATCH_SLOPE_ANGLE_DEG, PATCH_SLOPE_LENGTH_M, PATCH_SLOPE_WIDTH_M)
 
 
@@ -95,8 +95,9 @@ def parse_args(argv=None):
             parser.error('--detail-trial-indices must be unique indices in [0, episodes-per-env)')
         args.detail_trial_indices = tuple(sorted(indices))
     args.terrain_types = tuple(args.terrain_types.split(','))
-    if not args.terrain_types or set(args.terrain_types) - set(PATCH_TERRAIN_TYPES) or len(set(args.terrain_types)) != len(args.terrain_types):
-        parser.error('terrain-types must be unique names from ' + ','.join(PATCH_TERRAIN_TYPES))
+    if (len(set(args.terrain_types)) != len(args.terrain_types) or
+            not set(args.terrain_types).issubset(PATCH_SUPPORTED_TERRAIN_TYPES)):
+        parser.error('terrain-types must be unique names from ' + ','.join(PATCH_SUPPORTED_TERRAIN_TYPES))
     if not math.isfinite(args.speed) or args.speed == 0:
         parser.error('speed must be finite and nonzero')
     if not math.isfinite(args.max_seconds) or args.max_seconds <= 0:

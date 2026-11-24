@@ -75,11 +75,20 @@ def test_preview_defaults_and_rejects_output_destination():
     assert args.envs_per_terrain == 1
     assert args.episodes_per_env == args.episodes_per_terrain == 1
     assert len(args.terrain_types) == 10
+    assert 'platform_45cm' in args.terrain_types
+    assert all(f'platform_{cm}cm' not in args.terrain_types for cm in range(50, 81, 5))
     assert args.output_dir is None
     assert protocol_dict(args)['write_files'] is False
     assert protocol_dict(args)['terrain_roi_size_xy_m']['slope'] == [6.5, 5.6]
     with pytest.raises(SystemExit):
         parse_args(['--no-record', '--output-dir', '/tmp/not-a-capture'])
+
+
+def test_g12_stair_and_platform_preview_selection():
+    terrains = ['stairs_convex_35cm'] + [f'platform_{cm}cm' for cm in range(45, 81, 5)]
+    args = parse_args(['--group', 'g12_high_platform', '--terrain-types', ','.join(terrains),
+                       '--viewer', '--no-record'])
+    assert protocol_dict(args)['terrain_types'] == terrains
 
 
 def test_recording_defaults_to_exactly_500_attempts_per_terrain_and_model():

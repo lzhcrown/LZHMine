@@ -113,12 +113,18 @@ class PatchTerrainTests(unittest.TestCase):
         self.assertEqual(terrain.metadata["parameters"]["rough_cell_size"], .08)
         self.assertEqual(terrain.metadata["tiles"][8]["nominal_height_range_m"], [-.04, .04])
 
-    def test_platform_is_5m_square_45cm_high_with_exact_vertical_mesh_faces(self):
-        terrain = PatchEvaluationTerrain(config(mesh_type="trimesh", type_names=["platform_45cm"]), 1)
+    def test_platforms_have_five_metre_square_tops_and_exact_vertical_mesh_faces(self):
+        for height_cm in range(45, 81, 5):
+            name = f"platform_{height_cm}cm"
+            with self.subTest(name=name):
+                self._check_platform_mesh(name, height_cm / 100)
+
+    def _check_platform_mesh(self, name, height):
+        terrain = PatchEvaluationTerrain(config(mesh_type="trimesh", type_names=[name]), 1)
         patch = patch_grid(terrain, 0) * terrain.vertical_scale
-        np.testing.assert_allclose(np.unique(patch), [0., .45])
+        np.testing.assert_allclose(np.unique(patch), [0., height])
         np.testing.assert_allclose(patch, patch.T)
-        self.assertTrue(np.all(patch[70:321, 70:321] == .45))
+        np.testing.assert_allclose(patch[70:321, 70:321], height)
         self.assertFalse(patch[:70].any())
         self.assertFalse(patch[321:].any())
         grid = terrain.vertices.reshape(terrain.tot_rows, terrain.tot_cols, 3)
@@ -128,12 +134,14 @@ class PatchTerrainTests(unittest.TestCase):
         for line, axis, origin in ((grid[:, iy], 0, x0), (grid[ix, :], 1, y0)):
             faces = np.flatnonzero(np.abs(np.diff(line[:, 2])) > 1e-6)
             self.assertEqual(len(faces), 2)
+            np.testing.assert_allclose(np.diff(line[:, 2])[faces], [height, -height])
             np.testing.assert_allclose(line[faces, axis] - terrain.cfg.border_size,
                                        [origin + 1.4, origin + 6.4], atol=2e-6)
             np.testing.assert_allclose(line[faces, axis], line[faces + 1, axis], atol=2e-6)
             self.assertAlmostEqual(float(line[faces[1], axis] - line[faces[0], axis]), 5., places=5)
         self.assertEqual(terrain.metadata["tiles"][0]["platform_size_xy_m"], [5., 5.])
-        self.assertEqual(terrain.metadata["tiles"][0]["platform_height_m"], .45)
+        self.assertEqual(terrain.metadata["tiles"][0]["platform_height_m"], height)
+        self.assertEqual(terrain.metadata["parameters"]["high_platform_height_m"], height)
 
     def test_narrow_slope_has_equal_width_end_pads_and_zero_ground_outside(self):
         terrain = PatchEvaluationTerrain(config(type_names=["slope"]), 1)
@@ -298,7 +306,8 @@ class PatchTerrainTests(unittest.TestCase):
     def test_old_patch_types_dimensions_and_incompatible_grids_are_rejected(self):
         for changes in (dict(terrain_length=.4), dict(terrain_length=3.), dict(terrain_width=40.), dict(patch_size_m=.4),
                         dict(horizontal_scale=.03), dict(type_names=[]), dict(type_names=["stairs_up"]), dict(type_names=["stairs_convex_15cm"]), dict(type_names=["stairs_convex_20cm"]),
-                        dict(type_names=["stairs_concave_20cm"]), dict(type_names=["platform_55cm"]), dict(type_names=["platform_50cm"]),
+                        dict(type_names=["stairs_concave_20cm"]), dict(type_names=["platform_85cm"]),
+                        dict(type_names=["platform_50cm"], vertical_scale=.03),
                         dict(type_names=["discrete_obstacles"]), dict(step_width=.4), dict(step_width=.2), dict(seed=-1),
                         dict(vertical_scale=.03), dict(platform_length=.5), dict(corridor_width=4.), dict(slope_width_m=0),
                         dict(slope_width_m=1.51), dict(slope_width_m=10.), dict(slope_length_m=0),
