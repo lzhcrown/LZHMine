@@ -5,11 +5,26 @@ from copy import deepcopy
 import numpy as np
 import pytest
 
-from experiments.registry import clone_config
+from experiments.registry import PLATFORM_EXPERIMENT, PLATFORM_V1_EXPERIMENT, clone_config, get_experiment
 from legged_gym.terrains.wf import PLATFORM_TYPES, WFTerrain
 from test_cts_experiments import actual_config_module, config_dict
 from test_cts_runner import cpu_task_registry
 from test_wf_terrain import preserve_numpy_random_state
+
+
+def test_dreamwaq_progression_preserves_every_g12_terrain_height(actual_config_module):
+    def generate(key):
+        cfg = clone_config(actual_config_module.NezhaMoECTSCfg())
+        get_experiment(key).configure_environment(cfg)
+        cfg.terrain.mesh_type, cfg.terrain.seed = "heightfield", 17
+        np.random.seed(17)
+        return WFTerrain(cfg.terrain, 1, None)
+
+    original, revised = generate(PLATFORM_EXPERIMENT), generate(PLATFORM_V1_EXPERIMENT)
+    assert original.tile_types.shape == (20, 20)
+    np.testing.assert_array_equal(revised.tile_types, original.tile_types)
+    np.testing.assert_array_equal(revised.difficulties, original.difficulties)
+    np.testing.assert_array_equal(revised.height_field_raw, original.height_field_raw)
 
 
 def test_extended_map_keeps_seeded_lower_rows_and_appends_each_terrain(actual_config_module):

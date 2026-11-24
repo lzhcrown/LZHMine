@@ -6,7 +6,7 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from experiments.registry import (PLATFORM_CLIMB_EXPERIMENT, PLATFORM_EXPERIMENT, PLATFORM_EXPERIMENT_KEYS,
+from experiments.registry import (PLATFORM_EXPERIMENT, PLATFORM_EXPERIMENT_KEYS, PLATFORM_V1_EXPERIMENT,
                                   clone_config, configure_experiment, get_experiment)
 from legged_gym.terrains.platform_rewards import platform_reward_scales
 from rsl_rl.runners.on_policy_runner_cts import MoECTSOnPolicyRunner
@@ -64,8 +64,14 @@ def test_g7_warm_start_retains_target_terrain_commands_rewards_and_two_values(
     args = restore_args("init_from", path)
     env, restored = cpu_task_registry.make_env(group.TASK_NAME, args=args)
     assert restored.rewards.scales.stand_still == -3.1
-    assert restored.rewards.platform_scales == platform_reward_scales()
-    assert getattr(restored.rewards, "platform_climb", False) == (target_key == PLATFORM_CLIMB_EXPERIMENT)
+    expected_scales = platform_reward_scales()
+    if target_key == PLATFORM_V1_EXPERIMENT:
+        expected_scales.update(tracking_ang_vel=1.5, orientation=-.5, base_height=-10.)
+        assert restored.rewards.platform_base_height_target == .52
+    assert restored.rewards.platform_scales == expected_scales
+    assert restored.rewards.base_height_target == source_cfg.rewards.base_height_target
+    assert not getattr(restored.rewards, "platform_climb", False)
+    assert restored.terrain.curriculum_rule == ("dreamwaq" if target_key == PLATFORM_V1_EXPERIMENT else "wf")
     assert (restored.terrain.num_rows, restored.terrain.difficulty_reference_rows) == (20, 10)
     for kind in ("platform_pit", "platform_block"):
         spec = restored.terrain.wf_sub_terrains[kind]
@@ -87,7 +93,7 @@ def test_g7_warm_start_retains_target_terrain_commands_rewards_and_two_values(
     assert target.current_learning_iteration == source.current_learning_iteration + 1
 
 
-def test_g12_initializes_g13_with_both_value_heads_and_fresh_optimizers(tmp_path, cpu_task_registry):
+def test_g12_initializes_v1_with_both_value_heads_and_fresh_optimizers(tmp_path, cpu_task_registry):
     from test_cts_checkpoint_restoration import train_namespace
 
     source_config = all_moe_config()
@@ -99,8 +105,8 @@ def test_g12_initializes_g13_with_both_value_heads_and_fresh_optimizers(tmp_path
     source.learn(1)
     path = tmp_path / "g12.pt"
     source.save(path)
-    train_cfg = configure_experiment(train_namespace(source_config, path), PLATFORM_CLIMB_EXPERIMENT)
-    task = get_experiment(PLATFORM_CLIMB_EXPERIMENT).TASK_NAME
+    train_cfg = configure_experiment(train_namespace(source_config, path), PLATFORM_V1_EXPERIMENT)
+    task = get_experiment(PLATFORM_V1_EXPERIMENT).TASK_NAME
     cpu_task_registry.register(task, FakeVectorEnv, SimpleNamespace(), train_cfg)
     with pytest.raises(ValueError, match="Use --init_from"):
         cpu_task_registry.make_alg_runner(env, task, args=restore_args("resume", path), log_root=None)

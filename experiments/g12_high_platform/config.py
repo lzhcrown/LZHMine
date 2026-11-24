@@ -23,6 +23,11 @@ def configure_environment(cfg):
     from legged_gym.terrains.platform_rewards import platform_reward_scales
     from legged_gym.terrains.wf import high_platform_wf_sub_terrains
 
+    # A warm start restores reward settings saved by the source experiment.
+    for name in ("platform_climb", "platform_climb_settings", "platform_base_height_target"):
+        if name in vars(cfg.rewards):
+            delattr(cfg.rewards, name)
+    cfg.terrain.curriculum_rule = "wf"
     cfg.terrain.wf_sub_terrains = high_platform_wf_sub_terrains()
     cfg.terrain.terrain_proportions = [
         spec["proportion"] for spec in cfg.terrain.wf_sub_terrains.values()

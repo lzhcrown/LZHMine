@@ -38,7 +38,7 @@ from rsl_rl.utils.cts_initialization import RESIDUAL_POLICY_KEYS, validate_initi
 
 from legged_gym import LEGGED_GYM_ROOT_DIR
 from legged_gym.terrains.wf import PLATFORM_TYPES
-from experiments.registry import (PLATFORM_CLIMB_EXPERIMENT, PLATFORM_EXPERIMENT_KEYS, RESIDUAL_EXPERIMENT_KEYS,
+from experiments.registry import (PLATFORM_EXPERIMENT_KEYS, PLATFORM_V1_EXPERIMENT, RESIDUAL_EXPERIMENT_KEYS,
                                   clone_config, get_experiment)
 from .helpers import (
     get_args, update_cfg_from_args, class_to_dict, update_class_from_dict,
@@ -85,9 +85,14 @@ class TaskRegistry:
         if experiment_key:
             validate_checkpoint_policy(checkpoint, class_to_dict(train_cfg.policy))
         source_key = checkpoint.get("train_config", {}).get("runner", {}).get("experiment_key")
-        if PLATFORM_CLIMB_EXPERIMENT in (experiment_key, source_key) and experiment_key != source_key:
+        # These tasks share a policy shape with G12 but use different rewards.
+        # Older G13 checkpoints also carry their own task-specific environment.
+        distinct_platform_tasks = (PLATFORM_V1_EXPERIMENT, "g13_platform_climb")
+        if experiment_key != source_key and (
+            experiment_key in distinct_platform_tasks or source_key in distinct_platform_tasks
+        ):
             raise ValueError(
-                "Platform climb resume requires the same experiment_key: "
+                "Platform resume requires the same experiment_key: "
                 "checkpoint={!r}, target={!r}. Use --init_from to change training tasks."
                 .format(source_key, experiment_key)
             )

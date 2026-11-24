@@ -1,4 +1,4 @@
-"""Train the G13 platform climbing task."""
+"""Train the G12 v1 CTS policy."""
 
 from pathlib import Path
 import sys
@@ -6,8 +6,8 @@ import sys
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from experiments.common import train_main
-from experiments.registry import PLATFORM_CLIMB_EXPERIMENT
+from experiments.registry import PLATFORM_V1_EXPERIMENT
 
 
 if __name__ == "__main__":
-    train_main(PLATFORM_CLIMB_EXPERIMENT)
+    train_main(PLATFORM_V1_EXPERIMENT)

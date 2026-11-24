@@ -600,17 +600,21 @@ class LeggedRobot(BaseTask):
         if not self.init_done:
             # don't change on initial reset
             return
-        distance = torch.norm(self.root_states[env_ids, :2] - self.env_origins[env_ids, :2], dim=1)
-        # robots that walked far enough progress to harder terains
-        move_up = distance > self.terrain.env_length / 2
-        # robots that walked less than half of their required distance go to simpler terrains
-        move_down = (distance < torch.norm(self.commands[env_ids, :2], dim=1)*self.max_episode_length_s*0.5) * ~move_up
-        self.terrain_levels[env_ids] += 1 * move_up - 1 * move_down
+        move_up, move_down = self._terrain_move_masks(env_ids)
+        self.terrain_levels[env_ids] += move_up.long() - move_down.long()
         # Robots that solve the last level are sent to a random one
         self.terrain_levels[env_ids] = torch.where(self.terrain_levels[env_ids]>=self.max_terrain_level,
                                                    torch.randint_like(self.terrain_levels[env_ids], self.max_terrain_level),
                                                    torch.clip(self.terrain_levels[env_ids], 0)) # (the minumum level is zero)
         self.env_origins[env_ids] = self.terrain_origins[self.terrain_levels[env_ids], self.terrain_types[env_ids]]
+
+    def _terrain_move_masks(self, env_ids):
+        """Dreamwaq uses the final XY displacement and command at reset."""
+        distance = torch.norm(self.root_states[env_ids, :2] - self.env_origins[env_ids, :2], dim=1)
+        commanded_speed = torch.norm(self.commands[env_ids, :2], dim=1)
+        move_up = distance > self.terrain.env_length / 2
+        move_down = (distance < 0.5 * self.max_episode_length_s * commanded_speed) & ~move_up
+        return move_up, move_down
     
     def update_command_curriculum(self, env_ids):
         """ Implements a curriculum of increasing commands

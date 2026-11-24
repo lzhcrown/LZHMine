@@ -24,6 +24,16 @@ def platform_reward_scales():
     }
 
 
+def platform_v1_reward_scales():
+    """Dreamwaq M20 rewards with MUJICA's vertical speed and roll/yaw rate costs."""
+    return dict(
+        platform_reward_scales(),
+        tracking_ang_vel=1.5,
+        orientation=-0.5,
+        base_height=-10.0,
+    )
+
+
 def platform_climb_settings():
     """G13 event rewards are per achievement, independent of the control period."""
     return {

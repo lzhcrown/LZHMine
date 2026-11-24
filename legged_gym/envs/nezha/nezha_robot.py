@@ -161,16 +161,19 @@ class NezhaRobot(LeggedRobot):
         )
         failed = self.fail_buf > self.cfg.env.fail_to_terminal_time_s / self.dt
         if self.platform_scales and self.wf_curriculum is not None and self.cfg.terrain.curriculum:
-            # The episode label belongs to its spawn tile. Truncate before a
-            # robot starts visiting another task; a simultaneous fall is a failure.
+            # The episode label belongs to its spawn tile. Truncate at its
+            # boundary; a simultaneous fall is a failure.
             # A raised platform's spawn is on the approach, off the tile center.
             length, width = self.cfg.terrain.terrain_length, self.cfg.terrain.terrain_width
             center_x = (self.terrain_levels + 0.5) * length
             center_y = (self.terrain_types + 0.5) * width
-            reached_edge = (
-                ((self.root_states[:, 0] - center_x).abs() >= 0.5 * length - 0.2)
-                | ((self.root_states[:, 1] - center_y).abs() >= 0.5 * width - 0.2)
-            )
+            offset_x = (self.root_states[:, 0] - center_x).abs()
+            offset_y = (self.root_states[:, 1] - center_y).abs()
+            if self._uses_dreamwaq_terrain_curriculum:
+                # A centered robot going straight must get to cross the strict half-length threshold.
+                reached_edge = (offset_x > 0.5 * length) | (offset_y > 0.5 * width)
+            else:
+                reached_edge = (offset_x >= 0.5 * length - 0.2) | (offset_y >= 0.5 * width - 0.2)
             self.time_out_buf |= reached_edge
             self.time_out_buf &= ~failed
         self.reset_buf.copy_(failed | self.time_out_buf)
@@ -208,7 +211,7 @@ class NezhaRobot(LeggedRobot):
         if len(env_ids) == 0:
             return
 
-        if self.wf_curriculum is None:
+        if self.wf_curriculum is None and not self._uses_dreamwaq_terrain_curriculum:
             self._resample_commands(env_ids)
         if self.cfg.terrain.curriculum:
             self._update_terrain_curriculum(env_ids)
@@ -241,6 +244,9 @@ class NezhaRobot(LeggedRobot):
             # Isaac Lab resets CommandManager before the episode clock. The
             # first sample therefore still sees the completed episode length.
             self.wf_curriculum.reset(env_ids)
+        elif self._uses_dreamwaq_terrain_curriculum:
+            # Grade the completed episode before sampling its replacement command.
+            self._resample_commands(env_ids)
         self.episode_length_buf[env_ids] = 0
         self.reset_buf[env_ids] = 1
         self.fail_buf[env_ids] = 0
@@ -367,23 +373,16 @@ class NezhaRobot(LeggedRobot):
             torch.norm(self.commands[env_ids, :2], dim=1) > 0.2
         ).unsqueeze(1)
 
-    def _update_terrain_curriculum(self, env_ids):
-        if not self.init_done:
-            return
-        move_up, move_down = self._terrain_move_masks(env_ids)
-        self.terrain_levels[env_ids] += move_up.long() - move_down.long()
-        self.terrain_levels[env_ids] = torch.where(
-            self.terrain_levels[env_ids] >= self.max_terrain_level,
-            torch.randint_like(
-                self.terrain_levels[env_ids], self.max_terrain_level
-            ),
-            torch.clip(self.terrain_levels[env_ids], min=0),
-        )
-        self.env_origins[env_ids] = self.terrain_origins[
-            self.terrain_levels[env_ids], self.terrain_types[env_ids]
-        ]
+    @property
+    def _uses_dreamwaq_terrain_curriculum(self):
+        return getattr(self.cfg.terrain, "curriculum_rule", None) == "dreamwaq"
 
     def _terrain_move_masks(self, env_ids):
+        if self._uses_dreamwaq_terrain_curriculum:
+            move_up, move_down = super()._terrain_move_masks(env_ids)
+            # Initializing or restoring the CTS runner can reset twice before a physics step.
+            played = self.episode_length_buf[env_ids] > 0
+            return move_up & played, move_down & played
         if self.wf_curriculum is not None:
             return self.wf_curriculum.terrain_move_masks(env_ids)
         distance = torch.norm(self.root_states[env_ids, :2] - self.env_origins[env_ids, :2], dim=1)
@@ -638,6 +637,13 @@ class NezhaRobot(LeggedRobot):
 
     def _reward_ang_vel_xz(self):
         return self.base_ang_vel[:, 0].square() + self.base_ang_vel[:, 2].square()
+
+    def _reward_base_height(self):
+        target = self.cfg.rewards.base_height_target
+        platform_target = getattr(self.cfg.rewards, "platform_base_height_target", None)
+        if platform_target is not None and self.high_platform_mask is not None:
+            target = torch.where(self.high_platform_mask, platform_target, target)
+        return (self.base_height - target).square()
 
     def _reward_collision(self):
         contacts = super()._reward_collision()
