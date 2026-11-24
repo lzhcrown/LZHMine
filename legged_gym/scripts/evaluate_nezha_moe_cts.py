@@ -50,7 +50,7 @@ def evaluate_one(args, group, path, output):
     from isaacgym import gymapi
     import torch
     from legged_gym.envs import task_registry
-    from legged_gym.utils.helpers import class_to_dict, update_class_from_dict, set_seed, parse_sim_params
+    from legged_gym.utils.helpers import class_to_dict, set_seed, parse_sim_params
     from rsl_rl.utils.cts_checkpoint import load_cts_checkpoint, validate_checkpoint_policy, policy_from_checkpoint
     from legged_gym.evaluation.patch_env import PatchEvaluationEnv
     from legged_gym.evaluation.selective_writer import SelectiveCsvEvaluationWriter
@@ -63,7 +63,7 @@ def evaluate_one(args, group, path, output):
     if not checkpoint.get('environment_config'):
         raise ValueError('Evaluation requires a checkpoint containing environment_config')
     cfg, _ = task_registry.get_cfgs(experiment.TASK_NAME)
-    update_class_from_dict(cfg, checkpoint['environment_config'])
+    task_registry.restore_environment_config(cfg, checkpoint['environment_config'])
     cfg.env.observation_config = checkpoint['observation_config']
     # Snapshots from another computer may contain its absolute repository path.
     saved_asset = cfg.asset.file

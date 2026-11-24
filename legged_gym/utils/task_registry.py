@@ -38,8 +38,8 @@ from rsl_rl.utils.cts_initialization import RESIDUAL_POLICY_KEYS, validate_initi
 
 from legged_gym import LEGGED_GYM_ROOT_DIR
 from legged_gym.terrains.wf import PLATFORM_TYPES
-from experiments.registry import (PLATFORM_EXPERIMENT_KEYS, PLATFORM_V1_EXPERIMENT, RESIDUAL_EXPERIMENT_KEYS,
-                                  clone_config, get_experiment)
+from experiments.registry import (PLATFORM_EXPERIMENT_KEYS, PLATFORM_V1_EXPERIMENT, PLATFORM_V2_EXPERIMENT,
+                                  RESIDUAL_EXPERIMENT_KEYS, clone_config, get_experiment)
 from .helpers import (
     get_args, update_cfg_from_args, class_to_dict, update_class_from_dict,
     get_load_path, set_seed, parse_sim_params,
@@ -87,7 +87,7 @@ class TaskRegistry:
         source_key = checkpoint.get("train_config", {}).get("runner", {}).get("experiment_key")
         # These tasks share a policy shape with G12 but use different rewards.
         # Older G13 checkpoints also carry their own task-specific environment.
-        distinct_platform_tasks = (PLATFORM_V1_EXPERIMENT, "g13_platform_climb")
+        distinct_platform_tasks = (PLATFORM_V1_EXPERIMENT, PLATFORM_V2_EXPERIMENT, "g13_platform_climb")
         if experiment_key != source_key and (
             experiment_key in distinct_platform_tasks or source_key in distinct_platform_tasks
         ):
@@ -151,6 +151,13 @@ class TaskRegistry:
     @staticmethod
     def restore_environment_config(env_cfg, saved, warm_start=False):
         """Load the saved WF map for replay or use the new map on a legacy warm start."""
+        saved_rewards = saved.get("rewards", {})
+        if ("platform_scales" in saved_rewards and "platform_reward_profile" not in saved_rewards
+                and getattr(getattr(env_cfg, "rewards", None), "platform_reward_profile", None)):
+            # A pre-highplatform G12_v1 checkpoint carries the original M20
+            # scales. Restore its formulas and clipping along with those scales.
+            saved = dict(saved, rewards=dict(saved_rewards, platform_reward_profile=None,
+                                             platform_heading_target=None))
         saved_terrain = saved.get("terrain", {})
         target = getattr(env_cfg, "terrain", None)
         legacy_wf = (saved_terrain.get("generator_profile") == "legbot_wf"

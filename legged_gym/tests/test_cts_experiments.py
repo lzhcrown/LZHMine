@@ -168,11 +168,19 @@ def test_real_task_registration_preserves_environment_and_training_isolation(
     platform_env, platform_train = cpu_task_registry.get_cfgs(get_experiment("g12_high_platform").TASK_NAME)
     assert "nezha_cts_g13_platform_climb" not in cpu_task_registry.task_classes
     v1_env, v1_train = cpu_task_registry.get_cfgs(get_experiment("g12_v1").TASK_NAME)
+    v2_env, v2_train = cpu_task_registry.get_cfgs(get_experiment("g12_v2").TASK_NAME)
     assert all(cpu_task_registry.get_task_class(task) is FakeVectorEnv for task in tasks)
     assert not getattr(v1_env.rewards, "platform_climb", False)
     assert "base_height" not in platform_env.rewards.platform_scales
     assert v1_env.rewards.platform_scales["base_height"] == -10.
-    assert v1_train.policy.critic_task_count == platform_train.policy.critic_task_count
+    assert "highplatform_yaw" not in v1_env.rewards.platform_scales
+    assert v2_env.rewards.platform_scales["base_height"] == -5.
+    assert v2_env.rewards.platform_scales["highplatform_yaw"] == -3.5
+    assert v2_train.policy.critic_task_count == v1_train.policy.critic_task_count == platform_train.policy.critic_task_count
+    for key, config in (("g12_v1", v1_train), ("g12_v2", v2_train)):
+        assert config.runner.experiment_key == config.runner.run_name == config.runner.wandb_group == key
+        assert config.runner.experiment_name == "nezha_moe_cts/" + key
+        assert export_path(key).endswith("/nezha/policy/" + key + "/policy.pt")
     general_env, _ = cpu_task_registry.get_cfgs(get_experiment("g7_all_moe").TASK_NAME)
     for kind in ("platform_pit", "platform_block"):
         assert platform_env.terrain.wf_sub_terrains[kind]["platform_height_range"] == [.20, .70]
@@ -222,14 +230,14 @@ def training_args():
     )
 
 
-@pytest.mark.parametrize("key", GROUPS)
+@pytest.mark.parametrize("key", [*GROUPS, "g12_v1", "g12_v2"])
 def test_latest_resolution_stays_inside_selected_experiment(
         tmp_path, monkeypatch, cpu_task_registry, key):
     registry_module = sys.modules[type(cpu_task_registry).__module__]
     monkeypatch.setattr(registry_module, "LEGGED_GYM_ROOT_DIR", str(tmp_path))
     monkeypatch.setattr(export_script, "REPO_ROOT", str(tmp_path))
     expected = {}
-    for i, candidate_key in enumerate(GROUPS):
+    for i, candidate_key in enumerate([*GROUPS, "g12_v1", "g12_v2"]):
         root = tmp_path / "logs" / get_experiment(candidate_key).RUNNER["experiment_name"]
         older = root / "20260101_000000_run"
         newest = root / "20260201_000000_run"

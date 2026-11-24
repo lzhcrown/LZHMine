@@ -10,7 +10,9 @@ import pytest
 import torch
 
 from legged_gym.evaluation.presets import PATCH_HIGH_PLATFORM_HEIGHTS_M
-from legged_gym.terrains.platform_rewards import platform_reward_scales, platform_v1_reward_scales
+from legged_gym.terrains.platform_rewards import (
+    platform_reward_scales, platform_v1_reward_scales, platform_v2_reward_scales,
+)
 from legged_gym.terrains.wf import PLATFORM_TYPES, column_types, high_platform_wf_sub_terrains
 from test_wf_curriculum import make_env
 
@@ -19,7 +21,13 @@ from test_wf_curriculum import make_env
 def robot():
     # Load the Python classes without importing their native-simulator modules.
     root = Path(__file__).parents[1] / "envs"
+    def rotate_vector(quaternion, vector):
+        xyz = quaternion[:, :3]
+        cross = 2. * torch.cross(xyz, vector, dim=-1)
+        return vector + quaternion[:, 3:] * cross + torch.cross(xyz, cross, dim=-1)
+
     namespace = {"BaseTask": object, "torch": torch, "np": np, "PLATFORM_TYPES": PLATFORM_TYPES,
+                 "quat_apply": rotate_vector, "wrap_to_pi": lambda a: (a + torch.pi) % (2 * torch.pi) - torch.pi,
                  "PATCH_HIGH_PLATFORM_HEIGHTS_M": PATCH_HIGH_PLATFORM_HEIGHTS_M}
     for path in (root / "base/legged_robot.py", root / "nezha/nezha_robot.py"):
         tree = ast.parse(path.read_text())
@@ -39,25 +47,41 @@ def robot():
     robot.terrain_types = torch.tensor([1, 1, 0])
     robot.terrain_levels = torch.tensor([1, 0, 1])
     robot._init_platform_terrain_mask()
+    robot.root_states = torch.zeros(3, 13)
+    robot.root_states[:, 6] = 1.
+    robot.base_quat = robot.root_states[:, 3:7]
+    robot.forward_vec = torch.tensor([[1., 0., 0.]]).repeat(3, 1)
     return robot
 
 
-@pytest.mark.parametrize("v1", [False, True], ids=["g12", "g12_v1"])
-def test_reward_dispatch_and_clipping(robot, v1):
+@pytest.mark.parametrize("scales_fn,clip_ordinary", [
+    (platform_reward_scales, False), (platform_v1_reward_scales, False),
+    (platform_v2_reward_scales, False), (platform_v2_reward_scales, True),
+])
+def test_reward_dispatch_and_clipping(robot, scales_fn, clip_ordinary):
     assert robot.high_platform_mask.tolist() == [False, True, True]
-    scales = platform_v1_reward_scales() if v1 else platform_reward_scales()
+    scales = scales_fn()
+    v2 = scales_fn is platform_v2_reward_scales
     robot.platform_scales = {k: v * robot.dt for k, v in scales.items()}
     robot.reward_scales = {"tracking_lin_vel": 3., "ang_vel_xy": -.2, "lin_vel_z": -1.,
                            "collision": -.1, "termination": -.8}
     robot.rew_buf = torch.zeros(3)
-    robot.commands = torch.zeros(3, 3)
+    robot.commands = torch.zeros(3, 4)
     robot.base_lin_vel = torch.tensor([[0., 0., 3.], [0., 0., .5], [0., 0., 4.]])
     robot.base_ang_vel = torch.tensor([[0., 5., 0.], [0., 5., .5], [0., 5., .5]])
-    robot.base_height = torch.tensor([.5, .5, .52])
+    robot.base_height = torch.tensor([.5, .5, .556 if v2 else .52])
     robot.cfg.rewards.base_height_target = .5
+    robot.cfg.rewards.only_positive_rewards = clip_ordinary
     robot.reward_scales["base_height"] = -1.
-    if v1:
+    if scales_fn is platform_v1_reward_scales:
         robot.cfg.rewards.platform_base_height_target = .52
+    if v2:
+        robot.cfg.rewards.platform_reward_profile = "dreamwaq_highplatform"
+        robot.cfg.rewards.platform_heading_target = 0.
+        robot.cfg.rewards.platform_base_height_target = .556
+        # Ordinary training has a different velocity limit and uses only leg rates.
+        robot.cfg.rewards.soft_dof_vel_limit = .9
+        robot.dof_vel_limits = torch.full((16,), 20.)
     robot.projected_gravity = torch.tensor([[0., 0., -1.], [0., .6, -.8], [0., 0., -1.]])
     robot.dof_pos = torch.zeros(3, 16)
     robot.default_dof_pos = torch.zeros(1, 16)
@@ -65,6 +89,13 @@ def test_reward_dispatch_and_clipping(robot, v1):
     robot.dof_pos_limits = torch.tensor([[-1., 1.]] * 16)
     for name in ("torques", "actions", "last_actions", "dof_vel", "last_dof_vel"):
         setattr(robot, name, torch.zeros(3, 16))
+    if v2:
+        robot.commands[:, 0] = robot.base_lin_vel[:, 0] = .5
+        robot.dof_pos[:, 1:3] = torch.tensor([.3, .4])
+        robot.dof_vel[:, 1] = 3.
+        robot.dof_vel[:, 3] = 19.5
+        robot.last_dof_vel.copy_(robot.dof_vel)
+        robot.reward_scales.update(run_still=-.05, dof_vel=-1e-6)
     robot.contact_forces = torch.zeros(3, 2, 3)
     robot.penalised_contact_indices = [0]
     robot.trunk_body_index = 1
@@ -73,28 +104,54 @@ def test_reward_dispatch_and_clipping(robot, v1):
     robot.time_out_buf = torch.tensor([True, False, False])
     robot._prepare_reward_function()
     robot.compute_reward()
-    # Ordinary G7 uses pitch rate, signed rewards, no trunk cost. The
-    # platform ignores pitch, counts trunk contact and floors the combined
-    # nonterminal reward at zero before the -0.8 * dt failure penalty.
+    # G12 floors the platform sum and adds its failure penalty afterwards.
     expected = torch.tensor([
         .06 - .2 * .02 * 25 - 1. * .02 * 9,
         .06 - .05 * .02 * .25 - 2. * .02 * .25 - .02,
         -.8 * .02,
     ])
-    if v1:
-        # Only the two platform tiles use the M20 target, yaw tracking and inclination.
+    if v2:
+        # The same pitch rate contributes only on ordinary terrain. Both platform
+        # tiles contribute the yaw-rate penalty and retain the signed sum.
+        torch.testing.assert_close(robot.episode_sums["ang_vel_xy"],
+                                   .02 * torch.tensor([-.2 * 25., 0., 0.]))
+        torch.testing.assert_close(robot.episode_sums["ang_vel_xz"],
+                                   .02 * torch.tensor([0., -.05 * .5**2, -.05 * .5**2]))
         torch.testing.assert_close(robot.episode_sums["base_height"],
-                                   torch.tensor([0., -10. * .02 * .02**2, 0.]))
+                                   torch.tensor([0., -5. * .02 * .056**2, 0.]))
         torch.testing.assert_close(robot.episode_sums["orientation"],
-                                   torch.tensor([0., -.5 * .02 * .6**2, 0.]))
-        expected[1] += .02 * (1.5 * np.exp(-1.) - .5 * .6**2 - 10. * .02**2)
+                                   torch.tensor([0., -.2 * .02 * .6**2, 0.]))
+        assert torch.count_nonzero(robot.episode_sums["collision"]) == 0
+        assert torch.count_nonzero(robot.episode_sums["termination"]) == 0
+        torch.testing.assert_close(robot.episode_sums["run_still"],
+                                   .02 * torch.tensor([-.05 * .7, -.15 * .5, -.15 * .5]))
+        platform_velocity_cost = -1e-3 * (3.**2 + (0.1 * 19.5)**2)
+        torch.testing.assert_close(robot.episode_sums["dof_vel"],
+                                   .02 * torch.tensor([-1e-6 * 3.**2, platform_velocity_cost, platform_velocity_cost]))
+        torch.testing.assert_close(robot.episode_sums["dof_vel_limits"],
+                                   .02 * torch.tensor([0., -10. * .5, -10. * .5]))
+        expected[0] += .02 * (-.05 * .7 - 1e-6 * 3.**2)
+        common = 3. + 1.5 * np.exp(-1.) - .05 * .5**2 - .15 * .5 + platform_velocity_cost - 10. * .5
+        expected[1] = .02 * (common - 2. * .25 - .2 * .6**2 - 5. * .056**2)
+        expected[2] = .02 * (common - 2. * 16.)
+        if clip_ordinary:
+            expected[0] = 0.
+        assert "platform_positive_clip" not in robot.episode_sums
+    else:
+        assert robot.episode_sums["platform_positive_clip"][2] > .2
+        if scales_fn is platform_v1_reward_scales:
+            torch.testing.assert_close(robot.episode_sums["base_height"],
+                                       torch.tensor([0., -10. * .02 * .02**2, 0.]))
+            torch.testing.assert_close(robot.episode_sums["orientation"],
+                                       torch.tensor([0., -.5 * .02 * .6**2, 0.]))
+            expected[1] += .02 * (1.5 * np.exp(-1.) - .5 * .6**2 - 10. * .02**2)
     torch.testing.assert_close(robot.rew_buf, expected)
     assert robot.episode_sums["lin_vel_z"][2].item() == pytest.approx(-.64)
-    assert robot.episode_sums["platform_positive_clip"][2] > .2
-    torch.testing.assert_close(sum(robot.episode_sums.values()), robot.rew_buf)
+    # The task logs ordinary term contributions before optional total clipping.
+    torch.testing.assert_close(sum(robot.episode_sums.values())[1:], robot.rew_buf[1:])
 
 
-def test_configured_rewards_match_m20_and_mujica_axes():
+def test_configured_rewards_match_m20_and_mujica_axes(robot):
     assert platform_reward_scales() == {
         "tracking_lin_vel": 3., "lin_vel_z": -2., "ang_vel_xz": -.05,
         "torques": -5e-6, "dof_vel": -1e-6, "dof_acc": -1e-7,
@@ -102,6 +159,42 @@ def test_configured_rewards_match_m20_and_mujica_axes():
         "dof_pos_limits": -5., "hip_default": -.5, "run_still": -.05,
         "termination": -.8,
     }
+    assert platform_v1_reward_scales() == dict(
+        platform_reward_scales(), tracking_ang_vel=1.5, orientation=-.5, base_height=-10.,
+    )
+    assert platform_v2_reward_scales() == {
+        "tracking_lin_vel": 3., "tracking_ang_vel": 1.5, "lin_vel_z": -2.,
+        "ang_vel_xz": -.05, "orientation": -.2, "base_height": -5.,
+        "torques": -4e-5, "dof_vel": -1e-3, "dof_acc": -2.5e-7,
+        "collision": -1., "action_rate": -.01, "stand_still": -.5,
+        "dof_pos_limits": -5., "dof_vel_limits": -10.,
+        "hip_default": -.25, "run_still": -.15, "highplatform_yaw": -3.5,
+    }
+    # Pure roll, pitch and yaw, respectively, at 2 rad/s.
+    robot.base_ang_vel = 2. * torch.eye(3)
+    torch.testing.assert_close(robot._reward_ang_vel_xz(), torch.tensor([4., 0., 4.]))
+    torch.testing.assert_close(robot._reward_ang_vel_xy(), torch.tensor([4., 4., 0.]))
+
+
+def test_platform_heading_feedback_leaves_ordinary_and_fixed_replay_commands_intact(robot):
+    robot.cfg.commands = SimpleNamespace(curriculum=True)
+    robot.cfg.rewards.platform_heading_target = 0.
+    robot.platform_scales = {"highplatform_yaw": -3.5 * robot.dt}
+    robot.commands = torch.tensor([[.8, .2, .3, .4], [.7, 0., 0., 0.], [.6, 0., 0., 0.]])
+    initial = robot.commands.clone()
+    # The second platform quaternion stores a world yaw of -0.4 via its equivalent 2π-0.4.
+    angles = torch.tensor([-.6, 2.8, 2 * torch.pi - .4])
+    robot.root_states[:, 5] = (angles / 2).sin()
+    robot.root_states[:, 6] = (angles / 2).cos()
+    robot._update_platform_heading_command()
+    torch.testing.assert_close(robot.commands[:, :2], initial[:, :2])
+    torch.testing.assert_close(robot.commands[:, 2], torch.tensor([.3, -1., .2]))
+    torch.testing.assert_close(robot._reward_highplatform_yaw()[robot.high_platform_mask],
+                               torch.tensor([2.8**2, .4**2]))
+    robot.cfg.commands.curriculum = False
+    robot.commands.copy_(initial)
+    robot._update_platform_heading_command()
+    torch.testing.assert_close(robot.commands, initial)
 
 
 def test_task_mask_with_evaluation_columns_and_plane(robot):

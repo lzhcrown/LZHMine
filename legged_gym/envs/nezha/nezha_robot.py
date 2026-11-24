@@ -15,6 +15,7 @@ from isaacgym.torch_utils import (
 from legged_gym.envs.base.legged_robot import LeggedRobot
 from legged_gym.evaluation.presets import PATCH_HIGH_PLATFORM_HEIGHTS_M
 from legged_gym.terrains.wf import PLATFORM_TYPES
+from legged_gym.utils.math import wrap_to_pi
 from rsl_rl.utils.wf_curriculum import WFCurriculum, configure_wf_timing, is_wf_profile
 
 
@@ -22,6 +23,11 @@ class NezhaRobot(LeggedRobot):
     """Nezha mixed leg-position and wheel-velocity control."""
 
     LEG_JOINT_IDS = [0, 1, 2, 4, 5, 6, 8, 9, 10, 12, 13, 14]
+
+    @property
+    def _uses_dreamwaq_highplatform_rewards(self):
+        return (getattr(self.cfg.rewards, "platform_reward_profile", None) == "dreamwaq_highplatform"
+                and bool(self.platform_scales))
 
     def _parse_cfg(self, cfg):
         super()._parse_cfg(cfg)
@@ -98,6 +104,7 @@ class NezhaRobot(LeggedRobot):
             self.block_tiles = torch.as_tensor(tile_types == "platform_block", device=self.device)
         if self.platform_scales:
             self._init_platform_terrain_mask()
+        if self.platform_scales and not self._uses_dreamwaq_highplatform_rewards:
             self.trunk_body_index = self.gym.find_actor_rigid_body_handle(
                 self.envs[0], self.actor_handles[0], "trunk"
             )
@@ -134,8 +141,8 @@ class NezhaRobot(LeggedRobot):
                 if name != "termination":
                     self.reward_names.append(name)
                     self.reward_functions.append(getattr(self, "_reward_" + name))
-        if self.platform_scales:
-            # Preserve an additive accounting of the M20 sum-to-zero clipping.
+        if self.platform_scales and not self._uses_dreamwaq_highplatform_rewards:
+            # Legacy G12 profiles log the adjustment from flooring the sum.
             self.episode_sums["platform_positive_clip"] = torch.zeros_like(self.rew_buf)
         if self.wf_curriculum is not None:
             self.wf_curriculum.update_reward_curriculum()
@@ -191,14 +198,15 @@ class NezhaRobot(LeggedRobot):
                 reward = torch.where(self.high_platform_mask, platform_reward, reward)
             self.rew_buf += reward
             self.episode_sums[name] += reward
-        if self.platform_scales:
-            # M20 clips the total before adding termination. Ordinary terrain
-            # keeps G7's per-component clipping and signed sum.
+        if self.platform_scales and not self._uses_dreamwaq_highplatform_rewards:
             adjustment = torch.where(self.high_platform_mask, (-self.rew_buf).clamp_min(0.0), 0.0)
             self.episode_sums["platform_positive_clip"] += adjustment
             self.rew_buf += adjustment
         if self.cfg.rewards.only_positive_rewards:
-            self.rew_buf[:] = torch.clip(self.rew_buf, min=0.0)
+            clipped = self.rew_buf.clamp_min(0.0)
+            if self._uses_dreamwaq_highplatform_rewards:
+                clipped = torch.where(self.high_platform_mask, self.rew_buf, clipped)
+            self.rew_buf[:] = clipped
         if "termination" in self.reward_scales or "termination" in self.platform_scales:
             rate = self.reward_scales.get("termination", 0.0)
             if self.platform_scales:
@@ -445,12 +453,15 @@ class NezhaRobot(LeggedRobot):
                 == 0
             ).nonzero(as_tuple=False).flatten()
             self._resample_commands(env_ids)
+        else:
+            self.wf_curriculum.resample_platform_commands_if_due()
         if self.cfg.commands.heading_command:
             forward = quat_apply(self.base_quat, self.forward_vec)
             heading = torch.atan2(forward[:, 1], forward[:, 0])
             self.commands[:, 2] = torch.clip(
                 0.5 * (self.commands[:, 3] - heading), -1.0, 1.0
             )
+        self._update_platform_heading_command()
         if self.cfg.terrain.measure_heights:
             self.measured_heights = self._get_heights()
         if self.cfg.domain_rand.push_robots:
@@ -638,6 +649,21 @@ class NezhaRobot(LeggedRobot):
     def _reward_ang_vel_xz(self):
         return self.base_ang_vel[:, 0].square() + self.base_ang_vel[:, 2].square()
 
+    def _platform_heading_error(self):
+        forward = quat_apply(self.root_states[:, 3:7], self.forward_vec)
+        heading = torch.atan2(forward[:, 1], forward[:, 0])
+        return wrap_to_pi(self.cfg.rewards.platform_heading_target - heading)
+
+    def _update_platform_heading_command(self):
+        # Fixed-command play and benchmark rollouts take an explicit body yaw rate.
+        if not self.cfg.commands.curriculum or "highplatform_yaw" not in self.platform_scales:
+            return
+        rate = (0.5 * self._platform_heading_error()).clamp(-1.0, 1.0)
+        self.commands[:, 2] = torch.where(self.high_platform_mask, rate, self.commands[:, 2])
+
+    def _reward_highplatform_yaw(self):
+        return self._platform_heading_error().square()
+
     def _reward_base_height(self):
         target = self.cfg.rewards.base_height_target
         platform_target = getattr(self.cfg.rewards, "platform_base_height_target", None)
@@ -647,15 +673,31 @@ class NezhaRobot(LeggedRobot):
 
     def _reward_collision(self):
         contacts = super()._reward_collision()
-        if self.platform_scales:
-            # G7 penalizes hip/thigh/calf. M20 additionally counts base contact.
+        if self.platform_scales and not self._uses_dreamwaq_highplatform_rewards:
+            # The original M20 profile also counts trunk contact.
             trunk_contact = self.contact_forces[:, self.trunk_body_index].norm(dim=1) > 0.1
             contacts = contacts + (self.high_platform_mask & trunk_contact)
         return contacts
 
     def _reward_dof_vel(self):
-        # Penalize leg rates without corrupting measured wheel velocities.
-        return torch.sum(torch.square(self.dof_vel[:, self.LEG_JOINT_IDS]), dim=1)
+        cost = self.dof_vel[:, self.LEG_JOINT_IDS].square().sum(dim=1)
+        if self._uses_dreamwaq_highplatform_rewards:
+            wheel_cost = (0.1 * self.dof_vel[:, self.wheel_indices]).square().sum(dim=1)
+            cost = cost + self.high_platform_mask * wheel_cost
+        return cost
+
+    def _reward_dof_vel_limits(self):
+        if not self._uses_dreamwaq_highplatform_rewards:
+            return super()._reward_dof_vel_limits()
+        fraction = torch.where(self.high_platform_mask[:, None], 0.95, self.cfg.rewards.soft_dof_vel_limit)
+        return (self.dof_vel.abs() - fraction * self.dof_vel_limits).clamp(0.0, 1.0).sum(dim=1)
+
+    def _reward_run_still(self):
+        if not self._uses_dreamwaq_highplatform_rewards:
+            return super()._reward_run_still()
+        leg_error = (self.dof_pos - self.default_dof_pos)[:, self.LEG_JOINT_IDS]
+        cost = torch.where(self.high_platform_mask, leg_error.norm(dim=1), leg_error.abs().sum(dim=1))
+        return cost * (self.commands[:, :2].norm(dim=1) > 0.1)
 
     def _reward_dof_pos_limits(self):
         out_of_limits = -(

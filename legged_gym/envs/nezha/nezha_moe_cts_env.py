@@ -193,6 +193,8 @@ class NezhaMoECTSEnv(NezhaRobot):
         }
 
     def compute_observations(self):
+        # WF may reset the pose or resample commands after the reward was scored.
+        self._update_platform_heading_command()
         raw = self._raw_observations()
         self.current_obs.copy_(build_proprioception(
             raw, self.observation_config, add_noise=self.add_noise,

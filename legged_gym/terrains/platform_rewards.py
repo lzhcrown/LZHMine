@@ -34,6 +34,29 @@ def platform_v1_reward_scales():
     )
 
 
+def platform_v2_reward_scales():
+    """Dreamwaq/highplatform M20 coefficients with MUJICA's roll/yaw rate penalty."""
+    return {
+        "tracking_lin_vel": 3.0,
+        "tracking_ang_vel": 1.5,
+        "lin_vel_z": -2.0,
+        "ang_vel_xz": -0.05,
+        "orientation": -0.2,
+        "base_height": -5.0,
+        "torques": -4e-5,
+        "dof_vel": -1e-3,
+        "dof_acc": -2.5e-7,
+        "collision": -1.0,
+        "action_rate": -0.01,
+        "stand_still": -0.5,
+        "dof_pos_limits": -5.0,
+        "dof_vel_limits": -10.0,
+        "hip_default": -0.25,
+        "run_still": -0.15,
+        "highplatform_yaw": -3.5,
+    }
+
+
 def platform_climb_settings():
     """G13 event rewards are per achievement, independent of the control period."""
     return {

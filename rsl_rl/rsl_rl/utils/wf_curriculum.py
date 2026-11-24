@@ -119,6 +119,12 @@ class WFCurriculum:
         self.initial_ranges = deepcopy(env.command_ranges)
         self.steps_per_iteration = self.cfg["num_steps_per_iter"]
         self.resampling_time = self.cfg["resampling_time"]
+        platform_commands = self.cfg["terrain_max_command_ranges"].get("high_platform", {})
+        self.platform_resampling_steps = None
+        if "resampling_time" in platform_commands:
+            self.platform_resampling_steps = int(platform_commands["resampling_time"] / env.dt)
+            if self.platform_resampling_steps < 1:
+                raise ValueError("Platform command interval must span at least one control step")
         self.terrain_length = max(
             0.0, env.cfg.terrain.terrain_length
             - 2.0 * getattr(env.cfg.terrain, "sub_terrain_border_width", 0.0),
@@ -234,12 +240,23 @@ class WFCurriculum:
         self.last_is_limit_vel[env_ids] = False
         self.resample(env_ids)
 
+    def resample_platform_commands_if_due(self):
+        """M20 samples on the episode clock, before evaluating tracking rewards."""
+        env = self.env
+        if self.platform_resampling_steps is None or not env.cfg.commands.curriculum:
+            return
+        due = (env.episode_length_buf % self.platform_resampling_steps) == 0
+        self.resample((due & env.high_platform_mask).nonzero(as_tuple=False).flatten())
+
     def step(self):
         """Isaac Lab command.compute order: clock, resample, displacement metric."""
         self.time_left.sub_(self.env.dt)
         # Float subtraction can leave ~1e-6 at the nominal 250-step boundary.
         # WF uses time_left <= 0; use that same rule rather than a step modulus.
-        ids = (self.time_left <= 0.0).nonzero(as_tuple=False).flatten()
+        due = self.time_left <= 0.0
+        if self.platform_resampling_steps is not None and self.env.cfg.commands.curriculum:
+            due &= ~self.env.high_platform_mask
+        ids = due.nonzero(as_tuple=False).flatten()
         self.resample(ids)
         distance = torch.norm(self.env.root_states[:, :2] - self.env.env_origins[:, :2], dim=1)
         torch.maximum(self.max_move_distance, distance, out=self.max_move_distance)
@@ -260,11 +277,12 @@ class WFCurriculum:
         if env.cfg.commands.curriculum and "high_platform" in self.cfg["terrain_max_command_ranges"]:
             on_platform = env.high_platform_mask[env_ids]
             platform_ids = env_ids[on_platform]
-            low, high = self.cfg["terrain_max_command_ranges"]["high_platform"]["lin_vel_x"]
+            platform_commands = self.cfg["terrain_max_command_ranges"]["high_platform"]
+            low, high = platform_commands["lin_vel_x"]
             env.commands[platform_ids, 0] = torch.empty(len(platform_ids), device=env.device).uniform_(low, high)
             env.commands[platform_ids, 1:3] = 0.0
             self.commands_xy_accumulation[platform_ids] += env.commands[platform_ids, :2]
-            self.time_left[platform_ids] = self.resampling_time
+            self.time_left[platform_ids] = platform_commands.get("resampling_time", self.resampling_time)
             env_ids = env_ids[~on_platform]
             if len(env_ids) == 0:
                 return

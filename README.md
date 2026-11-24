@@ -68,33 +68,42 @@ G12 沿用 G7 的学生和 Actor。凹台和凸台共同使用高台奖励与 0.
 
 G12 的日志与检查点写入 `logs/nezha_moe_cts/g12_high_platform/`。从旧 G7 检查点用 `--init_from` 会启用新版 20 级地图。用 `--resume` 续训会恢复检查点保存的地图，包括旧版 10 级课程。TensorBoard 的 `Train/ordinary_reward` 和 `Train/high_platform_reward` 分别记录各自最近 100 个完整回合的平均累计奖励。机器人接近所属训练地形边界时按截断处理，以免驶入相邻地形后继续沿用前一地形的奖励。
 
-### G12_v1 高台奖励对照
+### G12 高台实验 v1 与 v2
 
-`g12_v1` 使用 G12 的 20 级地图、直行指令和两个 Critic 价值输出。凹台和凸台整个回合共用一组高台奖励。垂向速度和角速度按 MUJICA 的高台公式计分，取 `−2 v_z²` 和 `−0.05 (ω_x² + ω_z²)`。其余项按 Dreamwaq 原版 M20 配置，在 G12 基础上增加以下三项。
+`g12_v1` 对应提交 `95a92ef` 的实验配置。`g12_v2` 使用后续调整的高台奖励和指令采样。两版都在凹台和凸台整回合使用高台奖励，普通地形使用 G7 奖励，Critic 按地形选择两个价值输出之一。两版训练入口分别读取 [v1 配置](experiments/g12_v1/config.py) 和 [v2 配置](experiments/g12_v2/config.py)，各项权重见 [高台奖励表](legged_gym/terrains/platform_rewards.py)。
 
-| 高台新增项 | 配置及含义 |
-|---|---|
-| 偏航角速度跟踪 | 权重 +1.5，指数核分母 0.25。高台采样的偏航角速度指令为 0。 |
-| 机身倾斜 | 权重 −0.5，使用机身系单位重力的水平分量平方和。俯仰角速度可自由变化，持续俯仰会产生倾斜代价。 |
-| 机身净高 | 权重 −10，目标是基座位于周围地形采样点的平均高度上方 0.52 m。普通地形使用 G7 的净高目标和权重。 |
+| 高台设置 | `g12_v1`（`95a92ef`） | `g12_v2` |
+|---|---|---|
+| 指令采样 | 前进 0.5–1.0 m/s，WF 计时器约每 5 秒重采样，横向和偏航角速度指令为 0 | 前进 0–1.0 m/s 均匀采样，横向为 0，回合重置及回合时钟每满 10 秒重采样。目标航向为世界系 0 rad |
+| 航向与速度 | 平面速度跟踪 +3.0，偏航角速度跟踪 +1.5 | 两项跟踪权重均沿用 v1。偏航角速度指令由航向误差乘 0.5 后限于 ±1 rad/s。世界系航向误差平方权重 −3.5 |
+| 机身运动 | MUJICA 的垂向速度项 −2 v_z² 与角速度项 −0.05 (ω_x² + ω_z²)，抑制滚转和偏航角速度 | 同 v1 |
+| 机身倾斜与净高 | 倾斜权重 −0.5，净高目标 0.52 m，净高误差平方权重 −10 | 倾斜权重 −0.2，净高取 Nezha 默认站姿的 0.556 m，权重 −5 |
+| 关节与接触 | 运动站姿使用腿关节绝对偏差和，权重 −0.05。关节速度代价只计入腿关节。碰撞代价计入躯干、髋、大腿和小腿 | 沿用 Dreamwaq `highplatform` 分支 M20 配置（`1144ec1`）。前进指令低于 0.1 m/s 时使用静止站姿的绝对偏差和，权重 −0.5。高于阈值时使用运动站姿的 L2 范数，权重 −0.15。关节速度代价包含缩放至 0.1 倍的轮速。另对 16 个关节超过各自额定速度 95% 的部分计罚。碰撞代价统计髋、大腿和小腿 |
+| 回报 | 先将高台奖励和的下限设为 0，再加失败终止项 −0.8 | 保留高台奖励和的正负值，高台 17 项中没有独立的失败终止奖励 |
 
-G12_v1 按 Dreamwaq M20 的规则对所有地形升降级。每次重置前，取机身末位置到该环境出生参考点的水平距离 `D`。9 m 地块上，`D > 4.5 m` 升一级。其余回合若 `D < 0.5 × 回合时长上限 × 末步平面指令速率` 则降一级，否则保持原级。凸台使用低处接近区的出生参考点。机身首次越过地块边界时结算，使从中心直行的机器人也能越过 4.5 m 门槛。课程等级反映水平移动能力，登顶成功率需用固定高度回放或评估单独统计。
+两个版本均使用 20 级地图和 Dreamwaq M20 的升降级规则。重置前，取机身末位置与出生参考点的水平距离 `D`。9 m 地块上，`D > 4.5 m` 升一级。其余回合若 `D < 0.5 × 回合时长上限 × 末步平面指令速率` 则降一级，否则保持原级。凸台的出生参考点在台前低处。课程等级衡量水平移动能力，登顶成功率可通过固定高度回放或评估单独统计。原 `g12_high_platform` 使用同一套地形高度和深度公式，按回合内的最远水平位移超过 4.0 m 晋级。
 
-原 G12 继续按回合内的最远水平位移晋级，阈值为 `(9 − 2 × 0.5) / 2 = 4.0 m`。两组使用相同的 20 级地形高度和深度公式。比较时可使用同一个初始检查点、种子和训练轮数。下面以 G7 检查点为例，从零训练可将 `--init_from` 及其路径换成 `--from_scratch`。
+比较 v1 和 v2 时，两条命令可使用同一个 G7 检查点、种子和训练轮数。
 
 ```bash
 .venv/bin/python experiments/g12_v1/train.py \
   --init_from /path/to/g7/model_20000.pt --num_envs 4096 --max_iterations 3000 --seed 10
+.venv/bin/python experiments/g12_v2/train.py \
+  --init_from /path/to/g7/model_20000.pt --num_envs 4096 --max_iterations 3000 --seed 10
 ```
 
-本组的日志与检查点写入 `logs/nezha_moe_cts/g12_v1/`。下面的回放使用 50 cm 固定凸台，记录第一个机器人的接近过程、前轮受力和控制目标。比较 G7、G12 与 G12_v1 时使用各自的入口和检查点，并为每组指定单独的 CSV 文件。
+从头训练可将 `--init_from` 及其路径换成 `--from_scratch`。从已有 v1 策略开始 v2 实验时，用 v2 的 `train.py --init_from /path/to/v1/model_XXXX.pt`，它会载入已有权重、重新初始化优化器并应用 v2 配置。`--resume` 按检查点中保存的实验标识和环境配置续训。若此前已用过渡配置以 `g12_v1` 名义训练，其检查点仍带 `g12_v1` 标识，可通过 v1 入口恢复当次训练，也可通过 v2 的 `--init_from` 开始新版实验。
+
+每版的训练、Isaac Gym 回放、导出和 MuJoCo 仿真入口分别为对应实验目录中的 `train.py`、`play.py`、`export.py` 和 `simulate.py`。日志和检查点写入 `logs/nezha_moe_cts/<版本>/`，默认导出位置为 `deploy/deploy_mujoco/nezha/policy/<版本>/policy.pt`，其中 `<版本>` 为 `g12_v1` 或 `g12_v2`。以下命令分别回放两个版本的 50 cm 凸台并输出独立的轨迹文件。
 
 ```bash
-.venv/bin/python experiments/g12_v1/play.py \
-  --load_run -1 --checkpoint -1 --platform_shape block \
-  --platform_height 0.50 --platform_width 5.0 --command_x 0.8 --command_y 0 --command_yaw 0 \
-  --play_num_envs 1 --play_steps 400 --seed 10 --no_export \
-  --platform_trace logs/g12_v1_block50_seed10.csv
+for version in g12_v1 g12_v2; do
+  .venv/bin/python "experiments/${version}/play.py" \
+    --load_run -1 --checkpoint -1 --platform_shape block \
+    --platform_height 0.50 --platform_width 5.0 --command_x 0.8 --command_y 0 --command_yaw 0 \
+    --play_num_envs 1 --play_steps 400 --seed 10 --no_export \
+    --platform_trace "logs/${version}_block50_seed10.csv"
+done
 ```
 
 ### G0–G11 对照实验
