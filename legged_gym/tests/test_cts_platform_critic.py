@@ -1,5 +1,6 @@
 """Exercise training-only terrain labels through G7 initialization and PPO."""
 
+import pytest
 import torch
 from tensorboard.backend.event_processing.event_accumulator import EventAccumulator
 
@@ -33,6 +34,49 @@ def test_task_episode_metrics_use_completed_terrain_before_reset(tmp_path):
     for group, reward in (("ordinary", 3.), ("high_platform", 12.)):
         assert events.Scalars("Train/" + group + "_reward")[-1].value == reward
         assert events.Scalars("Train/" + group + "_length")[-1].value == 3.
+    assert not any(tag.startswith("Platform/") for tag in events.Tags()["scalars"])
+
+
+def test_platform_outcome_rates_count_each_full_episode_once_before_reset(tmp_path):
+    class PlatformTrialEnv(FakeVectorEnv):
+        def __init__(self):
+            super().__init__()
+            self.ids = torch.arange(self.num_envs)
+            self.high_platform_mask = self.ids < 7
+            self.is_block = torch.tensor([True, False, True, False, False, True, True, True])
+
+        def step(self, actions):
+            result = super().step(actions)
+            dones, infos = result[3:5]
+            # Include stale rows and an ordinary environment. Only finished
+            # full-length platform trials are legitimate samples this step.
+            infos["platform_outcomes"] = {
+                "env_ids": self.ids,
+                "is_block": self.is_block.clone(),
+                "success": (self.ids == 0) | (self.ids == 3) | (self.ids == 7),
+                "bypass": (self.ids == 2) | (self.ids == 4),
+                "peak_wheel_fraction": torch.tensor([1., .5, 0., 1., .25, .25, .5, 1.]),
+            }
+            self.is_block[dones] = ~self.is_block[dones]
+            return result
+
+    env = PlatformTrialEnv()
+    cfg = all_moe_config()
+    cfg["policy"]["critic_task_count"] = 2
+    cfg["runner"]["num_steps_per_env"] = 2
+    runner = MoECTSOnPolicyRunner(env, cfg, log_dir=str(tmp_path))
+    env.episode_length_buf[:2] = env.max_episode_length - 1
+    runner.learn(2)
+    events = EventAccumulator(str(tmp_path)).Reload()
+    # In iteration 1, envs 2--6 finish in one batch and 0--1 in another.
+    # Blocks: 1,2,5,6. Pits: 0,3,4. Iteration 0 has no full trials.
+    for shape, count, successes, bypasses, mean_peak in (
+            ("block", 4, 0, 1, 1.25 / 4), ("pit", 3, 2, 1, 2.25 / 3)):
+        for name, value in (("episodes", count), ("success_rate", successes / count),
+                            ("bypass_rate", bypasses / count), ("mean_peak_wheel_fraction", mean_peak)):
+            samples = events.Scalars("Platform/{}/{}".format(shape, name))
+            assert [sample.step for sample in samples] == [1]
+            assert samples[0].value == pytest.approx(value)
 
 
 def test_platform_labels_follow_pre_step_samples_through_ppo(tmp_path):

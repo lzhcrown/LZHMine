@@ -308,15 +308,7 @@ class NezhaRobot(LeggedRobot):
         self.root_states[env_ids, 7:13] = torch_rand_float(
             -0.5, 0.5, (len(env_ids), 6), device=self.device
         )
-        initial_yaws = torch_rand_float(
-            -self.cfg.terrain.yaw_init_range,
-            self.cfg.terrain.yaw_init_range,
-            (len(env_ids), 1),
-            device=self.device,
-        )
-        if self.block_tiles is not None:
-            on_block = self.block_tiles[self.terrain_levels[env_ids], self.terrain_types[env_ids]]
-            initial_yaws.masked_fill_(on_block[:, None], 0.0)  # approach the near face along +X
+        initial_yaws = self._sample_spawn_yaws(env_ids)
         yaw_axis = torch.tensor([0.0, 0.0, 1.0], device=self.device)
         self.root_states[env_ids, 3:7] = quat_from_angle_axis(
             initial_yaws, yaw_axis
@@ -328,6 +320,18 @@ class NezhaRobot(LeggedRobot):
             gymtorch.unwrap_tensor(env_ids_int32),
             len(env_ids_int32),
         )
+
+    def _sample_spawn_yaws(self, env_ids):
+        yaws = torch_rand_float(
+            -self.cfg.terrain.yaw_init_range,
+            self.cfg.terrain.yaw_init_range,
+            (len(env_ids), 1),
+            device=self.device,
+        )
+        if self.block_tiles is not None:
+            on_block = self.block_tiles[self.terrain_levels[env_ids], self.terrain_types[env_ids]]
+            yaws.masked_fill_(on_block[:, None], 0.0)  # approach the near face along +X
+        return yaws
 
     def _resample_commands(self, env_ids):
         if self.wf_curriculum is not None:
@@ -366,19 +370,7 @@ class NezhaRobot(LeggedRobot):
     def _update_terrain_curriculum(self, env_ids):
         if not self.init_done:
             return
-        if self.wf_curriculum is not None:
-            move_up, move_down = self.wf_curriculum.terrain_move_masks(env_ids)
-        else:
-            distance = torch.norm(
-                self.root_states[env_ids, :2] - self.env_origins[env_ids, :2],
-                dim=1,
-            )
-            move_up = distance > self.terrain.env_length / 2
-            move_down = (
-                self.episode_sums["tracking_lin_vel"][env_ids]
-                / self.max_episode_length_s
-                < (self.reward_scales["tracking_lin_vel"] / self.dt) * 0.5
-            ) & ~move_up
+        move_up, move_down = self._terrain_move_masks(env_ids)
         self.terrain_levels[env_ids] += move_up.long() - move_down.long()
         self.terrain_levels[env_ids] = torch.where(
             self.terrain_levels[env_ids] >= self.max_terrain_level,
@@ -390,6 +382,17 @@ class NezhaRobot(LeggedRobot):
         self.env_origins[env_ids] = self.terrain_origins[
             self.terrain_levels[env_ids], self.terrain_types[env_ids]
         ]
+
+    def _terrain_move_masks(self, env_ids):
+        if self.wf_curriculum is not None:
+            return self.wf_curriculum.terrain_move_masks(env_ids)
+        distance = torch.norm(self.root_states[env_ids, :2] - self.env_origins[env_ids, :2], dim=1)
+        move_up = distance > self.terrain.env_length / 2
+        move_down = (
+            self.episode_sums["tracking_lin_vel"][env_ids] / self.max_episode_length_s
+            < (self.reward_scales["tracking_lin_vel"] / self.dt) * 0.5
+        ) & ~move_up
+        return move_up, move_down
 
     def update_command_curriculum(self, env_ids):
         if getattr(self, "high_platform_mask", None) is not None:

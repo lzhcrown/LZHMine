@@ -163,14 +163,16 @@ class MoECTSOnPolicyRunner:
         for iteration in range(self.current_learning_iteration, final_iteration):
             start = time.perf_counter()
             episodes = []
+            platform_outcomes = []
             with torch.inference_mode():
                 for _ in range(self.num_steps_per_env):
                     platform = self._platform_mask()
                     done_groups = role_groups
                     if platform is not None:
                         # Snapshot labels before step() can assign a new terrain.
+                        full_platform = full_episode & platform
                         done_groups += (("ordinary", full_episode & ~platform),
-                                        ("high_platform", full_episode & platform))
+                                        ("high_platform", full_platform))
                     actions = self.alg.act(obs, critic_obs, platform)
                     result = self.env.step(actions)
                     obs, critic_obs, rewards, dones, infos = result[:5]
@@ -190,6 +192,15 @@ class MoECTSOnPolicyRunner:
                         buffers[name + "_reward"].extend(rewards_by_env[selected].cpu().tolist())
                         buffers[name + "_length"].extend(lengths_by_env[selected].cpu().tolist())
                     if platform is not None:
+                        if "platform_outcomes" in infos:
+                            outcome = infos["platform_outcomes"]
+                            ids = outcome["env_ids"].to(self.device)
+                            completed = (done_mask & full_platform)[ids]
+                            platform_outcomes.append(torch.stack((
+                                completed.to(outcome["is_block"].device),
+                                outcome["is_block"], outcome["success"], outcome["bypass"],
+                                outcome["peak_wheel_fraction"],
+                            ), dim=1))
                         full_episode |= done_mask
                     rewards_by_env[done_mask] = 0
                     lengths_by_env[done_mask] = 0
@@ -203,13 +214,13 @@ class MoECTSOnPolicyRunner:
             self.current_learning_iteration = iteration + 1
             self.tot_timesteps += self.env.num_envs * self.num_steps_per_env
             self.tot_time += collected + learned
-            self._log(iteration, losses, collected, learned, buffers, episodes)
+            self._log(iteration, losses, collected, learned, buffers, episodes, platform_outcomes)
             if self.log_dir is not None and self.current_learning_iteration % self.save_interval == 0:
                 self.save(os.path.join(self.log_dir, "model_{}.pt".format(self.current_learning_iteration)))
         if self.log_dir is not None:
             self.save(os.path.join(self.log_dir, "model_{}.pt".format(self.current_learning_iteration)))
 
-    def _log(self, iteration, losses, collected, learned, buffers, episodes):
+    def _log(self, iteration, losses, collected, learned, buffers, episodes, platform_outcomes):
         metrics = {}
         for key, value in losses.items():
             if key.startswith("actor_"):
@@ -231,6 +242,7 @@ class MoECTSOnPolicyRunner:
                 episode_values.setdefault(name, []).append(scalar)
         for name, values in episode_values.items():
             metrics["Episode/" + name] = statistics.mean(values)
+        metrics.update(self._platform_outcome_metrics(platform_outcomes))
         metrics.update(self._terrain_metrics())
         metrics.update({
             "Perf/fps": self.num_steps_per_env * self.env.num_envs / max(collected + learned, 1e-8),
@@ -253,6 +265,26 @@ class MoECTSOnPolicyRunner:
             " | ".join("{}={:.5f}".format(k, float(v)) for k, v in losses.items()
                        if "expert_" not in k),
         ))
+
+    @staticmethod
+    def _platform_outcome_metrics(outcomes):
+        """Pool each iteration's finished trials so rates have an exact episode denominator."""
+        if not outcomes:
+            return {}
+        trials = torch.cat(outcomes).detach().cpu()
+        completed, is_block, success, bypass = trials[:, :4].bool().unbind(dim=1)
+        peak_wheel_fraction = trials[:, 4]
+        metrics = {}
+        for name, shape_mask in (("block", is_block), ("pit", ~is_block)):
+            selected = completed & shape_mask
+            count = selected.sum().item()
+            if count:
+                prefix = "Platform/{}/".format(name)
+                metrics[prefix + "episodes"] = count
+                metrics[prefix + "success_rate"] = (selected & success).sum().item() / count
+                metrics[prefix + "bypass_rate"] = (selected & bypass).sum().item() / count
+                metrics[prefix + "mean_peak_wheel_fraction"] = peak_wheel_fraction[selected].mean().item()
+        return metrics
 
     def _terrain_metrics(self):
         """Snapshot current curriculum levels, pooling columns of the same type."""

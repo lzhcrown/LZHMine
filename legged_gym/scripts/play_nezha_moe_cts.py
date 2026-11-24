@@ -15,6 +15,8 @@ import torch
 
 from legged_gym.envs import *  # noqa: F401,F403 - registers tasks
 from legged_gym.utils import get_args, task_registry
+from legged_gym.scripts._platform_play import configure_fixed_platform
+from legged_gym.scripts._platform_trace import open_platform_trace
 from legged_gym.scripts.export_nezha_moe_cts import DEFAULT_EXPORT_PATH, resolve_checkpoint
 from rsl_rl.utils.cts_checkpoint import (
     load_cts_checkpoint, policy_from_checkpoint, validate_checkpoint_actor, validate_checkpoint_policy,
@@ -31,6 +33,14 @@ PLAY_ARGUMENTS = [
     {"name": "--play_steps", "type": int, "default": 5000},
     {"name": "--play_num_envs", "type": int, "default": 1},
     {"name": "--terrain", "type": str, "default": "trimesh"},
+    {"name": "--platform_shape", "type": str, "choices": ["block", "pit"],
+     "help": "Use a fixed WF platform for student play, together with --platform_height."},
+    {"name": "--platform_height", "type": float,
+     "help": "Block height or pit depth in metres, rounded to the terrain grid."},
+    {"name": "--platform_width", "type": float,
+     "help": "Optional full side of the square platform in metres, rounded to the WF horizontal grid."},
+    {"name": "--platform_trace", "type": str,
+     "help": "Write env 0 pose, joint targets and wheel contacts into a new CSV during fixed-platform play."},
     {"name": "--enable_domain_rand", "action": "store_true", "default": False},
     {"name": "--enable_noise", "action": "store_true", "default": False},
     {"name": "--no_export", "action": "store_true", "default": False},
@@ -94,6 +104,12 @@ def play(args, task_name=TASK_NAME, export_path=None,
     env_cfg.terrain.mesh_type = args.terrain
     env_cfg.terrain.curriculum = False
     env_cfg.terrain.measure_heights = True
+    height = configure_fixed_platform(env_cfg.terrain, args.platform_shape, args.platform_height,
+                                      args.play_num_envs, args.platform_width)
+    if height is not None:
+        width = env_cfg.terrain.wf_sub_terrains["platform_" + args.platform_shape]["platform_width"]
+        print("Fixed {} | height {:.3f} m | width {:.3f} m | initial yaw 0 | command ({}, {}, {})".format(
+            args.platform_shape, height, width, args.command_x, args.command_y, args.command_yaw))
     if not args.enable_domain_rand:
         for name in dir(env_cfg.domain_rand):
             if name.startswith("randomize_") or name in ("disturbance", "push_robots", "delay"):
@@ -112,7 +128,8 @@ def play(args, task_name=TASK_NAME, export_path=None,
     observations = _fixed_commands(env, env.get_observations(), command)
     rewards = 0.0
     resets = 0
-    with torch.inference_mode():
+    with torch.inference_mode(), open_platform_trace(args.platform_trace, env, command,
+                                                    args.platform_shape, height) as trace:
         for step in range(args.play_steps):
             actions = policy.act_inference(observations)
             if args.gate_log_interval > 0 and step % args.gate_log_interval == 0:
@@ -122,6 +139,17 @@ def play(args, task_name=TASK_NAME, export_path=None,
                 )))
             result = env.step(actions)
             observations, reward, done = result[0], result[2], result[3]
+            if trace is not None:
+                trace.record(step + 1, done)
+            if height is not None and "platform_outcomes" in result[4]:
+                outcome = result[4]["platform_outcomes"]
+                ids = outcome["env_ids"]
+                finished = done.bool().reshape(-1)[ids]
+                trials = torch.stack((ids, outcome["success"], outcome["bypass"],
+                                      outcome["peak_wheel_fraction"]), dim=1)
+                for env_id, success, bypass, peak in trials[finished].cpu().tolist():
+                    print("step {} env {} | {} | success={} bypass={} peak wheel support={:.2f}".format(
+                        step, int(env_id), args.platform_shape, int(success), int(bypass), peak))
             observations = _fixed_commands(env, observations, command)
             rewards += reward.mean().item()
             resets += int(done.sum().item())

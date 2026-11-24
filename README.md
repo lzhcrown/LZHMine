@@ -68,6 +68,36 @@ G12 沿用 G7 的学生和 Actor。凹台和凸台共同使用高台奖励与 0.
 
 G12 的日志与检查点写入 `logs/nezha_moe_cts/g12_high_platform/`。从旧 G7 检查点用 `--init_from` 会启用新版 20 级地图。用 `--resume` 续训会恢复检查点保存的地图，包括旧版 10 级课程。TensorBoard 的 `Train/ordinary_reward` 和 `Train/high_platform_reward` 分别记录各自最近 100 个完整回合的平均累计奖励。机器人接近所属训练地形边界时按截断处理，以免驶入相邻地形后继续沿用前一地形的奖励。
 
+### G13 高台正面攀爬
+
+G13 使用 G12 的 20 级地图、普通地形奖励、共享策略和两个 Critic 输出。凸台从低处正对近侧台壁出发，凹台从坑内朝四个面之一出发。每次重置时确定行进方向。训练环境利用地形几何和轮子接触计算奖励，部署学生沿用原本体观测。
+
+| 高台训练信号 | 计算方式 |
+|---|---|
+| 直行跟踪 | 权重 3，在世界水平面比较实际速度和沿指定方向的目标速度。按该步超出历史最远位置的正向位移给分，达到本步指令距离时取满。回退、原地转向、平行台壁行走时，这一项为零。 |
+| 上层支撑 | 在凸台顶面内或指定坑沿外，轮心越过台沿至少 15 cm 且向上接触力超过 1 N，计作一轮支撑。同时支撑轮数刷新本回合最高纪录时，每新增一轮给 1 分，累计最多 4 分。 |
+| 完成 | 四个轮心均进入目标上层区域，至少三轮有向上支撑，机身竖直方向与世界竖直方向夹角小于约 37°，连续满足 0.20 s，给 6 分并结束回合。其余速度、关节、碰撞、动作等连续项沿用 G12 权重。 |
+| 课程 | 成功时升一级，未成功结束时降一级，沿用原课程上下界处理。机身中心横向偏离路线超过「台面半宽减 0.25 m」即结束本次尝试。训练用 3.2 m 方台对应 1.35 m 横向阈值。 |
+
+4 分和 6 分按事件直接计入回报。可从已在 50 cm 凸台成功的 G7 训练模型启动，也可用 G12 的训练模型微调。把路径换成本机实际检查点。`--max_iterations` 表示追加的训练轮数。
+
+```bash
+.venv/bin/python experiments/g13_platform_climb/train.py \
+  --init_from /path/to/g7/model_20000.pt --num_envs 4096 --max_iterations 3000 --seed 10
+```
+
+TensorBoard 的 `Platform/block/` 和 `Platform/pit/` 分别记录每次迭代的完整回合数 `episodes`、成功率 `success_rate`、越出横向范围的比例 `bypass_rate`、以及每回合上层同时支撑轮数峰值除以 4 后的均值 `mean_peak_wheel_fraction`。这些比率随各等级采样占比变化。比较检查点的 50 cm 能力应固定台高、台宽、速度和种子。
+
+下面的回放使用 WF 固定方台，记录第一个机器人的接近过程、前轮受力和控制目标。台面尺寸和速度可与服务器评估对齐，出生距离和回合结束条件使用 WF 回放设置。比较 G7、G12、G13 时分别使用各自的入口和检查点，并指定不同的 CSV 文件。
+
+```bash
+.venv/bin/python experiments/g12_high_platform/play.py \
+  --checkpoint_path /path/to/g12/model_20000.pt --platform_shape block \
+  --platform_height 0.50 --platform_width 5.0 --command_x 0.8 --command_y 0 --command_yaw 0 \
+  --play_num_envs 1 --play_steps 400 --seed 10 --no_export \
+  --platform_trace logs/g12_block50_seed10.csv
+```
+
 ### G0–G11 对照实验
 
 基于 g7 的动作残差与时间平滑对照已增加为 g8–g11。四组配置、共同检查点初始化、训练/评估命令及结果判定见 [残差实验说明](experiments/RESIDUAL_EXPERIMENTS.md)。首轮使用 `--init_from` 从同一个 g7 checkpoint 公平微调。

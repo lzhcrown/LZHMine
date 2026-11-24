@@ -1,10 +1,13 @@
 """G7-to-platform initialization and mixed WF command integration without Isaac Gym."""
 
 import sys
+from types import SimpleNamespace
 
+import pytest
 import torch
 
-from experiments.registry import PLATFORM_EXPERIMENT, clone_config, configure_experiment, get_experiment
+from experiments.registry import (PLATFORM_CLIMB_EXPERIMENT, PLATFORM_EXPERIMENT, PLATFORM_EXPERIMENT_KEYS,
+                                  clone_config, configure_experiment, get_experiment)
 from legged_gym.terrains.platform_rewards import platform_reward_scales
 from rsl_rl.runners.on_policy_runner_cts import MoECTSOnPolicyRunner
 from rsl_rl.utils.wf_curriculum import WFCurriculum
@@ -15,8 +18,9 @@ from test_cts_runner import FakeVectorEnv, cpu_task_registry
 from test_wf_curriculum import make_env
 
 
+@pytest.mark.parametrize("target_key", PLATFORM_EXPERIMENT_KEYS)
 def test_g7_warm_start_retains_target_terrain_commands_rewards_and_two_values(
-        tmp_path, monkeypatch, actual_config_module, cpu_task_registry):
+        tmp_path, monkeypatch, actual_config_module, cpu_task_registry, target_key):
     class CpuEnv(FakeVectorEnv):
         def __init__(self, cfg, **kwargs):
             super().__init__()
@@ -50,10 +54,10 @@ def test_g7_warm_start_retains_target_terrain_commands_rewards_and_two_values(
     )
     torch.save(checkpoint, path)
 
-    group = get_experiment(PLATFORM_EXPERIMENT)
+    group = get_experiment(target_key)
     env_cfg = clone_config(actual_config_module.NezhaMoECTSCfg())
     group.configure_environment(env_cfg)
-    train_cfg = configure_experiment(actual_config_module.NezhaMoECTSCfgPPO(), PLATFORM_EXPERIMENT)
+    train_cfg = configure_experiment(actual_config_module.NezhaMoECTSCfgPPO(), target_key)
     cpu_task_registry.register(group.TASK_NAME, CpuEnv, env_cfg, train_cfg)
     registry_module = sys.modules[type(cpu_task_registry).__module__]
     monkeypatch.setattr(registry_module, "parse_sim_params", lambda *args: None)
@@ -61,6 +65,7 @@ def test_g7_warm_start_retains_target_terrain_commands_rewards_and_two_values(
     env, restored = cpu_task_registry.make_env(group.TASK_NAME, args=args)
     assert restored.rewards.scales.stand_still == -3.1
     assert restored.rewards.platform_scales == platform_reward_scales()
+    assert getattr(restored.rewards, "platform_climb", False) == (target_key == PLATFORM_CLIMB_EXPERIMENT)
     assert (restored.terrain.num_rows, restored.terrain.difficulty_reference_rows) == (20, 10)
     for kind in ("platform_pit", "platform_block"):
         spec = restored.terrain.wf_sub_terrains[kind]
@@ -80,6 +85,30 @@ def test_g7_warm_start_retains_target_terrain_commands_rewards_and_two_values(
                                source.alg.actor_critic.act_inference(probe))
     target.learn(1)
     assert target.current_learning_iteration == source.current_learning_iteration + 1
+
+
+def test_g12_initializes_g13_with_both_value_heads_and_fresh_optimizers(tmp_path, cpu_task_registry):
+    from test_cts_checkpoint_restoration import train_namespace
+
+    source_config = all_moe_config()
+    source_config["policy"]["critic_task_count"] = 2
+    source_config["runner"].update(get_experiment(PLATFORM_EXPERIMENT).RUNNER)
+    env = FakeVectorEnv()
+    env.high_platform_mask = torch.arange(env.num_envs) % 2 == 0
+    source = MoECTSOnPolicyRunner(env, source_config)
+    source.learn(1)
+    path = tmp_path / "g12.pt"
+    source.save(path)
+    train_cfg = configure_experiment(train_namespace(source_config, path), PLATFORM_CLIMB_EXPERIMENT)
+    task = get_experiment(PLATFORM_CLIMB_EXPERIMENT).TASK_NAME
+    cpu_task_registry.register(task, FakeVectorEnv, SimpleNamespace(), train_cfg)
+    with pytest.raises(ValueError, match="Use --init_from"):
+        cpu_task_registry.make_alg_runner(env, task, args=restore_args("resume", path), log_root=None)
+    target, _ = cpu_task_registry.make_alg_runner(env, task, args=restore_args("init_from", path), log_root=None)
+    assert target.current_learning_iteration == 1
+    assert not target.alg.optimizer.state and not target.alg.optimizer_stu_enc.state
+    for name, tensor in source.alg.actor_critic.state_dict().items():
+        torch.testing.assert_close(target.alg.actor_critic.state_dict()[name], tensor, rtol=0, atol=0)
 
 
 def test_high_platform_and_locomotion_commands_in_the_same_resample(actual_config_module):

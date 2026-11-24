@@ -156,6 +156,9 @@ def test_real_task_registration_preserves_environment_and_training_isolation(
     nezha.NezhaMoECTSCfg = actual_config_module.NezhaMoECTSCfg
     nezha.NezhaMoECTSCfgPPO = actual_config_module.NezhaMoECTSCfgPPO
     nezha.NezhaMoECTSEnv = FakeVectorEnv
+    climb_module = ModuleType("legged_gym.envs.nezha.platform_climb_env")
+    climb_module.NezhaPlatformClimbEnv = type("FakeClimbEnv", (FakeVectorEnv,), {})
+    monkeypatch.setitem(sys.modules, climb_module.__name__, climb_module)
     registry_module = ModuleType("legged_gym.utils.task_registry")
     registry_module.task_registry = cpu_task_registry
     monkeypatch.setitem(sys.modules, registry_module.__name__, registry_module)
@@ -166,6 +169,14 @@ def test_real_task_registration_preserves_environment_and_training_isolation(
     assert len(tasks) == len(EXPERIMENT_KEYS)
     assert tasks <= set(cpu_task_registry.task_classes)
     platform_env, platform_train = cpu_task_registry.get_cfgs(get_experiment("g12_high_platform").TASK_NAME)
+    climb_task = get_experiment("g13_platform_climb").TASK_NAME
+    climb_env, climb_train = cpu_task_registry.get_cfgs(climb_task)
+    assert cpu_task_registry.get_task_class(climb_task) is climb_module.NezhaPlatformClimbEnv
+    assert all(cpu_task_registry.get_task_class(task) is FakeVectorEnv for task in tasks - {climb_task})
+    assert climb_env.rewards.platform_climb and climb_env.rewards.platform_climb_settings
+    assert not getattr(platform_env.rewards, "platform_climb", False)
+    assert climb_env.rewards.platform_scales == platform_env.rewards.platform_scales
+    assert climb_train.policy.critic_task_count == platform_train.policy.critic_task_count
     general_env, _ = cpu_task_registry.get_cfgs(get_experiment("g7_all_moe").TASK_NAME)
     for kind in ("platform_pit", "platform_block"):
         assert platform_env.terrain.wf_sub_terrains[kind]["platform_height_range"] == [.20, .70]

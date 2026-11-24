@@ -38,7 +38,8 @@ from rsl_rl.utils.cts_initialization import RESIDUAL_POLICY_KEYS, validate_initi
 
 from legged_gym import LEGGED_GYM_ROOT_DIR
 from legged_gym.terrains.wf import PLATFORM_TYPES
-from experiments.registry import PLATFORM_EXPERIMENT, RESIDUAL_EXPERIMENT_KEYS, clone_config, get_experiment
+from experiments.registry import (PLATFORM_CLIMB_EXPERIMENT, PLATFORM_EXPERIMENT_KEYS, RESIDUAL_EXPERIMENT_KEYS,
+                                  clone_config, get_experiment)
 from .helpers import (
     get_args, update_cfg_from_args, class_to_dict, update_class_from_dict,
     get_load_path, set_seed, parse_sim_params,
@@ -83,9 +84,15 @@ class TaskRegistry:
         experiment_key = getattr(train_cfg.runner, "experiment_key", None)
         if experiment_key:
             validate_checkpoint_policy(checkpoint, class_to_dict(train_cfg.policy))
+        source_key = checkpoint.get("train_config", {}).get("runner", {}).get("experiment_key")
+        if PLATFORM_CLIMB_EXPERIMENT in (experiment_key, source_key) and experiment_key != source_key:
+            raise ValueError(
+                "Platform climb resume requires the same experiment_key: "
+                "checkpoint={!r}, target={!r}. Use --init_from to change training tasks."
+                .format(source_key, experiment_key)
+            )
         if experiment_key in RESIDUAL_EXPERIMENT_KEYS:
             saved = checkpoint.get("train_config", {})
-            source_key = saved.get("runner", {}).get("experiment_key")
             if source_key != experiment_key:
                 raise ValueError(
                     "Comparison resume requires the same experiment_key: "
@@ -196,9 +203,10 @@ class TaskRegistry:
                 self._validate_experiment_checkpoint(train_cfg, checkpoint)
             if "environment_config" in checkpoint:
                 self.restore_environment_config(env_cfg, checkpoint["environment_config"], warm_start=bool(init_path))
-            if init_path and getattr(train_cfg.runner, "experiment_key", None) == PLATFORM_EXPERIMENT:
-                # A G7 checkpoint carries its old terrain mix and command ranges.
-                get_experiment(PLATFORM_EXPERIMENT).configure_environment(env_cfg)
+            experiment_key = getattr(train_cfg.runner, "experiment_key", None)
+            if init_path and experiment_key in PLATFORM_EXPERIMENT_KEYS:
+                # The source snapshot may use a different terrain mix or climbing reward.
+                get_experiment(experiment_key).configure_environment(env_cfg)
             self._restore_asset_path(env_cfg)
             # Restore the schema before simulator buffers are allocated.
             env_cfg.env.observation_config = copy.deepcopy(checkpoint["observation_config"])

@@ -22,3 +22,12 @@ def platform_reward_scales():
         "run_still": -0.05,
         "termination": -0.8,
     }
+
+
+def platform_climb_settings():
+    """G13 event rewards are per achievement, independent of the control period."""
+    return {
+        "upper_support_reward": 4.0,
+        "completion_reward": 6.0,
+        "settle_time_s": 0.20,
+    }
