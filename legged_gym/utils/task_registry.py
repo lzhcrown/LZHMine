@@ -196,7 +196,7 @@ class TaskRegistry:
                     ranges[kind] = copy.deepcopy(limits)
             env_cfg.commands.wf_settings = dict(settings, terrain_max_command_ranges=ranges)
 
-    def make_env(self, name, args=None, env_cfg=None):
+    def make_env(self, name, args=None, env_cfg=None, env_class=None):
         args = get_args() if args is None else args
         if name not in self.task_classes:
             raise ValueError("Task with name: {} was not registered".format(name))
@@ -230,7 +230,9 @@ class TaskRegistry:
         env_cfg, _ = update_cfg_from_args(env_cfg, None, args)
         set_seed(env_cfg.seed)
         sim_params = parse_sim_params(args, {"sim": class_to_dict(env_cfg.sim)})
-        env = self.task_classes[name](
+        if env_class is None:
+            env_class = self.task_classes[name]
+        env = env_class(
             cfg=env_cfg, sim_params=sim_params, physics_engine=args.physics_engine,
             sim_device=args.sim_device, headless=args.headless,
         )

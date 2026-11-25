@@ -3,6 +3,22 @@ import json
 import math
 
 
+MAX_ATTEMPT_SECONDS = 30.0
+
+
+def attempt_step_limit(seconds, dt):
+    """End at the last whole control step within the requested simulation time."""
+    if not 0 < seconds <= MAX_ATTEMPT_SECONDS or not math.isfinite(dt) or dt <= 0:
+        raise ValueError("Attempt duration must be in (0, 30] seconds and control dt must be positive")
+    steps = seconds / dt
+    nearest = round(steps)
+    # Gym stores its timestep in float32, including nominal 5 ms physics steps.
+    limit = nearest if math.isclose(steps, nearest, rel_tol=1e-7) else math.floor(steps)
+    if limit < 1:
+        raise ValueError("Attempt duration must cover at least one control step")
+    return limit
+
+
 TIMING_FIELDS = [
     'run_id', 'trial_id', 'task', 'terrain', 'env_id', 'episode_index', 'eval_seed', 'checkpoint',
     'status', 'reason', 'metrics_selected', 'success_rank', 'travel_direction', 'exit_edge',
@@ -14,9 +30,9 @@ TIMING_FIELDS = [
 def traversal_record(episode, resolution_s=None):
     """Only successful outcomes have a passage time, including zero-duration crossings.
 
-Clocks are simulation seconds relative to attempt start. The passage interval
-starts when the first wheel enters the ROI and ends at the allowed exit event.
-"""
+    Clocks are simulation seconds relative to attempt start. The interval starts
+    at first wheel entry and ends when the terrain's success condition is met.
+    """
     extra = episode.get('metadata_json')
     extra = json.loads(extra) if isinstance(extra, str) and extra else {}
     row = {name: episode.get(name, extra.get(name)) for name in TIMING_FIELDS}

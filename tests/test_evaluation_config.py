@@ -53,7 +53,7 @@ def test_evaluation_overrides_do_not_mutate_training_snapshot():
 
 
 @pytest.mark.parametrize('arguments', [
-    ['--speed', 'nan'], ['--speed', '0'], ['--max-seconds', 'inf'],
+    ['--speed', 'nan'], ['--speed', '0'], ['--max-seconds', 'inf'], ['--max-seconds', '30.01'],
     ['--envs-per-terrain', '0'], ['--spawn-xy-jitter', '.06'],
     ['--terrain-types', 'flat,flat'], ['--checkpoint-path', '/tmp/model.pt'],
     ['--episodes-per-terrain', '0'], ['--episodes-per-terrain', '-500'],
@@ -73,10 +73,14 @@ def test_invalid_protocol_rejected(arguments):
 def test_preview_defaults_and_rejects_output_destination():
     args = parse_args(['--no-record', '--viewer'])
     assert args.envs_per_terrain == 1
-    assert args.episodes_per_env == args.episodes_per_terrain == 1
+    assert args.episodes_per_env is None and args.episodes_per_terrain is None
+    assert protocol_dict(args)['total_attempts'] is None
+    assert args.max_seconds == 30.
+    headless = parse_args(['--no-record'])
+    assert headless.episodes_per_env == headless.episodes_per_terrain == 1
     assert len(args.terrain_types) == 10
     assert 'platform_45cm' in args.terrain_types
-    assert all(f'platform_{cm}cm' not in args.terrain_types for cm in range(50, 81, 5))
+    assert all(f'platform_{cm}cm' not in args.terrain_types for cm in range(50, 111, 5))
     assert args.output_dir is None
     assert protocol_dict(args)['write_files'] is False
     assert protocol_dict(args)['terrain_roi_size_xy_m']['slope'] == [6.5, 5.6]
@@ -84,9 +88,10 @@ def test_preview_defaults_and_rejects_output_destination():
         parse_args(['--no-record', '--output-dir', '/tmp/not-a-capture'])
 
 
-def test_g12_stair_and_platform_preview_selection():
-    terrains = ['stairs_convex_35cm'] + [f'platform_{cm}cm' for cm in range(45, 81, 5)]
-    args = parse_args(['--group', 'g12_high_platform', '--terrain-types', ','.join(terrains),
+@pytest.mark.parametrize('group', ['g12_high_platform', 'g12_v1', 'g12_v2', 'g12_v3'])
+def test_g12_stair_and_platform_preview_selection(group):
+    terrains = ['stairs_convex_35cm'] + [f'platform_{cm}cm' for cm in range(45, 111, 5)]
+    args = parse_args(['--group', group, '--terrain-types', ','.join(terrains),
                        '--viewer', '--no-record'])
     assert protocol_dict(args)['terrain_types'] == terrains
 
@@ -147,10 +152,18 @@ def test_preview_single_and_batch_never_create_capture_files(tmp_path, monkeypat
     assert single.call_args.args[-1] is None
     child = Mock(return_value=NS(returncode=0))
     monkeypatch.setattr(entry.subprocess, 'run', child)
-    assert entry.main(['--group', 'all', '--no-record', '--viewer']) == 0
+    assert entry.main(['--group', 'all', '--no-record', '--viewer', '--episodes-per-env', '2']) == 0
     assert child.call_count == 8
     for call in child.call_args_list:
         command = call.args[0]
         assert '--no-record' in command and '--viewer' in command
         assert '--output-dir' not in command
     assert list(tmp_path.iterdir()) == []
+
+    # With no explicit count, visit every group before restarting the first.
+    child.reset_mock()
+    child.side_effect = [NS(returncode=0)] * len(LEGACY_EXPERIMENT_KEYS) + [NS(returncode=130)]
+    assert entry.main(['--group', 'all', '--no-record', '--viewer']) == 130
+    children = [parse_args(call.args[0][2:]) for call in child.call_args_list]
+    assert [args.group for args in children] == [*LEGACY_EXPERIMENT_KEYS, LEGACY_EXPERIMENT_KEYS[0]]
+    assert all(args.episodes_per_env == 1 for args in children)

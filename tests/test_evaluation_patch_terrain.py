@@ -114,7 +114,7 @@ class PatchTerrainTests(unittest.TestCase):
         self.assertEqual(terrain.metadata["tiles"][8]["nominal_height_range_m"], [-.04, .04])
 
     def test_platforms_have_five_metre_square_tops_and_exact_vertical_mesh_faces(self):
-        for height_cm in range(45, 81, 5):
+        for height_cm in range(45, 111, 5):
             name = f"platform_{height_cm}cm"
             with self.subTest(name=name):
                 self._check_platform_mesh(name, height_cm / 100)
@@ -306,7 +306,7 @@ class PatchTerrainTests(unittest.TestCase):
     def test_old_patch_types_dimensions_and_incompatible_grids_are_rejected(self):
         for changes in (dict(terrain_length=.4), dict(terrain_length=3.), dict(terrain_width=40.), dict(patch_size_m=.4),
                         dict(horizontal_scale=.03), dict(type_names=[]), dict(type_names=["stairs_up"]), dict(type_names=["stairs_convex_15cm"]), dict(type_names=["stairs_convex_20cm"]),
-                        dict(type_names=["stairs_concave_20cm"]), dict(type_names=["platform_85cm"]),
+                        dict(type_names=["stairs_concave_20cm"]), dict(type_names=["platform_115cm"]),
                         dict(type_names=["platform_50cm"], vertical_scale=.03),
                         dict(type_names=["discrete_obstacles"]), dict(step_width=.4), dict(step_width=.2), dict(seed=-1),
                         dict(vertical_scale=.03), dict(platform_length=.5), dict(corridor_width=4.), dict(slope_width_m=0),

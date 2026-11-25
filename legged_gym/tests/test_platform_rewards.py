@@ -198,7 +198,7 @@ def test_platform_heading_feedback_leaves_ordinary_and_fixed_replay_commands_int
 
 
 def test_task_mask_with_evaluation_columns_and_plane(robot):
-    platforms = [f"platform_{cm}cm" for cm in range(45, 81, 5)]
+    platforms = [f"platform_{cm}cm" for cm in range(45, 111, 5)]
     robot.terrain = SimpleNamespace(type_names=["stairs_convex_35cm"] + platforms)
     robot.num_envs = len(robot.terrain.type_names)
     robot.terrain_types = torch.arange(robot.num_envs)

@@ -245,7 +245,7 @@ class PatchEvaluationTerrain(EvaluationTerrain):
             "outside_support": "slope and end pads use slope_width_m with zero-height ground outside their sides; other tiles retain lateral support; exit-pad heights continue through unused tile allocation and into the longitudinal exterior border",
             "transition_note": "Concentric stairs have {} risers per side and return to zero at the ROI edge. Roughness has a zero boundary ring. The slope has no forced return: its high end continues onto an equal-height platform.".format(self.parameters["steps_per_side"]),
             "transition_in_measurement_window": True,
-            "measurement_window": "first wheel enters ROI until all four wheels leave an allowed edge after entry, or fall/timeout; opposite and lateral exits allowed, original entrance excluded",
+            "measurement_window": "first wheel enters ROI until completion, fall or timeout; stairs and square platforms require supported middle and stable far-side landing; other patches use opposite or lateral exits",
             "exit_edge_segments_xy": {
                 name: [{"xmin": [[float(x0), float(y0)], [float(x0), float(y1)]],
                         "xmax": [[float(x1), float(y0)], [float(x1), float(y1)]],

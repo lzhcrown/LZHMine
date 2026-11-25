@@ -19,7 +19,7 @@ PATCH_STAIR_PLATFORM_M = 3.0
 PATCH_STAIR_HEIGHTS_M = (0.35, 0.25, 0.30)
 PATCH_HIGH_PLATFORM_SIZE_M = 5.0
 PATCH_HIGH_PLATFORM_HEIGHTS_M = {
-    f"platform_{height_cm}cm": height_cm / 100 for height_cm in range(45, 81, 5)
+    f"platform_{height_cm}cm": height_cm / 100 for height_cm in range(45, 111, 5)
 }
 PATCH_HIGH_PLATFORM_HEIGHT_M = PATCH_HIGH_PLATFORM_HEIGHTS_M["platform_45cm"]
 # Append optional heights after the original ten terrain seed indices.

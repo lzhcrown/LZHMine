@@ -10,6 +10,7 @@ from experiments.registry import (EXPERIMENT_KEYS, LEGACY_EXPERIMENT_KEYS,
                                   RESIDUAL_EXPERIMENT_KEYS, ALL_MOE_EXPERIMENT_KEYS, REPO_ROOT)
 from .presets import (PATCH_TERRAIN_TYPES, PATCH_SUPPORTED_TERRAIN_TYPES, PATCH_SIZE_M, PATCH_PLATFORM_LENGTH_M,
                       PATCH_CORRIDOR_WIDTH_M, PATCH_SLOPE_ANGLE_DEG, PATCH_SLOPE_LENGTH_M, PATCH_SLOPE_WIDTH_M)
+from .timing import MAX_ATTEMPT_SECONDS
 
 
 def parse_args(argv=None):
@@ -38,10 +39,11 @@ def parse_args(argv=None):
     repetitions.add_argument('--episodes-per-terrain', type=int,
         help='Total completed attempts per terrain and model; must divide evenly across slots. Default: 500 for recording.')
     repetitions.add_argument('--episodes-per-env', type=int,
-        help='Alternative: attempts per parallel slot. Preview defaults to 1 per slot.')
+        help='Attempts per slot. Interactive previews repeat until closed; headless previews default to one.')
     parser.add_argument('--seed', type=int, default=10)
     parser.add_argument('--speed', type=float, default=1.)
-    parser.add_argument('--max-seconds', type=float, default=30.)
+    parser.add_argument('--max-seconds', type=float, default=MAX_ATTEMPT_SECONDS,
+                        help='Maximum simulation seconds per attempt, including the approach (up to 30).')
     parser.add_argument('--spawn-xy-jitter', type=float, default=0.)
     parser.add_argument('--max-tilt-deg', type=float, default=60.)
     parser.add_argument('--sim-device', default='cuda:0')
@@ -66,10 +68,10 @@ def parse_args(argv=None):
     if min(args.envs_per_terrain, args.num_threads) < 1 or args.seed < 0:
         parser.error('counts must be positive and seed nonnegative')
     if args.episodes_per_terrain is None and args.episodes_per_env is None:
-        if args.no_record:
-            args.episodes_per_env = 1
-        else:
+        if not args.no_record:
             args.episodes_per_terrain = 500
+        elif not args.viewer:
+            args.episodes_per_env = 1
     if args.episodes_per_terrain is not None:
         if args.episodes_per_terrain < 1:
             parser.error('episodes-per-terrain must be positive')
@@ -77,7 +79,7 @@ def parse_args(argv=None):
             parser.error('episodes-per-terrain must be divisible by envs-per-terrain; '
                          'for 500 attempts use e.g. 20 slots x 25 episodes or 10 slots x 50 episodes')
         args.episodes_per_env = args.episodes_per_terrain // args.envs_per_terrain
-    else:
+    elif args.episodes_per_env is not None:
         if args.episodes_per_env < 1:
             parser.error('episodes-per-env must be positive')
         args.episodes_per_terrain = args.envs_per_terrain * args.episodes_per_env
@@ -91,7 +93,8 @@ def parse_args(argv=None):
         except ValueError:
             parser.error('--detail-trial-indices must be comma-separated integers')
         if (not indices or len(set(indices)) != len(indices) or
-                any(index < 0 or index >= args.episodes_per_env for index in indices)):
+                any(index < 0 or (args.episodes_per_env is not None and index >= args.episodes_per_env)
+                    for index in indices)):
             parser.error('--detail-trial-indices must be unique indices in [0, episodes-per-env)')
         args.detail_trial_indices = tuple(sorted(indices))
     args.terrain_types = tuple(args.terrain_types.split(','))
@@ -100,8 +103,8 @@ def parse_args(argv=None):
         parser.error('terrain-types must be unique names from ' + ','.join(PATCH_SUPPORTED_TERRAIN_TYPES))
     if not math.isfinite(args.speed) or args.speed == 0:
         parser.error('speed must be finite and nonzero')
-    if not math.isfinite(args.max_seconds) or args.max_seconds <= 0:
-        parser.error('max-seconds must be finite and positive')
+    if not 0 < args.max_seconds <= MAX_ATTEMPT_SECONDS:
+        parser.error('max-seconds must be in (0, 30]')
     if not math.isfinite(args.max_tilt_deg) or not 0 < args.max_tilt_deg < 90:
         parser.error('max-tilt-deg must be between 0 and 90')
     if not math.isfinite(args.spawn_xy_jitter) or not 0 <= args.spawn_xy_jitter <= .05:
@@ -147,7 +150,7 @@ def resolve_checkpoint(args, group):
 
 def protocol_dict(args):
     return dict(
-        version=13, reference='wheel_gym_CQ patch crossing protocol; LZHMine terrain revision 12',
+        version=14, reference='LZHMine obstacle traversal and wheel_gym_CQ patch crossing; terrain revision 12',
         data_mode=('preview_no_record' if args.no_record else
                    'expert_weights_only' if args.expert_weights_only else 'first_successes_split'),
         expert_weights_only=args.expert_weights_only,
@@ -165,11 +168,11 @@ def protocol_dict(args):
                                for name in args.terrain_types},
         envs_per_terrain=args.envs_per_terrain, episodes_per_env=args.episodes_per_env,
         episodes_per_terrain=args.episodes_per_terrain,
-        total_attempts=len(args.terrain_types) * args.episodes_per_terrain,
+        total_attempts=(None if args.episodes_per_terrain is None else len(args.terrain_types) * args.episodes_per_terrain),
         seed=args.seed, command_body_vx_vy_wz=[args.speed, 0., 0.], max_seconds=args.max_seconds,
         max_tilt_deg=args.max_tilt_deg, spawn_xy_jitter_m=args.spawn_xy_jitter,
-        measurement_window='first wheel entry endpoint until all four wheels clear the same opposite or lateral finite edge, fall or timeout; entry-detecting interval excluded',
-        success_rule='all four wheels entered then clear the same opposite or lateral edge; entrance exit excluded; fall takes priority',
+        measurement_window='first wheel entry until successful completion, fall or timeout; entry-detecting interval excluded',
+        success_rule='stairs and platforms require supported traversal of the central surface and a stable landing on the far side; other terrain uses four-wheel opposite or lateral exit; fall takes priority',
         failure_rule='base tilt exceeds max_tilt_deg; contact/retreat alone are not failures',
         event_resolution='one control interval', randomization='disabled, including torque scale',
         sampling='every control interval and physics substep in the measurement window; no warmup filtering',

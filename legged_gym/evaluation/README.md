@@ -1,6 +1,6 @@
 # Isaac Gym 八组 CTS 学生策略原始数据采集
 
-本目录将本机 `wheel_gym_CQ/wheel_legged_gym/evaluation` 的 patch 协议移植到 LZHMine：保留轮子投影穿越判据及原始 CSV 格式，并使用调整后的十种固定地形，使用当前 CTS 观测历史、学生策略和 Nezha 控制器。运行时不依赖 `wheel_gym_CQ` 目录。
+本目录使用 CTS 学生策略、Nezha 控制器和固定评估地形。楼梯与高台评估从接近障碍到在另一侧平稳落地的完整过程。平地、粗糙地面和斜坡沿用 `wheel_gym_CQ` 的四轮投影穿越判据。
 
 ## 观看：不采集数据
 
@@ -24,15 +24,22 @@ cd /home/crown/LZHMine
 for terrain in stairs_convex_35cm platform_50cm; do
   .venv/bin/python legged_gym/scripts/evaluate_nezha_moe_cts.py \
     --group g12_high_platform --checkpoint 20000 --viewer --no-record \
-    --terrain-types "$terrain" --speed 0.8 || break
+    --terrain-types "$terrain" --speed 0.8 --episodes-per-env 1 || break
 done
+
+# G12 v3 同时观看六种高台，每种一个机器人
+.venv/bin/python legged_gym/scripts/evaluate_nezha_moe_cts.py \
+  --group g12_v3 --checkpoint -1 --viewer --no-record --speed 0.8 \
+  --terrain-types platform_85cm,platform_90cm,platform_95cm,platform_100cm,platform_105cm,platform_110cm
 
 # 单组同时展示十种地形，每种一个机器人
 .venv/bin/python legged_gym/scripts/evaluate_nezha_moe_cts.py \
   --group g0_mlp --checkpoint 20000 --viewer --no-record --episodes-per-env 3
 ```
 
-`--no-record` 不创建评估目录、CSV、metadata 或统计文件；终端只显示通过/跌倒/超时状态。不能与 `--output-dir` 同用。预览默认每种地形 1 个机器人，未指定 `--terrain-types` 时同时展示十种地形。相机自动跟随当前机器人；**N/B** 切换下一/上一个机器人，**空格**暂停/继续（暂停时仿真时钟不前进），**Esc/关闭窗口/Ctrl+C**结束整个观看命令。每组完成指定次数后，`--group all` 自动打开下一组。多地形的机器人同时起步，逐个仔细观看建议一次只指定一种地形。重复观看无出生扰动的情况只是重放相同条件。
+`--viewer --no-record` 打开窗口，终端逐轮显示结果。每种地形默认有一个机器人。每轮从出生开始，成功、跌倒或用完 30 仿真秒就结束。单个模型默认持续观看，每个机器人结束后从自己的起点开始下一轮。**N/B** 切换机器人，**空格**暂停或继续，**Esc、关闭窗口或 Ctrl+C** 退出。暂停期间仿真时钟停止。
+
+指定 `--episodes-per-env 3` 可让每个机器人各跑三轮后结束，也可用 `--episodes-per-terrain` 分配每种地形的总次数。多模型预览（`--group all` 或 `residual`）默认每组每个机器人跑一轮，再轮到下一组，所有组轮转播放。显式指定次数时，各组完成配额后整条命令退出。无窗口的 `--no-record` 默认每个机器人跑一轮。预览不写 CSV。
 
 如果要依次完整观看每种地形上的八组模型，可在 Bash 中运行下面的循环：一次只有一个机器人、一种地形、一组模型，完成后进入下一组，再进入下一种地形。Esc 或 Ctrl+C 中止循环。
 
@@ -45,7 +52,7 @@ for terrain in flat stairs_concave_{35,25,30}cm stairs_convex_{35,25,30}cm platf
 done
 ```
 
-组名可用 `g0_mlp`、`g1_student_moe`、`g2_actor_moe`、`g3_student_actor_moe`、`g4_critic_moe`、`g5_student_critic_moe`、`g6_actor_critic_moe`、`g7_all_moe`，或 `all`。G12 单独使用 `--group g12_high_platform`。观看单个 70 cm 高台时使用 `--terrain-types platform_70cm`。
+组名可用 `g0_mlp`、`g1_student_moe`、`g2_actor_moe`、`g3_student_actor_moe`、`g4_critic_moe`、`g5_student_critic_moe`、`g6_actor_critic_moe`、`g7_all_moe`，或 `all`。原版 G12 使用 `--group g12_high_platform`。对照 v1、v2、v3 时分别使用 `--group g12_v1`、`--group g12_v2`、`--group g12_v3`。只看一个高台时指定单个名称，例如 `--terrain-types platform_110cm`。
 
 ## 采集：观看确认后手动执行
 
@@ -59,14 +66,14 @@ done
   --group all --checkpoint 20000 --envs-per-terrain 20 --episodes-per-terrain 500 \
   --metric-successes-per-terrain 10 \
   --spawn-xy-jitter 0.02 --speed 0.8 --seed 10 --max-seconds 30 \
-  --output-dir evaluations/cts_20000_terrain_v12_500_success10_seed10
+  --output-dir evaluations/cts_20000_protocol14_500_success10_seed10
 
 # 重新校验某组 CSV
 .venv/bin/python legged_gym/scripts/validate_evaluation_capture.py \
-  evaluations/cts_20000_terrain_v12_500_success10_seed10/g1_student_moe
+  evaluations/cts_20000_protocol14_500_success10_seed10/g1_student_moe
 ```
 
-去掉 `--no-record` 即为采集模式；默认无窗口，每组每地形 500 次、20 个并行槽。`--episodes-per-terrain` 是每种地形的总次数，必须能被 `--envs-per-terrain` 整除；例如改用 10 个槽时，500 次会自动分配为每槽 50 轮。也可用原有的 `--episodes-per-env` 指定每槽次数，此时总次数为槽数乘以每槽次数；两个次数参数不能同时使用。预览仍默认每槽 1 轮。输出目录需为新目录。
+去掉 `--no-record` 即为采集模式。默认无窗口，每组每地形 500 次、20 个并行槽。`--episodes-per-terrain` 指定每种地形的总次数，须能被 `--envs-per-terrain` 整除。例如 500 次分给 10 个槽，每槽跑 50 轮。也可用 `--episodes-per-env` 指定每槽次数。输出目录需为新目录。
 
 正式命令速度设为 0.8 m/s、每次最多 30 s，出生位置在 X/Y 方向各加 ±2 cm 的可复现随机偏移；八组使用相同种子与偏移序列。若要复用固定出生条件，将 `--spawn-xy-jitter 0.02` 改为 `0`。重复次数不改变地形形状，不代表重新生成 500 种地形。
 
@@ -107,16 +114,20 @@ done
 | 高台，顶面 5×5 m、高 45 cm | `platform_45cm` |
 | 可选高台，高 50、55、60、65 cm | `platform_50cm` / `platform_55cm` / `platform_60cm` / `platform_65cm` |
 | 可选高台，高 70、75、80 cm | `platform_70cm` / `platform_75cm` / `platform_80cm` |
+| 可选高台，高 85、90、95 cm | `platform_85cm` / `platform_90cm` / `platform_95cm` |
+| 可选高台，高 100、105、110 cm | `platform_100cm` / `platform_105cm` / `platform_110cm` |
 | 粗糙地面 | `rough` |
 | 20° 斜坡，水平长 6.5 m、宽 5.6 m | `slope` |
 
 - 除 `slope` 外，测试区为 **7.8×7.8 m**，前后各 1.5 m 支撑平台。阶梯每侧 8 级、踏面 0.3 m、中央平台 3 m；35/25/30 cm 是单级高度，对应中央平台总高度或深度 2.8/2.0/2.4 m。粗糙度幅值参数 0.04 m。
 - `slope` 为 **20°、水平长 6.5 m、实际宽 5.6 m** 的斜坡，测试区边界也为 6.5×5.6 m。前后平台各 1.5×5.6 m，含平台的评估走廊总水平长度 9.5 m；高端平台按 5 mm 高度网格量化后为 2.365 m，并向走廊外延伸同高支撑。两侧不再延伸坡面，外侧为零高度地面，侧缘存在落差。坡宽对齐 2 cm 网格，中心最多偏移半个网格；机器人出生和目标位置使用实际坡面中心线。通过判据仍允许四轮清空同一侧向边界，与原协议一致。
-- 所有高度的高台均居中放在 7.8×7.8 m 测试区内，台面为 5×5 m，四周为竖直台阶。区内前后各留 1.4 m 平地。通过事件按整个测试区的四轮穿越判据统计。
-- 默认机体坐标指令 `[vx, vy, wz]=[1,0,0]`，每次尝试最多 30 仿真秒，包含接近阶段。负 `--speed` 支持保持机体 yaw=0 的倒车。
+- 所有高度的高台均居中放在 7.8×7.8 m 测试区内，台面为 5×5 m，四周是竖直台阶。区内前后各留 1.4 m 平地。
+- 默认机体坐标指令为 `[vx, vy, wz]=[1,0,0]`。每轮从出生起最多运行 **30 仿真秒**，包括接近、穿越和落地。可用 `--max-seconds` 缩短每轮时限。负 `--speed` 支持保持机体 yaw=0 的倒车，目标岸也随行进方向反转。
 - 关闭观测噪声、课程、推扰、关节初始随机化、动作延迟及力矩随机缩放；训练的默认随机力矩缩放仍保留。
 - 第一只轮的碰撞圆柱 XY 投影进入测试区后开始计量，首次检测到进入的那个控制区间不计入。此后一直采样到成功、跌倒或超时，保留后退、再进入及前后轴之间的间隔。
-- 成功要求四轮都进入过测试区，随后四轮完整越过同一条对侧或侧向有限边界；从原入口退出不算成功。不要求轮子接触地面，侧向通过的具体边界记在 `metadata_json.exit_edge`。
+- **高台和楼梯**先验证四轮抵达障碍中央面。凸台和凸形楼梯取最高面，凹形楼梯取谷底平面。随后四轮要沿指令方向越过最后一道台沿，落在对岸平地。接触阶段要求四个轮底距目标平面均不超过 8 cm，至少三个轮子的向上接触力各大于 1 N。
+- **平稳落地**还要求机身倾角约 37° 以内，机身在世界坐标系中的垂向速度绝对值不超过 0.3 m/s，滚转和俯仰角速度的合量不超过 1 rad/s。满足落地条件连续 0.20 s 时，本轮记为 `success`（`stable_landing`）。机器人可以继续水平向前行驶。绕过障碍、仅登顶或在空中飞过均不能完成这一过程。
+- **平地、粗糙地面和斜坡**沿用几何穿越规则。所有轮子都进入过测试区，再完整越过同一条对侧或侧向边界即可通过，具体边界记录在 `metadata_json.exit_edge`。
 - 机体相对竖直倾斜超过 60° 记作跌倒；跌倒优先于同时通过，通过优先于同时超时。接触、后退或暂时离开走廊不单独判失败。NaN/Inf 中止采集，记为中断而非跌倒。
 - 边界事件精度为一个控制步。当前模型控制频率约 50 Hz，物理频率约 200 Hz；实际 dt 以 metadata 和 CSV 为准。
 
@@ -144,7 +155,9 @@ done
 
 后续筛选时，在 `trial_index.csv` 选择 `metrics_selected=True` 的轮次，再按 `trial_id` 提取各指标文件的全部行。`success_rank` 是该地形按完成顺序的成功序号；`recorded_control_samples` / `recorded_physics_samples` 为实际保留样本数，原 `control_sample_count` / `physics_sample_count` 为计量窗口内步数。所有尝试均有索引，只有选中的成功轮次有详细指标。进一步选择最佳单次时保留所选 ID 和筛选依据，成功率仍使用全部 500 次完整尝试。
 
-通过耗时采用仿真时钟（秒）：`traversal_time_s = exit_time_s - entry_time_s`，从第一只轮进入测试区到现有四轮通过判据成立；`total_time_to_success_s = trial_elapsed_s`，包含出生后的接近阶段。`exit_edge` 保留实际通过边界，`time_resolution_s` 为控制步分辨率（本批约 0.02 s）。失败、超时、中断仅保留已运行时间，不把它们记为成功通过。所有成功轮次均有耗时，即使 `metrics_selected=False`。
+通过耗时使用仿真时钟。`traversal_time_s = exit_time_s - entry_time_s` 从第一只轮进入测试区开始，楼梯和高台计至对岸稳定落地，其他地形计至四轮通过。`total_time_to_success_s = trial_elapsed_s` 还包含出生后的接近阶段。`time_resolution_s` 为控制步分辨率，当前模型约为 0.02 s。所有成功轮次均记录耗时，包括 `metrics_selected=False` 的轮次。跌倒、超时和中断的轮次只保留已运行时间。
+
+比较历史成功率或通过耗时前，先查看 `metadata.json` 中的 `protocol.version`。本规则自版本 14 起生效。版本 13 的楼梯和高台成功依据四轮离开测试区，当时允许侧向退出。历史数据仍按各自采集时的判据解释。
 
 已完成的旧采集可直接从 `episodes.csv` 补算，无须重跑仿真：
 

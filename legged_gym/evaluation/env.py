@@ -8,10 +8,11 @@ import torch
 
 from legged_gym.envs.nezha.nezha_moe_cts_env import NezhaMoECTSEnv
 from .metrics import VectorEpisodeMetrics
+from .timing import attempt_step_limit
 
 
 class EvaluationEnv(NezhaMoECTSEnv):
-    """Run a fixed number of independent traversals for each simulation slot.
+    """Run independent traversals for each simulation slot up to its optional quota.
 
     Construction does not start a measured episode. Call ``reset()`` once, then
     step until ``evaluation_complete``. Each slot keeps its terrain type and its
@@ -28,7 +29,8 @@ class EvaluationEnv(NezhaMoECTSEnv):
         self.completed_episodes = []
         self.episode_sink = episode_sink
         self._evaluation_started = False
-        self._episode_quota = int(getattr(self.evaluation, "episodes_per_env", 1))
+        quota = getattr(self.evaluation, "episodes_per_env", 1)
+        self._episode_quota = math.inf if quota is None else int(quota)
         if self._episode_quota < 1:
             raise ValueError("episodes_per_env must be positive")
         self._seed = int(getattr(self.evaluation, "seed", 0))
@@ -69,18 +71,12 @@ class EvaluationEnv(NezhaMoECTSEnv):
 
     @property
     def evaluation_complete(self):
-        return bool(self._evaluation_started and
+        return bool(self._episode_quota != math.inf and self._evaluation_started and
                     torch.all(self.episode_counts >= self._episode_quota).item())
 
     def _parse_cfg(self, cfg):
         super()._parse_cfg(cfg)
-        # Gym stores dt as float32: e.g. 0.005 becomes 0.004999999888.
-        # Avoid an extra control step when a requested duration is an integral
-        # number of nominal steps. Nonintegral durations still round upward.
-        steps = self.max_episode_length_s / self.dt
-        nearest = round(steps)
-        self.max_episode_length = max(1, nearest if math.isclose(
-            steps, nearest, rel_tol=1e-7, abs_tol=1e-7) else math.ceil(steps))
+        self.max_episode_length = attempt_step_limit(self.max_episode_length_s, self.dt)
 
     def _get_env_origins(self):
         self.custom_origins = True
@@ -121,8 +117,9 @@ class EvaluationEnv(NezhaMoECTSEnv):
         if not self._evaluation_started:
             raise RuntimeError("Call reset() before evaluation step()")
         self._step_commands = self.commands[:, :3].clone()
-        actions = actions.clone()
-        actions[self.episode_counts >= self._episode_quota] = 0.
+        if self._episode_quota != math.inf:
+            actions = actions.clone()
+            actions[self.episode_counts >= self._episode_quota] = 0.
         return super().step(actions)
 
     def _before_physics_substep(self):

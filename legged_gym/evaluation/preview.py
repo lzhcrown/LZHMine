@@ -64,14 +64,14 @@ def run_preview(args, cfg, sim_params, physics_engine, policy, environment_class
             viewer = PreviewViewer(env)
             env.render = viewer.render
         print('Preview only: no evaluation files will be created.', flush=True)
-        reported = 0
         with torch.inference_mode():
             while not env.evaluation_complete:
                 start = time.monotonic()
                 env.step(policy.act_inference(env.get_observations()))
-                for row in env.completed_episodes[reported:]:
-                    print('{terrain}: {status} ({reason})'.format(**row), flush=True)
-                reported = len(env.completed_episodes)
+                for row in env.completed_episodes:
+                    print('env {env_id} | {terrain} | round {number} | {trial_elapsed_s:.2f} s | '
+                          '{status} ({reason})'.format(number=row['episode_index'] + 1, **row), flush=True)
+                env.completed_episodes.clear()
                 if args.viewer:
                     # Gym's frame clock is the physics dt, while this loop runs
                     # at the slower control rate. Pace by the actual control dt.

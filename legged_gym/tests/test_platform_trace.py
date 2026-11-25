@@ -47,7 +47,7 @@ def test_trace_aligns_commands_world_contacts_and_last_applied_targets(tmp_path)
         env.root_states[0, :3] = torch.tensor([3., 4., 5.])
         trace.record(1, torch.tensor([False, True]))
         set_orientation(env, .4)  # state after auto-reset belongs to the next attempt
-        trace.record(2, torch.tensor([True, False]))
+        trace.record(2, torch.tensor([True, False]), termination_reason="stable_landing")
         set_orientation(env, .42)
         trace.record(3, torch.tensor([False, False]))
     with path.open() as stream:
@@ -67,6 +67,8 @@ def test_trace_aligns_commands_world_contacts_and_last_applied_targets(tmp_path)
     for key, value in expected.items():
         assert float(first[key]) == pytest.approx(value, abs=1e-5)
     assert first["attempt"] == terminal["attempt"] == "1"
+    assert first["termination_reason"] == next_trial["termination_reason"] == ""
+    assert terminal["termination_reason"] == "stable_landing"
     assert terminal["terminal"] == "1" and terminal["base_z_world_m"] == ""
     assert terminal["FL_wheel_force_z_world_N"] == ""
     assert terminal["leg_pose_mae_rad"] == ""
@@ -97,7 +99,7 @@ def test_trace_leg_pose_uses_each_actual_leg_angle_and_ignores_rolling_wheels(tm
             env.dof_pos[0, idx] = env.default_dof_pos[0, idx]
     with path.open() as stream:
         reader = csv.DictReader(stream)
-        assert reader.fieldnames[-1] == "leg_pose_mae_rad"
+        assert reader.fieldnames[-2:] == ["leg_pose_mae_rad", "termination_reason"]
         assert [float(row["leg_pose_mae_rad"]) for row in reader] == pytest.approx([0.] + [.6 / 12] * 12)
 
 

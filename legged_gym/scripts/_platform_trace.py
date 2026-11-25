@@ -49,11 +49,11 @@ class PlatformPlayTrace:
         for joint in FRONT_LEGS:
             fields += [joint + "_target_rad", joint + "_actual_rad"]
         fields += [name + "_wheel_target_rad_s" for name in WHEELS]
-        fields.append("leg_pose_mae_rad")
+        fields += ["leg_pose_mae_rad", "termination_reason"]
         self.num_fields = len(fields)
         self.writer.writerow(fields)
 
-    def record(self, step, done):
+    def record(self, step, done, termination_reason=""):
         env = self.env
         self.attempt_step += 1
         terminal = bool(done.reshape(-1)[0].item())
@@ -61,7 +61,7 @@ class PlatformPlayTrace:
                int(terminal), *self.command]
         if terminal:
             # step() has already reset root/joint states and cleared contact data.
-            self.writer.writerow(row + [""] * (self.num_fields - len(row)))
+            self.writer.writerow(row + [""] * (self.num_fields - len(row) - 1) + [termination_reason])
             self.prev_yaw = _yaw_pitch(env.root_states[0, 3:7].tolist())[0]
             self.attempt += 1
             self.attempt_step = 0
@@ -82,7 +82,7 @@ class PlatformPlayTrace:
         delta = yaw - self.prev_yaw
         yaw_rate = math.atan2(math.sin(delta), math.cos(delta)) / env.dt
         self.prev_yaw = yaw
-        self.writer.writerow(row + values[:3] + [yaw, pitch, yaw_rate] + values[7:])
+        self.writer.writerow(row + values[:3] + [yaw, pitch, yaw_rate] + values[7:] + [""])
 
 
 @contextmanager

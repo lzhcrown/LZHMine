@@ -81,7 +81,7 @@ G12 的日志与检查点写入 `logs/nezha_moe_cts/g12_high_platform/`。从旧
 | 关节与接触 | 运动站姿使用腿关节绝对偏差和，权重 −0.05。关节速度代价只计入腿关节。碰撞代价计入躯干、髋、大腿和小腿 | 沿用 Dreamwaq `highplatform` 分支 M20 配置（`1144ec1`）。前进指令低于 0.1 m/s 时使用静止站姿的绝对偏差和，权重 −0.5。高于阈值时使用运动站姿的 L2 范数，权重 −0.15。关节速度代价包含缩放至 0.1 倍的轮速。另对 16 个关节超过各自额定速度 95% 的部分计罚。碰撞代价统计髋、大腿和小腿 |
 | 回报 | 先将高台奖励和的下限设为 0，再加失败终止项 −0.8 | 保留高台奖励和的正负值，高台 17 项中没有独立的失败终止奖励 |
 
-两个版本均使用 20 级地图和 Dreamwaq M20 的升降级规则。重置前，取机身末位置与出生参考点的水平距离 `D`。9 m 地块上，`D > 4.5 m` 升一级。其余回合若 `D < 0.5 × 回合时长上限 × 末步平面指令速率` 则降一级，否则保持原级。凸台的出生参考点在台前低处。课程等级衡量水平移动能力，登顶成功率可通过固定高度回放或评估单独统计。原 `g12_high_platform` 使用同一套地形高度和深度公式，按回合内的最远水平位移超过 4.0 m 晋级。
+两个版本均使用 20 级地图和 Dreamwaq M20 的升降级规则。重置前，取机身末位置与出生参考点的水平距离 `D`。9 m 地块上，`D > 4.5 m` 升一级。其余回合若 `D < 0.5 × 回合时长上限 × 末步平面指令速率` 则降一级，否则保持原级。凸台的出生参考点在台前低处。课程等级衡量水平移动能力，固定高度评估可单独统计登顶后在另一侧平稳落地的成功率。原 `g12_high_platform` 使用同一套地形高度和深度公式，按回合内的最远水平位移超过 4.0 m 晋级。
 
 比较 v1 和 v2 时，两条命令可使用同一个 G7 检查点、种子和训练轮数。
 
@@ -94,14 +94,14 @@ G12 的日志与检查点写入 `logs/nezha_moe_cts/g12_high_platform/`。从旧
 
 从头训练可将 `--init_from` 及其路径换成 `--from_scratch`。从已有 v1 策略开始 v2 实验时，用 v2 的 `train.py --init_from /path/to/v1/model_XXXX.pt`，它会载入已有权重、重新初始化优化器并应用 v2 配置。`--resume` 按检查点中保存的实验标识和环境配置续训。若此前已用过渡配置以 `g12_v1` 名义训练，其检查点仍带 `g12_v1` 标识，可通过 v1 入口恢复当次训练，也可通过 v2 的 `--init_from` 开始新版实验。
 
-每版的训练、Isaac Gym 回放、导出和 MuJoCo 仿真入口分别为对应实验目录中的 `train.py`、`play.py`、`export.py` 和 `simulate.py`。日志和检查点写入 `logs/nezha_moe_cts/<版本>/`，默认导出位置为 `deploy/deploy_mujoco/nezha/policy/<版本>/policy.pt`，其中 `<版本>` 为 `g12_v1` 或 `g12_v2`。以下命令分别回放两个版本的 50 cm 凸台并输出独立的轨迹文件。
+每版的训练、Isaac Gym 回放、导出和 MuJoCo 仿真入口分别为对应实验目录中的 `train.py`、`play.py`、`export.py` 和 `simulate.py`。日志和检查点写入 `logs/nezha_moe_cts/<版本>/`，默认导出位置为 `deploy/deploy_mujoco/nezha/policy/<版本>/policy.pt`，其中 `<版本>` 为 `g12_v1` 或 `g12_v2`。以下示例读取上传到 `logs/<版本>/model_20000.pt` 的检查点，分别回放两个版本的 50 cm 凸台并保存轨迹。记录时，`terminal=1` 的行用 `termination_reason` 标明平稳落地（`stable_landing`）、跌倒（`fall`）或超时（`time_limit`）。只观看时可省略 `--platform_trace` 及其路径。
 
 ```bash
 for version in g12_v1 g12_v2; do
   .venv/bin/python "experiments/${version}/play.py" \
-    --load_run -1 --checkpoint -1 --platform_shape block \
+    --checkpoint_path "logs/${version}/model_20000.pt" --platform_shape block \
     --platform_height 0.50 --platform_width 5.0 --command_x 0.8 --command_y 0 --command_yaw 0 \
-    --play_num_envs 1 --play_steps 400 --seed 10 --no_export \
+    --play_num_envs 1 --play_steps 3000 --seed 10 --no_export \
     --platform_trace "logs/${version}_block50_seed10.csv"
 done
 ```
@@ -117,7 +117,7 @@ done
   --init_from /path/to/g12_v1/model_XXXX.pt --num_envs 4096 --max_iterations 1000 --seed 10
 ```
 
-使用各版本的 `play.py` 和相同的 `--platform_height 1.00 --platform_width 5.0 --command_x 0.8 --command_y 0 --command_yaw 0` 对照原 v1 和微调后的 v3。指定 `--platform_shape block --platform_trace <独立CSV路径>` 后，`leg_pose_mae_rad` 记录每一步 12 个腿关节相对默认角的平均绝对偏差。按相同种子分别统计登台成功率，并在成功回合中比较四轮都在台面、仍有前进指令时的关节误差和实际前进速度。
+使用各版本的 `play.py` 和相同的 `--platform_height 1.00 --platform_width 5.0 --command_x 0.8 --command_y 0 --command_yaw 0` 对照原 v1 和微调后的 v3。指定 `--platform_shape block --platform_trace <独立CSV路径>` 后，`leg_pose_mae_rad` 记录每一步 12 个腿关节相对默认角的平均绝对偏差。按相同种子分别统计越过高台并在另一侧平稳落地的成功率，在这些成功回合中比较四轮都在台面、仍有前进指令时的关节误差和实际前进速度。
 
 ### G0–G11 对照实验
 
@@ -160,6 +160,10 @@ cd /home/crown/LZHMine
 ```
 
 ## Play
+
+Isaac Gym 每轮从出生开始计时，上限为 **30 仿真秒**。楼梯或高台要求机器人到达中央阶面或台面，然后在另一侧平地平稳落地。凹形地形先下至底部，再从对岸回到平地。通过、跌倒或超时会自动开始下一轮。
+
+有窗口的 `play.py` 默认持续运行，按 Esc、关闭窗口或 Ctrl+C 退出。无窗口的 `--headless` 默认执行 5000 个控制步。可用 `--play_steps N` 指定**整次回放**的步数，耗尽时结束进程，即使当轮仍在进行。例如控制周期为 0.02 s 时，`--play_steps 3000` 共运行 60 仿真秒。
 
 ```bash
 cd /home/crown/LZHMine
@@ -270,7 +274,7 @@ cd /home/crown/LZHMine
 
 ## Isaac Gym 观看与指标原始数据采集
 
-八组学生策略支持十种固定测试地形：凹形/凸形楼梯各设单阶 35、25、30 cm，高台顶面 5×5 m、高 45 cm，以及平地、粗糙地面、20° 斜坡（水平长 6.5 m、宽 5.6 m）。使用 `wheel_gym_CQ` 的四轮穿越判据。模型默认读取 `logs/<组名>/model_20000.pt`。
+八组学生策略支持十种默认固定测试地形，包括单阶高 35、25、30 cm 的凹形和凸形楼梯，5×5 m、高 45 cm 的高台，以及平地、粗糙地面和 20° 斜坡。单组使用 `--viewer --no-record` 时，各机器人每轮最长运行 30 仿真秒并自动重试。楼梯和高台以机器人走过中央阶面或台面并在另一侧平地持续稳定支撑为成功。模型默认读取 `logs/<组名>/model_20000.pt`。
 
 ```bash
 # 只看八组通过 30 cm 凸形楼梯，不写采集文件
@@ -283,7 +287,7 @@ cd /home/crown/LZHMine
   --group all --checkpoint 20000 --envs-per-terrain 20 --episodes-per-terrain 500 \
   --metric-successes-per-terrain 10 \
   --spawn-xy-jitter 0.02 --speed 0.8 --seed 10 --max-seconds 30 \
-  --output-dir evaluations/cts_20000_terrain_v12_500_success10_seed10
+  --output-dir evaluations/cts_20000_protocol14_500_success10_seed10
 ```
 
 观看时相机跟随机器人，N/B 切换目标，空格暂停，Esc 结束。正式采集的每组 5000 次尝试全部写入结果及索引；仅每种地形前 10 次成功保留详细指标，分别写入 `power.csv`、`cot.csv`、`tracking.csv`、`stability.csv`。`success_rate.csv` 统计全部尝试的成功率。各表以唯一 `trial_id` 关联，失败和超额成功不保存详细轨迹。地形名、八组名称、观看和采集完整命令见 [使用说明](legged_gym/evaluation/README.md)。

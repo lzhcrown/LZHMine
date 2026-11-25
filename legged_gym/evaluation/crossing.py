@@ -124,7 +124,7 @@ class WheelWindowCrossing:
         self.exit_edge_code[ids] = 0
         self.active[ids] = True
 
-    def _update_passage(self, bounds, elapsed, contact, valid):
+    def _update_passage(self, bounds, elapsed, contact, valid, landing):
         """Protocol 7: enter the rectangle, then clear a non-entry edge.
 
         Retreat/side motion never ends an attempt. Each wheel must have entered;
@@ -181,8 +181,15 @@ class WheelWindowCrossing:
         cleared = torch.stack(clear_edges, dim=1)
         all_entered = (self.wheels_entered_mask | ~self.selected_pair_mask).all(dim=1)
         failed = self.active & ~valid  # Numerical errors are handled separately by the environment.
-        exited = self.active & self.window_started & all_entered & cleared.any(dim=1) & valid
-        self.exit_edge_code = torch.where(exited, cleared.long().argmax(dim=1) + 1, self.exit_edge_code)
+        completed = cleared.any(dim=1)
+        exit_edge = cleared.long().argmax(dim=1) + 1
+        if landing is not None:
+            required, landed = landing
+            completed = torch.where(required, landed, completed)
+            far_edge = torch.where(self.travel_direction > 0, 2, 1)
+            exit_edge = torch.where(required, far_edge, exit_edge)
+        exited = self.active & self.window_started & all_entered & completed & valid
+        self.exit_edge_code = torch.where(exited, exit_edge, self.exit_edge_code)
         self.exit_time_s = torch.where(exited, elapsed, self.exit_time_s)
         self.reason_code = torch.where(failed, 3, self.reason_code)
         self.previous_wheel_bounds = torch.where(self.active[:, None, None], bounds, previous)
@@ -194,7 +201,7 @@ class WheelWindowCrossing:
                     wheels_entered_mask=self.wheels_entered_mask, wheel_contact_mask=self.wheel_contact_mask)
 
     @torch.no_grad()
-    def update(self, wheel_bounds, trial_elapsed_s, wheel_contact_mask=None):
+    def update(self, wheel_bounds, trial_elapsed_s, wheel_contact_mask=None, *, landing=None):
         """Return one-step ``entered``, ``exited``, and ``failed`` event masks.
 
         Contact observations accumulate only while the wheel's XY projection
@@ -202,6 +209,8 @@ class WheelWindowCrossing:
         For a wheel crossing the entrance between samples, lateral overlap is
         checked by interpolating the two observed AABBs at that entrance plane.
         Entry/exit timestamps remain discrete control-boundary timestamps.
+        For patch obstacles, ``landing=(required, landed)`` supplies the physical
+        completion event for those slots while retaining projection-based entry.
         """
         bounds = self._tensor(wheel_bounds, (self.num_envs, 4, 4), "wheel_bounds")
         elapsed = self._vector(trial_elapsed_s, self.num_envs, "trial_elapsed_s")
@@ -212,7 +221,7 @@ class WheelWindowCrossing:
                  & (bounds[:, :, 1] >= bounds[:, :, 0]).all(dim=1)
                  & (bounds[:, :, 3] >= bounds[:, :, 2]).all(dim=1))
         if self.exit_rule == "opposite_or_sides":
-            return self._update_passage(bounds, elapsed, contact, valid)
+            return self._update_passage(bounds, elapsed, contact, valid, landing)
         entrance = torch.where(self.travel_direction > 0, self.window_bounds[:, 0], -self.window_bounds[:, 1])
         exit_plane = torch.where(self.travel_direction > 0, self.window_bounds[:, 1], -self.window_bounds[:, 0])
         leading, trailing = self._longitudinal(bounds, self.travel_direction)

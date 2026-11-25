@@ -30,19 +30,21 @@ def test_viewer_focus_and_pause_process_events_without_stepping_physics(monkeypa
         viewer.render()
 
 
-def test_headless_preview_uses_no_sinks_and_always_destroys_sim(tmp_path, monkeypatch):
+def test_headless_preview_uses_no_sinks_and_always_destroys_sim(tmp_path, monkeypatch, capsys):
     monkeypatch.chdir(tmp_path)
     env = NS(viewer=None, sim=object(), num_obs=2, dt=.02, evaluation_complete=False,
              completed_episodes=[], gym=NS(destroy_sim=Mock()), reset=Mock(),
              get_observations=Mock(return_value=torch.zeros(1, 2)))
     def step(actions):
         env.evaluation_complete = True
-        env.completed_episodes.append(dict(terrain='platform_45cm', status='timeout', reason='time_limit'))
+        env.completed_episodes.append(dict(env_id=0, episode_index=1, trial_elapsed_s=30.,
+                                          terrain='platform_45cm', status='timeout', reason='time_limit'))
     env.step = step
     factory = Mock(return_value=env)
     args = NS(sim_device='cpu', viewer=False, no_record=True)
     policy = NS(num_actor_obs=2, act_inference=lambda obs: torch.zeros(1, 16))
     assert run_preview(args, object(), object(), object(), policy, factory) == 0
+    assert 'env 0 | platform_45cm | round 2 | 30.00 s | timeout (time_limit)' in capsys.readouterr().out
     assert factory.call_args.kwargs == {}
     env.gym.destroy_sim.assert_called_once_with(env.sim)
     assert list(tmp_path.iterdir()) == []

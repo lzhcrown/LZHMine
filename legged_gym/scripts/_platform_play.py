@@ -2,7 +2,58 @@
 
 import math
 
-from legged_gym.terrains.wf import default_wf_sub_terrains
+import numpy as np
+
+from legged_gym.terrains.wf import default_wf_sub_terrains, make_height_field
+
+
+def wf_obstacle_bounds(terrain, cfg, row, col):
+    """Return actual outer and central surface bounds (xmin, xmax, ymin, ymax) and height."""
+    name = terrain.tile_types[row, col]
+    if name not in ("stairs_up", "stairs_down", "platform_block", "platform_pit", "high_platform"):
+        return None
+    # These five WF geometries are deterministic. Read their native raster so
+    # older checkpoints' floor quantization and the finer stair grid also work.
+    samples = make_height_field(name, terrain.difficulties[row, col], cfg)
+    spec = cfg.wf_sub_terrains[name]
+    spacing = spec.get("horizontal_scale", cfg.horizontal_scale)
+    threshold = spec.get("slope_threshold") if cfg.mesh_type == "trimesh" else None
+    cx, cy = (size // 2 for size in samples.shape)
+    level = samples[cx, cy]
+    if level == 0:
+        return None
+    outer, middle = [], []
+    for origin, line in ((row * cfg.terrain_length, samples[:, cy]),
+                         (col * cfg.terrain_width, samples[cx, :])):
+        for bounds, mask in ((outer, line != 0), (middle, line == level)):
+            indices = np.flatnonzero(mask)
+            jump = (int(line[indices[0]]) - int(line[indices[0] - 1])) * cfg.vertical_scale
+            # Mesh conversion moves a vertical face to the higher endpoint.
+            # A native heightfield keeps the ramp between adjacent samples.
+            vertical = threshold is not None and abs(jump) > threshold * spacing
+            expand = int(jump < 0 if vertical else bounds is outer)
+            lower = indices[0] - expand
+            upper = indices[-1] + expand
+            bounds.extend((origin + lower * spacing, origin + upper * spacing))
+    return outer, middle, level * cfg.vertical_scale
+
+
+def wf_landing_distance(terrain, outer, axis, sign):
+    """Continuous zero-height ground available beyond the final obstacle face."""
+    bounds = np.asarray(outer).reshape(2, 2)
+    edge = bounds[axis, int(sign > 0)]
+    scale, border = terrain.cfg.horizontal_scale, terrain.cfg.border_size
+    grid = terrain.height_field_raw if axis == 0 else terrain.height_field_raw.T
+    along = (edge + border) / scale
+    start = math.floor(along + 1e-7) + 1 if sign > 0 else math.ceil(along - 1e-7) - 1
+    if not 0 <= start < grid.shape[0]:
+        return 0.
+    sides = (bounds[1 - axis] + border) / scale
+    lo, hi = max(0, math.floor(sides[0])), min(grid.shape[1], math.ceil(sides[1]) + 1)
+    ground = grid[start::sign, lo:hi]
+    blocked = np.flatnonzero((ground != 0).any(axis=1))
+    clear = blocked[0] if len(blocked) else len(ground)
+    return max(0., sign * ((start + sign * (clear - 1)) * scale - border - edge))
 
 
 def configure_fixed_platform(terrain, shape, height, num_envs, width=None):

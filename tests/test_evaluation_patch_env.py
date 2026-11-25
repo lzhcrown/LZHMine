@@ -84,6 +84,7 @@ def patch_env(sign=1, quota=1, all_wheels=False):
     env.attempt_indices[:] = -1
     env._attempt_metadata = [{}]
     env.crossing = WheelWindowCrossing(1, "cpu", exit_rule="opposite_or_sides")
+    env._init_obstacle_traversal()
     env.attempt_active = torch.zeros(1, dtype=torch.bool)
     env.evaluation.command_vx = float(sign)
     env.evaluation.wheel_side = "all" if all_wheels else "both"
@@ -139,6 +140,77 @@ def advance(env, x, y=None):
 
 
 class PatchEvaluationEnvTests(unittest.TestCase):
+    def test_platform_requires_support_on_top_then_sustained_landing_in_both_directions(self):
+        for sign in (1, -1):
+            with self.subTest(sign=sign):
+                env = patch_env(sign=sign, all_wheels=True)
+                env.terrain = NS(type_names=("platform_50cm",),
+                                 metadata={"tiles": [dict(platform_size_xy_m=[5., 5.], platform_height_m=.5)]})
+                env._init_obstacle_traversal()
+                env.contact_forces[0, :4, 2] = 50.
+                # Test FK places wheel bottoms 0.4+0.11 m below the base.
+                env.root_states[0, 2] = .51
+                advance(env, .5 if sign > 0 else 5.7)
+                self.assertTrue(env.metrics.active[0])
+                env.root_states[0, 2] += .5
+                advance(env, 3.1)
+                self.assertTrue(env.obstacle_traversal.reached_middle[0])
+                self.assertFalse(env.reset_buf[0])
+                far = 6.75 if sign > 0 else -.55
+                advance(env, far)
+                self.assertFalse(env.reset_buf[0])
+                self.assertIsNone(env._attempt_metadata[0]["exit_time_s"])
+                env.root_states[0, 2] = .51
+                for _ in range(9):
+                    advance(env, far)
+                    self.assertFalse(env.reset_buf[0])
+                advance(env, far)
+                self.assertEqual(env._episode_reason[0], "stable_landing")
+                self.assertEqual(env._attempt_metadata[0]["exit_edge"], "xmax" if sign > 0 else "xmin")
+                self.assertAlmostEqual(env._attempt_metadata[0]["exit_time_s"], env.episode_length_buf.item() * env.dt)
+
+    def test_skipping_platform_or_landing_off_to_the_side_cannot_report_success(self):
+        env = patch_env(all_wheels=True)
+        env.terrain = NS(type_names=("platform_50cm",),
+                         metadata={"tiles": [dict(platform_size_xy_m=[5., 5.], platform_height_m=.5)]})
+        env._init_obstacle_traversal()
+        env.contact_forces[0, :4, 2] = 50.
+        env.root_states[0, 2] = .51
+        advance(env, .5)
+        for _ in range(11):
+            advance(env, 6.75)
+        self.assertFalse(env.reset_buf[0])
+        self.assertIsNone(env._attempt_metadata[0]["exit_time_s"])
+        env.root_states[0, 2] += .5
+        advance(env, 3.1)
+        self.assertTrue(env.obstacle_traversal.reached_middle[0])
+        env.root_states[0, 2] = .51
+        advance(env, 3.1, y=4.)
+        for _ in range(11):
+            advance(env, 6.75, y=0.)
+        self.assertFalse(env.obstacle_traversal.reached_middle[0])
+        self.assertFalse(env.reset_buf[0])
+        self.assertIsNone(env._attempt_metadata[0]["exit_time_s"])
+
+    def test_concave_stairs_require_supported_valley_before_climbing_to_the_far_ground(self):
+        env = patch_env(all_wheels=True)
+        env.terrain = NS(type_names=("stairs_concave_25cm",),
+                         metadata={"tiles": [dict(central_platform_size_m=3., patch_length_m=6.2,
+                                                  tread_width_m=.3, central_platform_height_m=-2.)]})
+        env._init_obstacle_traversal()
+        env.contact_forces[0, :4, 2] = 50.
+        env.root_states[0, 2] = .51
+        advance(env, .5)
+        advance(env, 3.1)
+        self.assertFalse(env.obstacle_traversal.reached_middle[0])
+        env.root_states[0, 2] -= 2.
+        advance(env, 3.1)
+        self.assertTrue(env.obstacle_traversal.reached_middle[0])
+        env.root_states[0, 2] = .51
+        for _ in range(10):
+            advance(env, 6.75)
+        self.assertEqual(env._episode_reason[0], "stable_landing")
+
     def test_standard_all_wheels_window_keeps_raw_sampling_until_last_exit(self):
         env = patch_env(all_wheels=True)
         advance(env, -.5)
@@ -386,6 +458,25 @@ class PatchEvaluationEnvTests(unittest.TestCase):
         env.interrupt("test")
         self.assertEqual([row["status"] for row in env.completed_episodes], ["timeout", "interrupted"])
         self.assertFalse(env.evaluation_complete)
+
+    def test_continuous_preview_restarts_the_clock_and_stays_active_after_each_timeout(self):
+        env = patch_env(quota=math.inf)
+        env.max_episode_length = 1
+        ids = torch.tensor([0])
+
+        def physical_reset(_self, env_ids):
+            env.root_states[env_ids, 0], env.episode_length_buf[env_ids] = -.8, 0
+
+        with patch.object(NezhaMoECTSEnv, "reset_idx", side_effect=physical_reset), \
+                patch.object(env, "_sync_reset_state"):
+            for index in range(3):
+                advance(env, -.7)
+                env.reset_idx(ids)
+                row = env.completed_episodes[-1]
+                self.assertEqual((row["episode_index"], row["status"], row["trial_elapsed_s"]),
+                                 (index, "timeout", env.dt))
+                self.assertTrue(env.attempt_active[0])
+                self.assertFalse(env.evaluation_complete)
 
     def test_explicit_window_resets_keep_raw_attempt_keys_unique_and_quota_intact(self):
         env = patch_env(quota=1)

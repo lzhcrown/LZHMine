@@ -6,7 +6,7 @@ from tempfile import TemporaryDirectory
 
 import pytest
 
-from legged_gym.evaluation.timing import traversal_record
+from legged_gym.evaluation.timing import attempt_step_limit, traversal_record
 from legged_gym.scripts.backfill_traversal_times import backfill, source_hash
 
 
@@ -82,3 +82,14 @@ def test_bad_timestamps_do_not_produce_partial_batch_outputs():
         with pytest.raises(ValueError, match='missing/invalid timing'):
             backfill(root)
         assert not list(root.rglob('traversal_time*.csv'))
+
+
+def test_simulation_time_cap_counts_whole_control_steps():
+    assert attempt_step_limit(30, .02) == 1500
+    assert attempt_step_limit(30, .004999999888 * 4) == 1500
+    assert attempt_step_limit(30, .07) == 428
+    assert attempt_step_limit(.041, .02) == 2
+    with pytest.raises(ValueError):
+        attempt_step_limit(.01, .02)
+    with pytest.raises(ValueError):
+        attempt_step_limit(31, .02)

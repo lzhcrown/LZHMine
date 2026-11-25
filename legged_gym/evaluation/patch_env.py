@@ -1,10 +1,9 @@
 # Adapted from wheel_gym_CQ/wheel_legged_gym/evaluation/patch_env.py
-"""Measure a local patch from the first planned wheel entry to the last exit."""
+"""Measure a terrain attempt from wheel entry to exit or settled obstacle landing."""
 import math
 
 import numpy as np
 from isaacgym import gymtorch
-from isaacgym.torch_utils import quat_apply
 import torch
 
 from legged_gym.envs.nezha.nezha_moe_cts_env import NezhaMoECTSEnv
@@ -12,6 +11,12 @@ from .crossing import WheelWindowCrossing
 from .env import EvaluationEnv
 from .geometry import wheel_geometry_from_cfg
 from .patch_terrain import PatchEvaluationTerrain
+from .traversal import ObstacleTraversal, wheel_centers_and_extents
+
+
+def _wheel_bounds_xy(center, extent):
+    return torch.stack((center[..., 0] - extent[..., 0], center[..., 0] + extent[..., 0],
+                        center[..., 1] - extent[..., 1], center[..., 1] + extent[..., 1]), dim=-1)
 
 
 def project_wheel_cylinders(rigid_states, collision_offsets, collision_axes, radii, widths):
@@ -20,17 +25,7 @@ def project_wheel_cylinders(rigid_states, collision_offsets, collision_axes, rad
     Rigid states contain link poses, not wheel DOF indices or robot-root poses.
     This projection intentionally permits an airborne wheel to cross the patch.
     """
-    n, wheels = rigid_states.shape[:2]
-    quaternion = rigid_states[..., 3:7].reshape(-1, 4)
-    offset = collision_offsets[None].expand(n, -1, -1).reshape(-1, 3)
-    axis = collision_axes[None].expand(n, -1, -1).reshape(-1, 3)
-    center = rigid_states[..., :3] + quat_apply(quaternion, offset).reshape(n, wheels, 3)
-    world_axis = quat_apply(quaternion, axis).reshape(n, wheels, 3)
-    world_axis = world_axis / torch.linalg.vector_norm(world_axis, dim=-1, keepdim=True).clamp_min(1e-12)
-    extent = (radii[None, :, None] * torch.sqrt((1. - world_axis[..., :2].square()).clamp_min(0.)) +
-              widths[None, :, None] * .5 * world_axis[..., :2].abs())
-    return torch.stack((center[..., 0] - extent[..., 0], center[..., 0] + extent[..., 0],
-                        center[..., 1] - extent[..., 1], center[..., 1] + extent[..., 1]), dim=-1)
+    return _wheel_bounds_xy(*wheel_centers_and_extents(rigid_states, collision_offsets, collision_axes, radii, widths))
 
 
 class PatchEvaluationEnv(EvaluationEnv):
@@ -63,6 +58,7 @@ class PatchEvaluationEnv(EvaluationEnv):
             setattr(self, "_wheel_" + name, torch.tensor(self.wheel_geometry[name],
                                                         dtype=torch.float, device=self.device))
         self.crossing = WheelWindowCrossing(self.num_envs, self.device, exit_rule="opposite_or_sides")
+        self._init_obstacle_traversal()
         self.attempt_active = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
         self._attempt_metadata = [{} for _ in range(self.num_envs)]
 
@@ -126,11 +122,67 @@ class PatchEvaluationEnv(EvaluationEnv):
         return torch.stack((centers[..., 0] - extent[..., 0], centers[..., 0] + extent[..., 0],
                             centers[..., 1] - extent[..., 1], centers[..., 1] + extent[..., 1]), dim=-1)
 
+    def _init_obstacle_traversal(self):
+        names = self.terrain.type_names
+        required = [name.startswith(("stairs_", "platform_")) for name in names]
+        self.obstacle_traversal = None
+        if not any(required):
+            return
+        self.obstacle_traversal = ObstacleTraversal(self.num_envs, self.dt, self.device)
+        self.terrain.metadata["obstacle_landing"] = {
+            "settle_time_s": ObstacleTraversal.SETTLE_TIME_S,
+            "required_control_steps": self.obstacle_traversal.required_steps,
+            "wheel_bottom_height_tolerance_m": ObstacleTraversal.HEIGHT_TOLERANCE_M,
+            "minimum_supported_wheels": 3, "upward_force_threshold_N": ObstacleTraversal.SUPPORT_FORCE_N,
+            "maximum_gravity_z": ObstacleTraversal.MAX_GRAVITY_Z,
+            "maximum_abs_world_vz_m_s": ObstacleTraversal.MAX_VERTICAL_SPEED_M_S,
+            "maximum_roll_pitch_rate_norm_rad_s": ObstacleTraversal.MAX_TILT_RATE_RAD_S,
+            "exit_edge": "For stable_landing, xmin/xmax identifies the far face of the obstacle. exit_time_s records the settled landing time.",
+        }
+        self.requires_landing = torch.tensor(required, device=self.device)[self.terrain_types]
+        top_half, outer_half, heights = [], [], []
+        for name, tile in zip(names, self.terrain.metadata["tiles"]):
+            if name.startswith("stairs_"):
+                top_half.append(tile["central_platform_size_m"] / 2)
+                outer_half.append(tile["patch_length_m"] / 2 - tile["tread_width_m"])
+                heights.append(tile["central_platform_height_m"])
+            else:
+                half = tile.get("platform_size_xy_m", [0.])[0] / 2
+                top_half.append(half)
+                outer_half.append(half)
+                heights.append(tile.get("platform_height_m", 0.))
+        self.middle_half_width = self.patch_bounds.new_tensor(top_half)[self.terrain_types, None]
+        self.obstacle_half_width = self.patch_bounds.new_tensor(outer_half)[self.terrain_types, None]
+        self.middle_height = self.patch_bounds.new_tensor(heights)[self.terrain_types, None]
+
+    def _landed_on_far_side(self, bounds, bottom_z, support_z):
+        x = self.patch_bounds[:, :2].mean(dim=1, keepdim=True)
+        y = self.patch_bounds[:, 2:].mean(dim=1, keepdim=True)
+        x0, x1, y0, y1 = bounds.unbind(dim=-1)
+        middle = self.middle_half_width
+        outer = self.obstacle_half_width
+        tolerance = self.obstacle_traversal.HEIGHT_TOLERANCE_M
+        on_middle = ((x0 >= x - middle) & (x1 <= x + middle) &
+                     (y0 >= y - middle) & (y1 <= y + middle) &
+                     ((bottom_z - self.middle_height).abs() <= tolerance))
+        in_lane = ((y0 >= y - outer) & (y1 <= y + outer)).all(dim=1)
+        far_x = torch.where(self.travel_signs[:, None] > 0,
+                            (x0 >= x + outer) & (x1 <= self.traversal_bounds[:, 1:2]),
+                            (x1 <= x - outer) & (x0 >= self.traversal_bounds[:, 0:1]))
+        # The external pads and the approach/exit beyond the outermost riser
+        # are at z=0 for both signed stairs and every fixed square platform.
+        on_far_ground = far_x & (bottom_z.abs() <= tolerance)
+        return self.obstacle_traversal.update(on_middle, on_far_ground, in_lane, support_z,
+                                              self.projected_gravity[:, 2], self.root_states[:, 9],
+                                              self.base_ang_vel[:, :2])
+
     def _current_wheel_geometry(self):
         states = self.rigid_body_states.view(self.num_envs, self.num_bodies, 13)[:, self.measurement_wheel_indices]
-        bounds = project_wheel_cylinders(states, self._wheel_collision_offsets,
-                                        self._wheel_collision_axes, self._wheel_radii, self._wheel_widths)
-        contact = torch.linalg.vector_norm(self.contact_forces[:, self.measurement_wheel_indices], dim=-1)
+        centers, extents = wheel_centers_and_extents(states, self._wheel_collision_offsets,
+                                                     self._wheel_collision_axes, self._wheel_radii, self._wheel_widths)
+        bounds = _wheel_bounds_xy(centers, extents)
+        forces = self.contact_forces[:, self.measurement_wheel_indices]
+        contact = torch.linalg.vector_norm(forces, dim=-1)
         contact = contact > float(getattr(self.evaluation, "contact_force_threshold", 1.))
         # Diagnostic ground contact while the wheel's XY projection overlaps the
         # patch. Net force does not locate the contact point: it could be on the
@@ -138,7 +190,11 @@ class PatchEvaluationEnv(EvaluationEnv):
         p = self.patch_bounds[:, None]
         overlap = ((bounds[..., 1] >= p[..., 0]) & (bounds[..., 0] <= p[..., 1]) &
                    (bounds[..., 3] >= p[..., 2]) & (bounds[..., 2] <= p[..., 3]))
-        return bounds, contact & overlap
+        landing = None
+        if self.obstacle_traversal is not None:
+            landed = self._landed_on_far_side(bounds, centers[..., 2] - extents[..., 2], forces[..., 2])
+            landing = self.requires_landing, landed
+        return bounds, contact & overlap, landing
 
     def _start(self, env_ids):
         """Start approaches without recording measurement-window samples."""
@@ -148,6 +204,8 @@ class PatchEvaluationEnv(EvaluationEnv):
                             travel_direction=self.travel_signs[env_ids],
                             selected_side=self.selected_sides[env_ids],
                             wheel_bounds=self._initial_wheel_bounds(env_ids))
+        if self.obstacle_traversal is not None:
+            self.obstacle_traversal.reset(env_ids)
         self.attempt_indices[env_ids] += 1
         self.attempt_active[env_ids] = True
         for env_id in env_ids.tolist():
@@ -218,11 +276,12 @@ class PatchEvaluationEnv(EvaluationEnv):
     def check_termination(self):
         if self.crossing is None or not self._evaluation_started:
             return
-        bounds, contact = self._current_wheel_geometry()
+        bounds, contact, landing = self._current_wheel_geometry()
         invalid = ~torch.isfinite(self.root_states).all(dim=1) | ~torch.isfinite(bounds).all(dim=2).all(dim=1)
         if bool((invalid & self.attempt_active).any()):
             raise RuntimeError("Nonfinite evaluation state/geometry; stop collection instead of counting a fall")
-        event = self.crossing.update(bounds, self.episode_length_buf.to(torch.float64) * self.dt, contact)
+        event = self.crossing.update(bounds, self.episode_length_buf.to(torch.float64) * self.dt, contact,
+                                     landing=landing)
         if bool((event["failed"] & self.attempt_active).any()):
             raise RuntimeError("Invalid evaluation geometry/clock; stop collection instead of counting a fall")
         self._update_window_metadata(bounds)
@@ -246,9 +305,12 @@ class PatchEvaluationEnv(EvaluationEnv):
             if failure[env_id]:
                 self._episode_status[env_id] = "failure"
                 self._episode_reason[env_id] = "fall"
+            elif success[env_id]:
+                self._episode_status[env_id] = "success"
+                self._episode_reason[env_id] = ("stable_landing" if landing is not None and self.requires_landing[env_id]
+                                                else "all_wheels_cleared")
             else:
-                self._episode_status[env_id] = "success" if success[env_id] else "timeout"
-                self._episode_reason[env_id] = "all_wheels_cleared" if success[env_id] else "time_limit"
+                self._episode_status[env_id], self._episode_reason[env_id] = "timeout", "time_limit"
 
     def _finish_attempt(self, env_ids, status, reason):
         rows = []
@@ -257,6 +319,9 @@ class PatchEvaluationEnv(EvaluationEnv):
         for env_id, position, velocity in zip(env_ids.tolist(), positions, velocities):
             ids = env_ids.new_tensor([env_id])
             item = self._attempt_metadata[env_id]
+            if self.obstacle_traversal is not None and self.requires_landing[env_id]:
+                item["reached_middle"] = bool(self.obstacle_traversal.reached_middle[env_id])
+                item["stable_landing_steps"] = int(self.obstacle_traversal.landing_steps[env_id])
             trial_elapsed = float(self.episode_length_buf[env_id]) * self.dt
             item.update(trial_elapsed_s=trial_elapsed, terminal_base_position=position,
                         terminal_velocity_world=velocity,

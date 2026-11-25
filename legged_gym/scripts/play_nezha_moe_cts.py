@@ -1,6 +1,7 @@
 #!/usr/bin/env python
 """Evaluate the deployed CTS student in Isaac Gym, including one environment."""
 
+from itertools import count
 import os
 
 if __package__:
@@ -17,6 +18,8 @@ from legged_gym.envs import *  # noqa: F401,F403 - registers tasks
 from legged_gym.utils import get_args, task_registry
 from legged_gym.scripts._platform_play import configure_fixed_platform
 from legged_gym.scripts._platform_trace import open_platform_trace
+from legged_gym.scripts._play_env import StudentPlayEnv
+from legged_gym.evaluation.timing import MAX_ATTEMPT_SECONDS
 from legged_gym.scripts.export_nezha_moe_cts import DEFAULT_EXPORT_PATH, resolve_checkpoint
 from rsl_rl.utils.cts_checkpoint import (
     load_cts_checkpoint, policy_from_checkpoint, validate_checkpoint_actor, validate_checkpoint_policy,
@@ -30,7 +33,8 @@ PLAY_ARGUMENTS = [
     {"name": "--command_x", "type": float, "default": 1.0},
     {"name": "--command_y", "type": float, "default": 0.0},
     {"name": "--command_yaw", "type": float, "default": 0.0},
-    {"name": "--play_steps", "type": int, "default": 5000},
+    {"name": "--play_steps", "type": int,
+     "help": "Total playback control steps. Defaults to continuous in the viewer, 5000 headless."},
     {"name": "--play_num_envs", "type": int, "default": 1},
     {"name": "--terrain", "type": str, "default": "trimesh"},
     {"name": "--platform_shape", "type": str, "choices": ["block", "pit"],
@@ -69,7 +73,7 @@ def _fixed_commands(env, observations, command):
 
 def play(args, task_name=TASK_NAME, export_path=None,
          expected_actor_type=None, expected_actor_expert_num=None, expected_policy=None):
-    if args.play_num_envs < 1 or args.play_steps < 1:
+    if args.play_num_envs < 1 or (args.play_steps is not None and args.play_steps < 1):
         raise ValueError("play_num_envs and play_steps must be positive")
     if args.terrain not in ("plane", "heightfield", "trimesh"):
         raise ValueError("terrain must be plane, heightfield or trimesh")
@@ -91,9 +95,10 @@ def play(args, task_name=TASK_NAME, export_path=None,
     validate_checkpoint_actor(checkpoint, expected_actor_type, expected_actor_expert_num)
     if checkpoint.get("environment_config"):
         task_registry.restore_environment_config(env_cfg, checkpoint["environment_config"])
+        task_registry._restore_asset_path(env_cfg)
     env_cfg.env.observation_config = checkpoint["observation_config"]
     env_cfg.env.num_envs = args.play_num_envs
-    env_cfg.env.episode_length_s = max(env_cfg.env.episode_length_s, 30)
+    env_cfg.env.episode_length_s = MAX_ATTEMPT_SECONDS
     env_cfg.sim.physx.max_gpu_contact_pairs = max(2 ** 10, args.play_num_envs * 256)
     env_cfg.noise.add_noise = args.enable_noise
     env_cfg.commands.heading_command = False
@@ -115,7 +120,7 @@ def play(args, task_name=TASK_NAME, export_path=None,
             if name.startswith("randomize_") or name in ("disturbance", "push_robots", "delay"):
                 if isinstance(getattr(env_cfg.domain_rand, name), bool):
                     setattr(env_cfg.domain_rand, name, False)
-    env, _ = task_registry.make_env(name=task_name, args=args, env_cfg=env_cfg)
+    env, _ = task_registry.make_env(name=task_name, args=args, env_cfg=env_cfg, env_class=StudentPlayEnv)
     env.reset()
     policy = policy_from_checkpoint(checkpoint, device=env.device).eval()
     if policy.num_actor_obs != env.num_obs:
@@ -128,9 +133,10 @@ def play(args, task_name=TASK_NAME, export_path=None,
     observations = _fixed_commands(env, env.get_observations(), command)
     rewards = 0.0
     resets = 0
+    total_steps = args.play_steps if args.play_steps is not None else (5000 if args.headless else None)
     with torch.inference_mode(), open_platform_trace(args.platform_trace, env, command,
                                                     args.platform_shape, height) as trace:
-        for step in range(args.play_steps):
+        for step in (count() if total_steps is None else range(total_steps)):
             actions = policy.act_inference(observations)
             if args.gate_log_interval > 0 and step % args.gate_log_interval == 0:
                 weights = policy.get_expert_probabilities(observations).mean(dim=0).cpu().tolist()
@@ -139,22 +145,23 @@ def play(args, task_name=TASK_NAME, export_path=None,
                 )))
             result = env.step(actions)
             observations, reward, done = result[0], result[2], result[3]
+            terminal_reasons = {}
+            for env_id in done.reshape(-1).nonzero(as_tuple=False).flatten().tolist():
+                if env.play_success[env_id]:
+                    reason = "stable_landing"
+                elif env.time_out_buf[env_id]:
+                    reason = "time_limit"
+                else:
+                    reason = "fall"
+                terminal_reasons[env_id] = reason
+                print(f"step {step + 1} env {env_id} | {reason} | restarting", flush=True)
             if trace is not None:
-                trace.record(step + 1, done)
-            if height is not None and "platform_outcomes" in result[4]:
-                outcome = result[4]["platform_outcomes"]
-                ids = outcome["env_ids"]
-                finished = done.bool().reshape(-1)[ids]
-                trials = torch.stack((ids, outcome["success"], outcome["bypass"],
-                                      outcome["peak_wheel_fraction"]), dim=1)
-                for env_id, success, bypass, peak in trials[finished].cpu().tolist():
-                    print("step {} env {} | {} | success={} bypass={} peak wheel support={:.2f}".format(
-                        step, int(env_id), args.platform_shape, int(success), int(bypass), peak))
+                trace.record(step + 1, done, terminal_reasons.get(0, ""))
             observations = _fixed_commands(env, observations, command)
             rewards += reward.mean().item()
-            resets += int(done.sum().item())
+            resets += len(terminal_reasons)
     print("Student evaluation: {} steps, mean reward/step {:.4f}, {} episode resets".format(
-        args.play_steps, rewards / args.play_steps, resets
+        total_steps, rewards / total_steps, resets
     ))
 
 

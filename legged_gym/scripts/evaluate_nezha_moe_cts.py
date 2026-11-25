@@ -190,11 +190,13 @@ def main(argv=None):
     if args.no_record:
         if len(groups) == 1:
             return evaluate_one(args, args.group, paths[args.group], None)
-        for group in groups:
-            result = subprocess.run(child_command(args, group, paths[group]))
-            if result.returncode:
-                return result.returncode
-        return 0
+        while True:
+            for group in groups:
+                result = subprocess.run(child_command(args, group, paths[group]))
+                if result.returncode:
+                    return result.returncode
+            if args.episodes_per_terrain is not None:
+                return 0
     output = (args.output_dir or REPO_ROOT / 'evaluations' / datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')).resolve()
     if output.exists():
         raise FileExistsError('Use a new output directory: ' + str(output))
@@ -233,7 +235,8 @@ def child_command(args, group, checkpoint, output=None):
     command = [sys.executable, str(Path(__file__).resolve()), '--group', group,
         '--checkpoint-path', str(checkpoint),
         '--terrain-types', ','.join(args.terrain_types), '--envs-per-terrain', str(args.envs_per_terrain),
-        '--episodes-per-terrain', str(args.episodes_per_terrain),
+        # Give every group a turn when continuously cycling an interactive batch.
+        '--episodes-per-terrain', str(args.episodes_per_terrain or args.envs_per_terrain),
         '--metric-successes-per-terrain', str(args.metric_successes_per_terrain),
         '--detail-selection', args.detail_selection,
         '--residual-scale', str(args.residual_scale),

@@ -86,6 +86,7 @@ RAW_METADATA_FIELDS = set(ID_FIELDS + WINDOW_FIELDS + [
     "layout", "seed", "spawn_seed", "spawn_position", "goal_position", "patch_bounds", "corridor_bounds",
     "command_vx", "expected_leading_axle", "measurement_boundary_resolution_s", "max_tilt_deg",
     "contact_force_threshold", "training_failure_persistence_s", "wheel_bounds_xy", "currentwheel_bounds_xy",
+    "reached_middle", "stable_landing_steps",
     "entry_wheel_bounds_xy", "terminal_wheel_bounds_xy", "window_end_time_s", "window_zero_duration",
     "dof_names", "mass_kg", "gravity_m_s2", "gravity_world_xyz", "gravity_vector_m_s2", "goal_direction_xy", "exit_edge",
 ] + [
