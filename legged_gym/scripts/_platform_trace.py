@@ -31,6 +31,8 @@ class PlatformPlayTrace:
         self.attempt_step = 0
         self.prev_yaw = _yaw_pitch(env.root_states[0, 3:7].tolist())[0]
         self.leg_ids = [env.dof_names.index(name + "_joint") for name in FRONT_LEGS]
+        self.pose_ids = [env.dof_names.index(f"{side}_{joint}_joint")
+                         for side in WHEELS for joint in ("hip", "thigh", "calf")]
         self.wheel_ids = [env.dof_names.index(name + "_foot_joint") for name in WHEELS]
         body_ids = env.wheel_body_indices.tolist()
         self.front_bodies = [body_ids[env.cfg.asset.feet_names.index(name + "_foot")] for name in WHEELS[:2]]
@@ -47,6 +49,7 @@ class PlatformPlayTrace:
         for joint in FRONT_LEGS:
             fields += [joint + "_target_rad", joint + "_actual_rad"]
         fields += [name + "_wheel_target_rad_s" for name in WHEELS]
+        fields.append("leg_pose_mae_rad")
         self.num_fields = len(fields)
         self.writer.writerow(fields)
 
@@ -71,8 +74,10 @@ class PlatformPlayTrace:
         # Nezha's P controller uses the last clipped/delayed substep action
         # times vel_scale as its wheel velocity reference.
         wheel_targets = env.delayed_actions[0, -1, self.wheel_ids] * env.cfg.control.vel_scale
+        pose_error = env.dof_pos[0, self.pose_ids] - env.default_dof_pos[0, self.pose_ids]
+        leg_pose_mae = pose_error.abs().mean().view(1)
         values = torch.cat((env.root_states[0, :7], env.base_ang_vel[0, 2:3], wheel_state.flatten(),
-                            front_legs.flatten(), wheel_targets)).detach().cpu().tolist()
+                            front_legs.flatten(), wheel_targets, leg_pose_mae)).detach().cpu().tolist()
         yaw, pitch = _yaw_pitch(values[3:7])
         delta = yaw - self.prev_yaw
         yaw_rate = math.atan2(math.sin(delta), math.cos(delta)) / env.dt

@@ -106,6 +106,19 @@ for version in g12_v1 g12_v2; do
 done
 ```
 
+### G12 v3 高台运动站姿对照
+
+`g12_v3` 从 `g12_v1` 派生，把高台运动站姿项 `run_still` 的权重从 −0.05 调到 G7 平地使用的 −0.10。在凸台和凹台的整个回合，只要平面速度指令的模大于 0.1 m/s，就累计四条腿共 12 个实际关节角相对默认角的绝对偏差。每条腿的髋、大腿和小腿参考角依次为 0、0.8、−1.6 rad，四个驱动轮继续使用速度控制。[v3 配置](experiments/g12_v3/config.py)
+
+从已经验证可登台的 **v1 训练检查点** 开始微调。示例中的 1000 为追加训练轮数。
+
+```bash
+.venv/bin/python experiments/g12_v3/train.py \
+  --init_from /path/to/g12_v1/model_XXXX.pt --num_envs 4096 --max_iterations 1000 --seed 10
+```
+
+使用各版本的 `play.py` 和相同的 `--platform_height 1.00 --platform_width 5.0 --command_x 0.8 --command_y 0 --command_yaw 0` 对照原 v1 和微调后的 v3。指定 `--platform_shape block --platform_trace <独立CSV路径>` 后，`leg_pose_mae_rad` 记录每一步 12 个腿关节相对默认角的平均绝对偏差。按相同种子分别统计登台成功率，并在成功回合中比较四轮都在台面、仍有前进指令时的关节误差和实际前进速度。
+
 ### G0–G11 对照实验
 
 基于 g7 的动作残差与时间平滑对照已增加为 g8–g11。四组配置、共同检查点初始化、训练/评估命令及结果判定见 [残差实验说明](experiments/RESIDUAL_EXPERIMENTS.md)。首轮使用 `--init_from` 从同一个 g7 checkpoint 公平微调。

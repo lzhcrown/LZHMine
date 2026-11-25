@@ -5,8 +5,10 @@ import sys
 import pytest
 import torch
 
-from experiments.registry import (PLATFORM_EXPERIMENT, PLATFORM_EXPERIMENT_KEYS, PLATFORM_V1_EXPERIMENT,
-                                  PLATFORM_V2_EXPERIMENT, clone_config, configure_experiment, get_experiment)
+from experiments.registry import (
+    PLATFORM_EXPERIMENT, PLATFORM_EXPERIMENT_KEYS, PLATFORM_V1_EXPERIMENT, PLATFORM_V2_EXPERIMENT,
+    PLATFORM_V3_EXPERIMENT, clone_config, configure_experiment, get_experiment,
+)
 from legged_gym.terrains.platform_rewards import (
     platform_reward_scales, platform_v1_reward_scales, platform_v2_reward_scales,
 )
@@ -68,8 +70,10 @@ def test_g7_warm_start_retains_target_terrain_commands_rewards_and_two_values(
     env, restored = cpu_task_registry.make_env(group.TASK_NAME, args=args)
     assert restored.rewards.scales.stand_still == -3.1
     expected_scales = platform_reward_scales()
-    if target_key == PLATFORM_V1_EXPERIMENT:
+    if target_key in (PLATFORM_V1_EXPERIMENT, PLATFORM_V3_EXPERIMENT):
         expected_scales = platform_v1_reward_scales()
+        if target_key == PLATFORM_V3_EXPERIMENT:
+            expected_scales["run_still"] = -.10
         assert restored.rewards.platform_base_height_target == .52
         assert getattr(restored.rewards, "platform_reward_profile", None) is None
     elif target_key == PLATFORM_V2_EXPERIMENT:
@@ -143,6 +147,9 @@ def test_intermediate_highplatform_pitch_rate_snapshot_restores_until_v2_warm_st
     (PLATFORM_EXPERIMENT, PLATFORM_V1_EXPERIMENT),
     (PLATFORM_V1_EXPERIMENT, PLATFORM_V2_EXPERIMENT),
     (PLATFORM_V2_EXPERIMENT, PLATFORM_V1_EXPERIMENT),
+    (PLATFORM_V1_EXPERIMENT, PLATFORM_V3_EXPERIMENT),
+    (PLATFORM_V2_EXPERIMENT, PLATFORM_V3_EXPERIMENT),
+    (PLATFORM_EXPERIMENT, PLATFORM_V3_EXPERIMENT),
 ])
 def test_platform_group_transfer_requires_warm_start_and_copies_both_value_heads(
         tmp_path, monkeypatch, actual_config_module, cpu_task_registry, source_key, target_key):
@@ -194,6 +201,7 @@ def test_platform_group_transfer_requires_warm_start_and_copies_both_value_heads
 
 @pytest.mark.parametrize("target_key,minimum,period", [
     (PLATFORM_EXPERIMENT, .5, 5.), (PLATFORM_V1_EXPERIMENT, .5, 5.), (PLATFORM_V2_EXPERIMENT, 0., 10.),
+    (PLATFORM_V3_EXPERIMENT, .5, 5.),
 ])
 def test_high_platform_and_locomotion_commands_in_the_same_resample(actual_config_module, target_key, minimum, period):
     env = make_env(("flat",) * 32)
@@ -219,6 +227,25 @@ def test_high_platform_and_locomotion_commands_in_the_same_resample(actual_confi
         locomotion = env.commands[~env.high_platform_mask, :2]
         assert torch.all(locomotion.abs() == 0.5)
         torch.testing.assert_close(wf.commands_xy_accumulation, env.commands[:, :2])
+
+
+def test_v3_moving_posture_penalizes_leg_error_on_both_platform_shapes(actual_config_module, robot):
+    cfg = clone_config(actual_config_module.NezhaMoECTSCfg())
+    get_experiment(PLATFORM_V3_EXPERIMENT).configure_environment(cfg)
+    robot.cfg.rewards = cfg.rewards
+    robot.wheel_indices = [3, 7, 11, 15]
+    robot.commands = torch.tensor([[.8, 0., 0.]] * robot.num_envs)
+    joint_names = [f"{leg}_{joint}_joint" for leg in ("FL", "FR", "RL", "RR")
+                   for joint in ("hip", "thigh", "calf", "foot")]
+    robot.default_dof_pos = torch.tensor([[cfg.init_state.default_joint_angles[name] for name in joint_names]])
+    torch.testing.assert_close(robot.default_dof_pos, torch.tensor([[0., .8, -1.6, 0.] * 4]))
+    robot.dof_pos = robot.default_dof_pos.repeat(robot.num_envs, 1)
+    robot.dof_pos[:, robot.wheel_indices] = 7.0
+    torch.testing.assert_close(robot._reward_run_still(), torch.zeros(robot.num_envs))
+    robot.dof_pos[:, 1] += .25
+    robot.dof_pos[:, 10] -= .50
+    platform_cost = robot._reward_run_still()[robot.high_platform_mask] * cfg.rewards.platform_scales["run_still"]
+    torch.testing.assert_close(platform_cost, torch.tensor([-.075, -.075]))
 
 
 def test_v2_platform_sampler_activates_both_posture_rewards_and_keeps_episode_timing(actual_config_module, robot):
