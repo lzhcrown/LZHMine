@@ -21,6 +21,11 @@ def parse_args(argv=None):
     parser.add_argument('--checkpoint-path', type=Path, help='Explicit checkpoint; requires one --group.')
     parser.add_argument('--checkpoint', type=int, default=20000, help='Iteration for every group; -1 selects latest numeric checkpoint.')
     parser.add_argument('--output-dir', type=Path)
+    parser.add_argument('--joint-angles-csv', type=Path, metavar='PATH',
+                        help='Write measured joint angles, leg position targets, raw actor actions, '
+                             'commanded/measured velocity, wheel contact forces and Student/Actor routing '
+                             'for every robot from reset through termination. '
+                             'Works with --no-record. Multi-group runs add the group name to each filename.')
     parser.add_argument('--metric-successes-per-terrain', type=int, default=10,
                         help='Keep detailed metric inputs for the first N successes per terrain and model (default: 10).')
     parser.add_argument('--detail-selection', choices=('first_successes', 'trial_ids'), default='first_successes',
@@ -49,7 +54,8 @@ def parse_args(argv=None):
     parser.add_argument('--sim-device', default='cuda:0')
     parser.add_argument('--num-threads', type=int, default=4)
     parser.add_argument('--viewer', action='store_true')
-    parser.add_argument('--no-record', action='store_true', help='Preview only: no CSV, metadata or output directories.')
+    parser.add_argument('--no-record', action='store_true',
+                        help='Skip the evaluation capture. An explicit --joint-angles-csv still writes its own file.')
     parser.add_argument('--dry-run', action='store_true', help='Validate paths and print protocol without simulation.')
     args = parser.parse_args(argv)
     if args.no_record and args.output_dir is not None:
@@ -149,10 +155,21 @@ def resolve_checkpoint(args, group):
 
 
 def protocol_dict(args):
+    trace_fields = ('joint angles, leg position targets, raw actor actions, velocities, '
+                    'wheel contact forces and expert weights')
+    if args.no_record:
+        mode = 'preview_joint_angles' if args.joint_angles_csv else 'preview_no_record'
+        outputs = trace_fields + ' in one CSV' if args.joint_angles_csv else 'console only; no capture files'
+    else:
+        mode = 'expert_weights_only' if args.expert_weights_only else 'first_successes_split'
+        outputs = ('all trial outcomes and passage times; selected trials with per-terrain Student/Actor gate CSVs'
+                   if args.expert_weights_only else
+                   'all trial outcomes and success rates; selected trials in power/cot/tracking/stability CSVs')
+        if args.joint_angles_csv:
+            outputs += '; ' + trace_fields + ' for all attempts'
     return dict(
         version=14, reference='LZHMine obstacle traversal and wheel_gym_CQ patch crossing; terrain revision 12',
-        data_mode=('preview_no_record' if args.no_record else
-                   'expert_weights_only' if args.expert_weights_only else 'first_successes_split'),
+        data_mode=mode,
         expert_weights_only=args.expert_weights_only,
         record_residual=args.record_residual, residual_scale=args.residual_scale,
         detail_selection=args.detail_selection, detail_trial_indices=list(args.detail_trial_indices),
@@ -161,7 +178,8 @@ def protocol_dict(args):
         metric_selection=('first successes in completion order per model and terrain; env_id breaks same-step ties'
                           if args.detail_selection == 'first_successes' else
                           'preselected episode_index in every environment; all outcomes included'),
-        write_files=not args.no_record,
+        write_files=not args.no_record or args.joint_angles_csv is not None,
+        joint_angles_csv=str(args.joint_angles_csv) if args.joint_angles_csv else None,
         terrain_types=list(args.terrain_types), patch_size_m=PATCH_SIZE_M,
         terrain_roi_size_xy_m={name: ([PATCH_SLOPE_LENGTH_M, PATCH_SLOPE_WIDTH_M]
                                      if name == 'slope' else [PATCH_SIZE_M, PATCH_SIZE_M])
@@ -178,10 +196,7 @@ def protocol_dict(args):
         sampling='every control interval and physics substep in the measurement window; no warmup filtering',
         cot_inputs='whole robot mass, gravity, torque, before/after angular velocity, dt, actual displacement',
         power_scope='joint mechanical power; electrical consumption is not measured',
-        outputs=('console only; no capture files' if args.no_record else
-                 'all trial outcomes and passage times; selected trials with per-terrain Student/Actor gate CSVs'
-                 if args.expert_weights_only else
-                 'all trial outcomes and success rates; selected trials in power/cot/tracking/stability CSVs'),
+        outputs=outputs,
     )
 
 

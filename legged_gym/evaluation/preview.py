@@ -1,4 +1,5 @@
-"""Interactive inspection of the same evaluation environment, without files."""
+"""Interactive inspection of the evaluation environment with optional angle logging."""
+from contextlib import ExitStack
 import time
 
 
@@ -53,21 +54,32 @@ class PreviewViewer:
 
 def run_preview(args, cfg, sim_params, physics_engine, policy, environment_class):
     import torch
-    env = None
+    resources = ExitStack()
     status = 'error'
+    angle_path = getattr(args, 'joint_angles_csv', None)
     try:
         env = environment_class(cfg, sim_params, physics_engine, args.sim_device, not args.viewer)
+        resources.callback(env.gym.destroy_sim, env.sim)
+        if env.viewer is not None:
+            resources.callback(env.gym.destroy_viewer, env.viewer)
         if policy.num_actor_obs != env.num_obs:
             raise ValueError('Checkpoint observation size differs from environment')
+        trace = resources.enter_context(env.record_joint_angles(angle_path, policy)) if angle_path else None
         env.reset()
         if args.viewer:
             viewer = PreviewViewer(env)
             env.render = viewer.render
-        print('Preview only: no evaluation files will be created.', flush=True)
+        print('Preview started.', flush=True)
         with torch.inference_mode():
             while not env.evaluation_complete:
                 start = time.monotonic()
-                env.step(policy.act_inference(env.get_observations()))
+                observations = env.get_observations()
+                if trace is None:
+                    actions = policy.act_inference(observations)
+                else:
+                    actions, student, actor, _, _ = policy.act_inference_with_diagnostics(observations)
+                    trace.begin_step(student, actor, actions)
+                env.step(actions)
                 for row in env.completed_episodes:
                     print('env {env_id} | {terrain} | round {number} | {trial_elapsed_s:.2f} s | '
                           '{status} ({reason})'.format(number=row['episode_index'] + 1, **row), flush=True)
@@ -80,9 +92,7 @@ def run_preview(args, cfg, sim_params, physics_engine, policy, environment_class
     except (KeyboardInterrupt, SystemExit):
         status = 'interrupted'
     finally:
-        if env is not None:
-            if env.viewer is not None:
-                env.gym.destroy_viewer(env.viewer)
-            env.gym.destroy_sim(env.sim)
-    print('Preview {}. No evaluation files saved.'.format(status), flush=True)
+        resources.close()
+    output = 'Joint angles: {}'.format(angle_path) if angle_path else 'No evaluation files saved.'
+    print('Preview {}. {}'.format(status, output), flush=True)
     return 0 if status == 'complete' else 130

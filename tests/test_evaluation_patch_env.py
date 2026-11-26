@@ -140,6 +140,23 @@ def advance(env, x, y=None):
 
 
 class PatchEvaluationEnvTests(unittest.TestCase):
+    def test_angle_trace_records_approach_and_terminal_state_before_reset(self):
+        env = patch_env()
+        ids = torch.tensor([0])
+        events = []
+        env.joint_angle_trace = Mock()
+        env.joint_angle_trace.start.side_effect = lambda ids: events.append(("start", ids.tolist()))
+        env.joint_angle_trace.sample.side_effect = lambda ids, reasons: events.append(
+            ("step", ids.tolist(), int(env.episode_length_buf[0]), reasons))
+        env._start(ids)
+        env.max_episode_length = 2
+        advance(env, -.8)
+        self.assertFalse(env.metrics.active[0])
+        advance(env, -.8)
+        self.assertTrue(env.reset_buf[0])
+        self.assertEqual(events, [("start", [0]), ("step", [0], 1, {}),
+                                  ("step", [0], 2, {0: "time_limit"})])
+
     def test_platform_requires_support_on_top_then_sustained_landing_in_both_directions(self):
         for sign in (1, -1):
             with self.subTest(sign=sign):

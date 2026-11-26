@@ -3,6 +3,7 @@
 
 from itertools import count
 import os
+from pathlib import Path
 
 if __package__:
     from ._bootstrap import configure_runtime
@@ -16,6 +17,7 @@ import torch
 
 from legged_gym.envs import *  # noqa: F401,F403 - registers tasks
 from legged_gym.utils import get_args, task_registry
+from legged_gym.scripts._joint_angles import open_joint_angles
 from legged_gym.scripts._platform_play import configure_fixed_platform
 from legged_gym.scripts._platform_trace import open_platform_trace
 from legged_gym.scripts._play_env import StudentPlayEnv
@@ -45,6 +47,9 @@ PLAY_ARGUMENTS = [
      "help": "Optional full side of the square platform in metres, rounded to the WF horizontal grid."},
     {"name": "--platform_trace", "type": str,
      "help": "Write env 0 pose, joint targets and wheel contacts into a new CSV during fixed-platform play."},
+    {"name": "--joint-angles-csv", "type": str,
+     "help": "Write joint angles, leg targets, raw actor actions, velocity commands and measurements, wheel forces and expert weights."},
+    {"name": "--joint_angles_csv", "type": str, "help": "Alias for --joint-angles-csv."},
     {"name": "--enable_domain_rand", "action": "store_true", "default": False},
     {"name": "--enable_noise", "action": "store_true", "default": False},
     {"name": "--no_export", "action": "store_true", "default": False},
@@ -77,6 +82,10 @@ def play(args, task_name=TASK_NAME, export_path=None,
         raise ValueError("play_num_envs and play_steps must be positive")
     if args.terrain not in ("plane", "heightfield", "trimesh"):
         raise ValueError("terrain must be plane, heightfield or trimesh")
+    joint_csv = getattr(args, "joint_angles_csv", None)
+    if joint_csv and args.platform_trace:
+        if Path(joint_csv).expanduser().resolve() == Path(args.platform_trace).expanduser().resolve():
+            raise ValueError("--joint-angles-csv and --platform_trace require separate output files")
     args.task = task_name
     # This entry point loads the student directly, without constructing a trainer.
     args.resume = False
@@ -134,30 +143,33 @@ def play(args, task_name=TASK_NAME, export_path=None,
     rewards = 0.0
     resets = 0
     total_steps = args.play_steps if args.play_steps is not None else (5000 if args.headless else None)
+    terrains = env.terrain_names() if joint_csv else ()
     with torch.inference_mode(), open_platform_trace(args.platform_trace, env, command,
-                                                    args.platform_shape, height) as trace:
+                                                    args.platform_shape, height) as trace, \
+            open_joint_angles(joint_csv, env, train_cfg.runner.experiment_key, terrains,
+                              student_experts=policy.expert_num, actor_experts=policy.actor_expert_num) as joint_angles:
+        env.joint_angles = joint_angles
+        if joint_angles is not None:
+            joint_angles.start()
         for step in (count() if total_steps is None else range(total_steps)):
-            actions = policy.act_inference(observations)
+            actions, student_weights, actor_weights, _, _ = policy.act_inference_with_diagnostics(observations)
+            if joint_angles is not None:
+                joint_angles.begin_step(student_weights, actor_weights, actions)
             if args.gate_log_interval > 0 and step % args.gate_log_interval == 0:
-                weights = policy.get_expert_probabilities(observations).mean(dim=0).cpu().tolist()
+                weights = student_weights.mean(dim=0).cpu().tolist()
                 print("step {} | {}".format(step, " ".join(
                     "expert_{}={:.3f}".format(i, weight) for i, weight in enumerate(weights)
                 )))
             result = env.step(actions)
             observations, reward, done = result[0], result[2], result[3]
-            terminal_reasons = {}
-            for env_id in done.reshape(-1).nonzero(as_tuple=False).flatten().tolist():
-                if env.play_success[env_id]:
-                    reason = "stable_landing"
-                elif env.time_out_buf[env_id]:
-                    reason = "time_limit"
-                else:
-                    reason = "fall"
-                terminal_reasons[env_id] = reason
+            observations = _fixed_commands(env, observations, command)
+            terminal_reasons = env.terminal_reasons
+            for env_id, reason in terminal_reasons.items():
                 print(f"step {step + 1} env {env_id} | {reason} | restarting", flush=True)
+            if joint_angles is not None and terminal_reasons:
+                joint_angles.start(list(terminal_reasons))
             if trace is not None:
                 trace.record(step + 1, done, terminal_reasons.get(0, ""))
-            observations = _fixed_commands(env, observations, command)
             rewards += reward.mean().item()
             resets += len(terminal_reasons)
     print("Student evaluation: {} steps, mean reward/step {:.4f}, {} episode resets".format(

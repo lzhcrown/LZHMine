@@ -1,6 +1,7 @@
 """A fixed student replay must reproduce both platform shapes on old and new WF maps."""
 
 import copy
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -107,3 +108,34 @@ def test_fixed_play_rejects_unsupported_platform_width(shape, height, width):
     cfg = terrain_cfg(generator_profile="legbot_wf")
     with pytest.raises(ValueError):
         configure_fixed_platform(cfg, shape, height, num_envs=1, width=width)
+
+
+def test_play_samples_all_robots_before_the_terminal_pose_is_reset(monkeypatch):
+    pytest.importorskip("isaacgym")
+    import torch
+    from legged_gym.envs.nezha.nezha_moe_cts_env import NezhaMoECTSEnv
+    from legged_gym.scripts._play_env import StudentPlayEnv
+
+    monkeypatch.setattr(NezhaMoECTSEnv, "check_termination", lambda self: None)
+    env = StudentPlayEnv.__new__(StudentPlayEnv)
+    env.cfg = SimpleNamespace(env=SimpleNamespace(fail_to_terminal_time_s=.6))
+    env.dt, env.play_step_limit, env.traversal = .02, 1500, None
+    env.fail_buf = torch.zeros(2)
+    env.episode_length_buf = torch.tensor([1500, 32])
+    env.play_success = torch.zeros(2, dtype=torch.bool)
+    env.reset_buf = torch.zeros_like(env.play_success)
+    env.time_out_buf = torch.zeros_like(env.play_success)
+    env.dof_pos = torch.arange(32).reshape(2, 16).float()
+
+    samples = []
+
+    def sample(terminal_reasons):
+        samples.append((terminal_reasons.copy(), env.dof_pos.clone()))
+
+    env.joint_angles = SimpleNamespace(sample=sample)
+    env.check_termination()
+    # Automatic reset replaces the finished robot's active DOF buffer immediately.
+    env.dof_pos[env.reset_buf] = 0.
+    reasons, angles = samples[0]
+    assert reasons == {0: "time_limit"}
+    torch.testing.assert_close(angles, torch.arange(32).reshape(2, 16).float())

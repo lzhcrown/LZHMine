@@ -88,6 +88,29 @@ def test_preview_defaults_and_rejects_output_destination():
         parse_args(['--no-record', '--output-dir', '/tmp/not-a-capture'])
 
 
+def test_joint_angle_csv_previews_and_batch_destinations(tmp_path):
+    from legged_gym.scripts.evaluate_nezha_moe_cts import child_command
+    path = tmp_path / 'leg_angles.csv'
+    args = parse_args(['--joint-angles-csv', str(path), '--no-record'])
+    assert protocol_dict(args)['write_files'] and args.output_dir is None
+    group = 'g0_mlp'
+    for sweep, name in ((1, 'leg_angles_g0_mlp.csv'), (2, 'leg_angles_g0_mlp_2.csv')):
+        child = child_command(args, group, Path('model_20000.pt'), sweep=sweep)
+        assert parse_args(child[2:]).joint_angles_csv == tmp_path / name
+    single = parse_args(['--group', group, '--joint-angles-csv', str(path)])
+    assert parse_args(child_command(single, group, Path('model_20000.pt'), tmp_path / 'run')[2:]).joint_angles_csv == path
+
+
+def test_joint_angle_csv_cannot_replace_the_final_summary(tmp_path, monkeypatch):
+    from legged_gym.scripts import evaluate_nezha_moe_cts as entry
+    monkeypatch.setattr(entry, 'resolve_checkpoint', lambda *args: Path('model_20000.pt'))
+    output = tmp_path / 'capture'
+    with pytest.raises(ValueError, match='joint angle CSV path'):
+        entry.main(['--group', 'g12_v3', '--output-dir', str(output),
+                    '--joint-angles-csv', str(output / 'summary.csv')])
+    assert not output.exists()
+
+
 @pytest.mark.parametrize('group', ['g12_high_platform', 'g12_v1', 'g12_v2', 'g12_v3'])
 def test_g12_stair_and_platform_preview_selection(group):
     terrains = ['stairs_convex_35cm'] + [f'platform_{cm}cm' for cm in range(45, 111, 5)]

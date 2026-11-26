@@ -16,6 +16,7 @@ class StudentPlayEnv(NezhaMoECTSEnv):
 
     def __init__(self, cfg, **kwargs):
         self.traversal = None
+        self.joint_angles = None
         vx, vy = cfg.commands.ranges.lin_vel_x[0], cfg.commands.ranges.lin_vel_y[0]
         self.travel_axis = int(abs(vy) > abs(vx))
         self.travel_sign = -1 if (vx, vy)[self.travel_axis] < 0 else 1
@@ -24,6 +25,12 @@ class StudentPlayEnv(NezhaMoECTSEnv):
         self.play_success = torch.zeros(self.num_envs, device=self.device, dtype=torch.bool)
         if hasattr(getattr(self, "terrain", None), "tile_types"):
             self._prepare_play_courses()
+
+    def terrain_names(self):
+        tiles = getattr(getattr(self, "terrain", None), "tile_types", None)
+        if tiles is not None:
+            return tiles[self.terrain_levels.tolist(), self.terrain_types.tolist()].tolist()
+        return [self.cfg.terrain.mesh_type] * self.num_envs
 
     def reset(self):
         # Start the control clock with the first policy action, including on
@@ -131,3 +138,15 @@ class StudentPlayEnv(NezhaMoECTSEnv):
             self.play_success.copy_(self._landed() & ~failed)
         self.time_out_buf.copy_((self.episode_length_buf >= self.play_step_limit) & ~failed & ~self.play_success)
         self.reset_buf.copy_(failed | self.play_success | self.time_out_buf)
+        self.terminal_reasons = {}
+        for env_id in self.reset_buf.nonzero(as_tuple=False).flatten().tolist():
+            if self.play_success[env_id]:
+                reason = "stable_landing"
+            elif self.time_out_buf[env_id]:
+                reason = "time_limit"
+            else:
+                reason = "fall"
+            self.terminal_reasons[env_id] = reason
+        if self.joint_angles is not None:
+            # The indexed reset later in this same control step overwrites dof_pos.
+            self.joint_angles.sample(terminal_reasons=self.terminal_reasons)

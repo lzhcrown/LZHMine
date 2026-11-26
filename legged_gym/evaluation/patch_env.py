@@ -1,6 +1,7 @@
 # Adapted from wheel_gym_CQ/wheel_legged_gym/evaluation/patch_env.py
 """Measure a terrain attempt from wheel entry to exit or settled obstacle landing."""
 import math
+from contextlib import contextmanager
 
 import numpy as np
 from isaacgym import gymtorch
@@ -36,6 +37,21 @@ class PatchEvaluationEnv(EvaluationEnv):
     Exit/failure is recorded before reset. The boundary resolution is one policy
     step; the implementation does not claim substep-interpolated crossing times.
     """
+
+    joint_angle_trace = None
+
+    @contextmanager
+    def record_joint_angles(self, path, policy):
+        from legged_gym.scripts._joint_angles import open_joint_angles
+
+        terrains = [self.terrain.type_names[index] for index in self.terrain_types.tolist()]
+        with open_joint_angles(path, self, self.evaluation.task, terrains,
+                               student_experts=policy.expert_num, actor_experts=policy.actor_expert_num) as trace:
+            self.joint_angle_trace = trace
+            try:
+                yield trace
+            finally:
+                self.joint_angle_trace = None
 
     def __init__(self, cfg, sim_params, physics_engine, sim_device, headless,
                  evaluation_settings=None, episode_sink=None, trajectory_sink=None, physics_sink=None):
@@ -233,6 +249,8 @@ class PatchEvaluationEnv(EvaluationEnv):
                 **self._raw_episode_metadata(env_id),
                 **self._raw_state_metadata(env_id, "attempt_start"),
             }
+        if self.joint_angle_trace is not None:
+            self.joint_angle_trace.start(env_ids)
 
     def _update_window_metadata(self, wheel_bounds):
         ids = self.attempt_active.nonzero(as_tuple=False).flatten()
@@ -301,7 +319,8 @@ class PatchEvaluationEnv(EvaluationEnv):
         timeout = (self.episode_length_buf >= self.max_episode_length) & ~failure & ~success
         self.reset_buf = (failure | success | timeout) & self.attempt_active
         self.time_out_buf = timeout & self.attempt_active
-        for env_id in self.reset_buf.nonzero(as_tuple=False).flatten().tolist():
+        terminal_ids = self.reset_buf.nonzero(as_tuple=False).flatten().tolist()
+        for env_id in terminal_ids:
             if failure[env_id]:
                 self._episode_status[env_id] = "failure"
                 self._episode_reason[env_id] = "fall"
@@ -311,6 +330,9 @@ class PatchEvaluationEnv(EvaluationEnv):
                                                 else "all_wheels_cleared")
             else:
                 self._episode_status[env_id], self._episode_reason[env_id] = "timeout", "time_limit"
+        if self.joint_angle_trace is not None:
+            active_ids = self.attempt_active.nonzero(as_tuple=False).flatten()
+            self.joint_angle_trace.sample(active_ids, {i: self._episode_reason[i] for i in terminal_ids})
 
     def _finish_attempt(self, env_ids, status, reason):
         rows = []

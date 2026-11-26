@@ -1,6 +1,7 @@
 #!/usr/bin/env python
 """Record legacy CTS students or the G7 residual factorial with one protocol."""
 import csv
+from contextlib import ExitStack
 from datetime import datetime, timezone
 import hashlib
 import json
@@ -103,6 +104,10 @@ def evaluate_one(args, group, path, output):
             REPO_ROOT / 'legged_gym/envs/nezha/nezha_moe_cts_env.py', REPO_ROOT / 'legged_gym/envs/nezha/nezha_robot.py',
             REPO_ROOT / 'rsl_rl/rsl_rl/modules/actor_critic_moe_cts.py',
             REPO_ROOT / 'rsl_rl/rsl_rl/modules/moe.py']})
+    if args.joint_angles_csv:
+        source = 'legged_gym/scripts/_joint_angles.py'
+        metadata['source_sha256'][source] = sha256(REPO_ROOT / source)
+        metadata['joint_trace_expert_counts'] = dict(student=policy.expert_num, actor=policy.actor_expert_num)
     write_json(output / 'metadata.json', metadata)
     env = None
     status = 'error'
@@ -111,7 +116,7 @@ def evaluate_one(args, group, path, output):
                                       expert_counts=expert_counts, terrains=args.terrain_types,
                                       record_residual=args.record_residual,
                                       detail_selection=args.detail_selection,
-                                      detail_trial_indices=args.detail_trial_indices) as writer:
+                                      detail_trial_indices=args.detail_trial_indices) as writer, ExitStack() as resources:
         try:
             env = PatchEvaluationEnv(cfg, sim_params, gymapi.SIM_PHYSX, args.sim_device, not args.viewer,
                 episode_sink=writer.write_episodes,
@@ -119,10 +124,14 @@ def evaluate_one(args, group, path, output):
                 physics_sink=None if args.expert_weights_only else writer.write_physics)
             if policy.num_actor_obs != env.num_obs:
                 raise ValueError('Checkpoint observation size differs from environment')
+            trace = (resources.enter_context(env.record_joint_angles(args.joint_angles_csv, policy))
+                     if args.joint_angles_csv else None)
             metadata.update(status='running', joint_names=env.measurement_joint_names,
                 total_mass_kg=env.total_mass_kg.cpu().tolist(), terrain=env.terrain.metadata,
                 control_dt_s=env.dt, wheel_geometry=env.wheel_geometry,
-                units=dict(position='m', linear_velocity='m/s', angular_velocity='rad/s', torque='N*m', mass='kg'),
+                units=dict(position='m', linear_velocity='m/s', angular_velocity='rad/s', joint_angle='rad',
+                           torque='N*m', mass='kg', contact_force='N', expert_weight='dimensionless',
+                           leg_position_target='rad', raw_actor_action='dimensionless'),
                 residual_diagnostics=dict(action_space='normalized policy mean before environment action clipping',
                     wheel_indices=env.wheel_indices.cpu().tolist(), saturation_ratio=.95,
                     saturation_action_thresholds=((.95 * policy.actor.residual_action_scales).cpu().tolist()
@@ -138,9 +147,11 @@ def evaluate_one(args, group, path, output):
             last_report = time.monotonic()
             with torch.inference_mode():
                 while not env.evaluation_complete:
-                    if args.expert_weights_only or args.record_residual:
+                    if args.expert_weights_only or args.record_residual or trace is not None:
                         actions, student_gate, actor_gate, pre, correction = policy.act_inference_with_diagnostics(
                             env.get_observations())
+                        if trace is not None:
+                            trace.begin_step(student_gate, actor_gate, actions)
                         if args.expert_weights_only:
                             record_expert_step(writer, env, {'student': student_gate, 'actor': actor_gate})
                         if args.record_residual:
@@ -190,16 +201,35 @@ def main(argv=None):
     if args.no_record:
         if len(groups) == 1:
             return evaluate_one(args, args.group, paths[args.group], None)
+        sweep = 1
         while True:
             for group in groups:
-                result = subprocess.run(child_command(args, group, paths[group]))
+                result = subprocess.run(child_command(args, group, paths[group], sweep=sweep))
                 if result.returncode:
                     return result.returncode
             if args.episodes_per_terrain is not None:
                 return 0
+            sweep += 1
     output = (args.output_dir or REPO_ROOT / 'evaluations' / datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')).resolve()
     if output.exists():
         raise FileExistsError('Use a new output directory: ' + str(output))
+    if args.joint_angles_csv:
+        angle_path = args.joint_angles_csv.expanduser().resolve()
+        if angle_path == output:
+            raise ValueError('The joint angle CSV path must name a file distinct from the evaluation directory')
+        if output in angle_path.parents:
+            # These files are created or replaced during finalization. The other
+            # metric CSVs are already opened exclusively before the angle trace.
+            relative_parts = angle_path.relative_to(output).parts
+            reserved = {'summary.csv', 'success_rate.csv', 'metadata.json', 'metadata.tmp',
+                        'data_validation.json', 'data_validation.tmp'}
+            if len(groups) > 1:
+                # The basename is suffixed per group. Avoid creating another
+                # child's output directory in advance through a parent folder.
+                relative_parts = relative_parts[:-1]
+                reserved = set(groups) | {'batch.json', 'batch.tmp', 'event_counts.csv'}
+            if relative_parts and relative_parts[0] in reserved:
+                raise ValueError('Choose a joint angle CSV path distinct from the evaluation output files')
     if len(groups) == 1:
         return evaluate_one(args, args.group, paths[args.group], output)
     output.mkdir(parents=True)
@@ -231,7 +261,7 @@ def main(argv=None):
     return 0
 
 
-def child_command(args, group, checkpoint, output=None):
+def child_command(args, group, checkpoint, output=None, *, sweep=1):
     command = [sys.executable, str(Path(__file__).resolve()), '--group', group,
         '--checkpoint-path', str(checkpoint),
         '--terrain-types', ','.join(args.terrain_types), '--envs-per-terrain', str(args.envs_per_terrain),
@@ -250,6 +280,12 @@ def child_command(args, group, checkpoint, output=None):
         command.extend(['--output-dir', str(output)])
     if args.viewer:
         command.append('--viewer')
+    if args.joint_angles_csv:
+        path = args.joint_angles_csv
+        if len(selected_groups(args.group)) > 1:
+            suffix = '_{}'.format(sweep) if sweep > 1 else ''
+            path = path.with_name('{}_{}{}{}'.format(path.stem, group, suffix, path.suffix))
+        command.extend(['--joint-angles-csv', str(path)])
     if args.expert_weights_only:
         command.append('--expert-weights-only')
     if args.record_residual:

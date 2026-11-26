@@ -1,4 +1,5 @@
 """Viewer pause/focus and preview lifecycle must not create captures."""
+from contextlib import nullcontext
 from types import SimpleNamespace as NS
 from unittest.mock import Mock
 
@@ -48,3 +49,28 @@ def test_headless_preview_uses_no_sinks_and_always_destroys_sim(tmp_path, monkey
     assert factory.call_args.kwargs == {}
     env.gym.destroy_sim.assert_called_once_with(env.sim)
     assert list(tmp_path.iterdir()) == []
+
+
+def test_combined_preview_uses_routing_from_the_forward_that_stepped_the_robot(tmp_path):
+    actions = torch.tensor([[.1, -.3]])
+    student = torch.tensor([[.2, .8]])
+    actor = torch.tensor([[.7, .15, .15]])
+    policy = NS(num_actor_obs=2, act_inference_with_diagnostics=Mock(
+        return_value=(actions, student, actor, None, None)))
+    trace = Mock()
+    env = NS(viewer=None, sim=object(), num_obs=2, dt=.02, evaluation_complete=False,
+             completed_episodes=[], gym=NS(destroy_sim=Mock()), reset=Mock(),
+             record_joint_angles=Mock(return_value=nullcontext(trace)),
+             get_observations=Mock(return_value=torch.zeros(1, 2)))
+
+    def step(applied):
+        assert applied is actions
+        trace.begin_step.assert_called_once_with(student, actor, actions)
+        env.evaluation_complete = True
+
+    env.step = step
+    path = tmp_path / 'telemetry.csv'
+    args = NS(sim_device='cpu', viewer=False, no_record=True, joint_angles_csv=path)
+    assert run_preview(args, None, None, None, policy, Mock(return_value=env)) == 0
+    env.record_joint_angles.assert_called_once_with(path, policy)
+    policy.act_inference_with_diagnostics.assert_called_once_with(env.get_observations.return_value)

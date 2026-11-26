@@ -39,7 +39,7 @@ done
 
 `--viewer --no-record` 打开窗口，终端逐轮显示结果。每种地形默认有一个机器人。每轮从出生开始，成功、跌倒或用完 30 仿真秒就结束。单个模型默认持续观看，每个机器人结束后从自己的起点开始下一轮。**N/B** 切换机器人，**空格**暂停或继续，**Esc、关闭窗口或 Ctrl+C** 退出。暂停期间仿真时钟停止。
 
-指定 `--episodes-per-env 3` 可让每个机器人各跑三轮后结束，也可用 `--episodes-per-terrain` 分配每种地形的总次数。多模型预览（`--group all` 或 `residual`）默认每组每个机器人跑一轮，再轮到下一组，所有组轮转播放。显式指定次数时，各组完成配额后整条命令退出。无窗口的 `--no-record` 默认每个机器人跑一轮。预览不写 CSV。
+指定 `--episodes-per-env 3` 可让每个机器人各跑三轮后结束，也可用 `--episodes-per-terrain` 分配每种地形的总次数。多模型预览（`--group all` 或 `residual`）默认每组每个机器人跑一轮，再轮到下一组，所有组轮转播放。显式指定次数时，各组完成配额后整条命令退出。无窗口的 `--no-record` 默认每个机器人跑一轮。预览默认只在终端显示结果。
 
 如果要依次完整观看每种地形上的八组模型，可在 Bash 中运行下面的循环：一次只有一个机器人、一种地形、一组模型，完成后进入下一组，再进入下一种地形。Esc 或 Ctrl+C 中止循环。
 
@@ -53,6 +53,34 @@ done
 ```
 
 组名可用 `g0_mlp`、`g1_student_moe`、`g2_actor_moe`、`g3_student_actor_moe`、`g4_critic_moe`、`g5_student_critic_moe`、`g6_actor_critic_moe`、`g7_all_moe`，或 `all`。原版 G12 使用 `--group g12_high_platform`。对照 v1、v2、v3 时分别使用 `--group g12_v1`、`--group g12_v2`、`--group g12_v3`。只看一个高台时指定单个名称，例如 `--terrain-types platform_110cm`。
+
+## 记录四条腿的实际关节角
+
+在观看命令中加入 `--joint-angles-csv` 和输出路径即可将 Actor 原始动作、腿关节目标角、实际关节角、速度、竖直接触力和专家权重写入同一 CSV。以下命令记录 G12 v3 以 0.8 m/s 指令速度在平地上行走一轮。去掉 `--episodes-per-env 1` 可持续记录到关闭窗口。将 `flat` 改为 `platform_100cm` 或 `stairs_convex_35cm` 可切换地形。
+
+```bash
+.venv/bin/python legged_gym/scripts/evaluate_nezha_moe_cts.py \
+  --group g12_v3 --checkpoint -1 --terrain-types flat --speed 0.8 \
+  --viewer --no-record --episodes-per-env 1 \
+  --joint-angles-csv "logs/joint_angles/g12_v3_flat_$(date +%Y%m%d_%H%M%S).csv"
+```
+
+每个控制步结束后，每个参与的机器人写一行，包含自动重置前的最后一帧。当前 G12 控制周期约为 0.02 s（50 Hz）。用 `env_id`、`terrain` 和从 1 开始的 `attempt` 选取机器人、地形和轮次。`attempt_step`、`attempt_time_s` 分别是本轮步数和秒数。`sim_step`、`sim_time_s` 跨回合连续计数。上一轮的终止行和下一轮的初始行可以具有相同的总仿真时间，通过 `attempt` 区分。`terminal=1` 标记自然结束的采样，`termination_reason` 给出结束原因。
+
+角度直接来自 Isaac Gym 的关节位置，单位为弧度。列名前缀 `FL`、`FR`、`RL`、`RR` 分别代表左前、右前、左后、右后。每条腿的 `hip`、`thigh`、`calf` 对应髋、大腿、小腿三个关节，例如 `FL_thigh_joint_rad` 是左前大腿实际角度。`foot` 列单独记录对应驱动轮的转角。
+
+| 同步数据 | CSV 列及含义 |
+|---|---|
+| Actor 原始动作 | 16 个 `*_actor_raw_action` 列按关节名称标识，覆盖 12 个腿关节和 4 个驱动轮。取自该步确定性推理的最终输出，包含策略启用的残差，位于环境裁剪和控制器缩放之前，数值无量纲。 |
+| 腿关节目标角 | 位置控制下，12 个 `*_target_rad` 列保存该控制步最后一个物理子步实际使用的 PD 目标。可将 `FL_thigh_joint_actor_raw_action`、`FL_thigh_joint_target_rad` 和 `FL_thigh_joint_rad` 三列对齐查看左前大腿的网络输出、目标角和执行后的实测角。速度或力矩控制下目标角列留空。 |
+| 速度指令 | `command_vx_body_m_s`、`command_vy_body_m_s`、`command_yaw_rate_rad_s` 为生成本步动作时的前进、侧向和转向指令。 |
+| 实际速度 | `base_vx_body_m_s`、`base_vy_body_m_s` 为机身坐标系的纵向、横向线速度（m/s），`base_yaw_rate_body_rad_s` 为机身绕自身 z 轴的角速度（rad/s）。 |
+| 竖直接触力 | 从 `FL_wheel_force_z_world_N` 到 `RR_wheel_force_z_world_N` 分别记录四个轮体在世界坐标 z 方向的净接触力，向上为正，单位 N。`wheel_force_z_sum_world_N` 是这四列的代数和。 |
+| 专家权重 | `student_expert_00_weight`、`actor_expert_00_weight` 等列为各专家的门控权重，按各网络实际专家数展开。G12 v3 每组 8 列，两组权重各自归一化。使用普通 MLP 的模块没有对应的专家列。 |
+
+每行的速度指令、原始动作和专家权重对应控制步开始时的同一次决策，目标角取自控制器，实际速度、轮子接触力和关节角取自该步结束时的物理状态。接触力按控制步末的最新物理采样记录。每轮 0 秒行记录初始状态和速度指令，尚未执行的动作、目标角、接触力和专家权重留空。
+
+关闭窗口或按 Esc 时会保存已经采样的行。输出路径应使用新文件名。单模型的所有地形和轮次写入同一个文件。多模型批次以文件名区分模型，例如 `angles_g0_mlp.csv`。连续轮转第二次播放该组时写入 `angles_g0_mlp_2.csv`。
 
 ## 采集：观看确认后手动执行
 

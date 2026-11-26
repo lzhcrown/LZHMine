@@ -165,6 +165,8 @@ Isaac Gym 每轮从出生开始计时，上限为 **30 仿真秒**。楼梯或�
 
 有窗口的 `play.py` 默认持续运行，按 Esc、关闭窗口或 Ctrl+C 退出。无窗口的 `--headless` 默认执行 5000 个控制步。可用 `--play_steps N` 指定**整次回放**的步数，耗尽时结束进程，即使当轮仍在进行。例如控制周期为 0.02 s 时，`--play_steps 3000` 共运行 60 仿真秒。
 
+在任一实验的 `play.py` 或固定地形评估命令中加入 `--joint-angles-csv logs/joint_angles/walk.csv`，即可在同一 CSV 逐步记录 Actor 的 16 维原始动作、12 个腿关节的目标角与实际角、4 个轮轴转角、指令与实际速度、四轮竖直接触力，以及 Student 和 Actor 的专家权重。每行带有机器人编号、回合编号和仿真时间。完整示例见[同步记录说明](legged_gym/evaluation/README.md#记录四条腿的实际关节角)。
+
 ```bash
 cd /home/crown/LZHMine
 
