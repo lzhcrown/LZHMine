@@ -658,6 +658,10 @@ class NezhaRobot(LeggedRobot):
         # Fixed-command play and benchmark rollouts take an explicit body yaw rate.
         if not self.cfg.commands.curriculum or "highplatform_yaw" not in self.platform_scales:
             return
+        platform_commands = self.cfg.commands.wf_settings["terrain_max_command_ranges"]["high_platform"]
+        # Older v2 checkpoints enabled heading feedback together with the yaw reward.
+        if not platform_commands.get("heading_feedback", True):
+            return
         rate = (0.5 * self._platform_heading_error()).clamp(-1.0, 1.0)
         self.commands[:, 2] = torch.where(self.high_platform_mask, rate, self.commands[:, 2])
 

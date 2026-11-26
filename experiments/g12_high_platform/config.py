@@ -35,5 +35,6 @@ def configure_environment(cfg):
     ]
     cfg.commands.wf_settings["terrain_max_command_ranges"]["high_platform"] = {
         "lin_vel_x": [0.5, 1.0], "lin_vel_y": [0.0, 0.0], "ang_vel_yaw": [0.0, 0.0],
+        "heading_feedback": False,
     }
     cfg.rewards.platform_scales = platform_reward_scales()

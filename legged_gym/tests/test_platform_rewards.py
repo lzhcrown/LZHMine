@@ -69,8 +69,8 @@ def test_reward_dispatch_and_clipping(robot, scales_fn, clip_ordinary):
     robot.commands = torch.zeros(3, 4)
     robot.base_lin_vel = torch.tensor([[0., 0., 3.], [0., 0., .5], [0., 0., 4.]])
     robot.base_ang_vel = torch.tensor([[0., 5., 0.], [0., 5., .5], [0., 5., .5]])
-    robot.base_height = torch.tensor([.5, .5, .556 if v2 else .52])
-    robot.cfg.rewards.base_height_target = .5
+    robot.base_height = torch.tensor([.5, .5, .54 if v2 else .52])
+    robot.cfg.rewards.base_height_target = .54 if v2 else .5
     robot.cfg.rewards.only_positive_rewards = clip_ordinary
     robot.reward_scales["base_height"] = -1.
     if scales_fn is platform_v1_reward_scales:
@@ -78,7 +78,7 @@ def test_reward_dispatch_and_clipping(robot, scales_fn, clip_ordinary):
     if v2:
         robot.cfg.rewards.platform_reward_profile = "dreamwaq_highplatform"
         robot.cfg.rewards.platform_heading_target = 0.
-        robot.cfg.rewards.platform_base_height_target = .556
+        robot.cfg.rewards.platform_base_height_target = .54
         # Ordinary training has a different velocity limit and uses only leg rates.
         robot.cfg.rewards.soft_dof_vel_limit = .9
         robot.dof_vel_limits = torch.full((16,), 20.)
@@ -118,7 +118,7 @@ def test_reward_dispatch_and_clipping(robot, scales_fn, clip_ordinary):
         torch.testing.assert_close(robot.episode_sums["ang_vel_xz"],
                                    .02 * torch.tensor([0., -.05 * .5**2, -.05 * .5**2]))
         torch.testing.assert_close(robot.episode_sums["base_height"],
-                                   torch.tensor([0., -5. * .02 * .056**2, 0.]))
+                                   .02 * torch.tensor([-.04**2, -5. * .04**2, 0.]))
         torch.testing.assert_close(robot.episode_sums["orientation"],
                                    torch.tensor([0., -.2 * .02 * .6**2, 0.]))
         assert torch.count_nonzero(robot.episode_sums["collision"]) == 0
@@ -130,9 +130,9 @@ def test_reward_dispatch_and_clipping(robot, scales_fn, clip_ordinary):
                                    .02 * torch.tensor([-1e-6 * 3.**2, platform_velocity_cost, platform_velocity_cost]))
         torch.testing.assert_close(robot.episode_sums["dof_vel_limits"],
                                    .02 * torch.tensor([0., -10. * .5, -10. * .5]))
-        expected[0] += .02 * (-.05 * .7 - 1e-6 * 3.**2)
+        expected[0] += .02 * (-.05 * .7 - 1e-6 * 3.**2 - .04**2)
         common = 3. + 1.5 * np.exp(-1.) - .05 * .5**2 - .15 * .5 + platform_velocity_cost - 10. * .5
-        expected[1] = .02 * (common - 2. * .25 - .2 * .6**2 - 5. * .056**2)
+        expected[1] = .02 * (common - 2. * .25 - .2 * .6**2 - 5. * .04**2)
         expected[2] = .02 * (common - 2. * 16.)
         if clip_ordinary:
             expected[0] = 0.
@@ -176,8 +176,11 @@ def test_configured_rewards_match_m20_and_mujica_axes(robot):
     torch.testing.assert_close(robot._reward_ang_vel_xy(), torch.tensor([4., 4., 0.]))
 
 
-def test_platform_heading_feedback_leaves_ordinary_and_fixed_replay_commands_intact(robot):
-    robot.cfg.commands = SimpleNamespace(curriculum=True)
+def test_platform_heading_reward_and_heading_feedback_are_independent(robot):
+    platform_commands = {}
+    robot.cfg.commands = SimpleNamespace(
+        curriculum=True, wf_settings={"terrain_max_command_ranges": {"high_platform": platform_commands}},
+    )
     robot.cfg.rewards.platform_heading_target = 0.
     robot.platform_scales = {"highplatform_yaw": -3.5 * robot.dt}
     robot.commands = torch.tensor([[.8, .2, .3, .4], [.7, 0., 0., 0.], [.6, 0., 0., 0.]])
@@ -191,8 +194,14 @@ def test_platform_heading_feedback_leaves_ordinary_and_fixed_replay_commands_int
     torch.testing.assert_close(robot.commands[:, 2], torch.tensor([.3, -1., .2]))
     torch.testing.assert_close(robot._reward_highplatform_yaw()[robot.high_platform_mask],
                                torch.tensor([2.8**2, .4**2]))
-    robot.cfg.commands.curriculum = False
     robot.commands.copy_(initial)
+    platform_commands["heading_feedback"] = False
+    robot._update_platform_heading_command()
+    torch.testing.assert_close(robot.commands, initial)
+    torch.testing.assert_close(robot._reward_highplatform_yaw()[robot.high_platform_mask],
+                               torch.tensor([2.8**2, .4**2]))
+    platform_commands["heading_feedback"] = True
+    robot.cfg.commands.curriculum = False
     robot._update_platform_heading_command()
     torch.testing.assert_close(robot.commands, initial)
 

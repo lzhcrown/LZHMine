@@ -178,6 +178,12 @@ def test_real_task_registration_preserves_environment_and_training_isolation(
     assert "highplatform_yaw" not in v1_env.rewards.platform_scales
     assert v2_env.rewards.platform_scales["base_height"] == -5.
     assert v2_env.rewards.platform_scales["highplatform_yaw"] == -3.5
+    expected_v2 = config_dict(cpu_task_registry, v1_env)
+    expected_v2["rewards"].update(
+        platform_scales=v2_env.rewards.platform_scales, platform_reward_profile="dreamwaq_highplatform",
+        platform_heading_target=0., base_height_target=.54, platform_base_height_target=.54,
+    )
+    assert config_dict(cpu_task_registry, v2_env) == expected_v2
     assert v2_train.policy.critic_task_count == v1_train.policy.critic_task_count == platform_train.policy.critic_task_count
     expected_v3 = config_dict(cpu_task_registry, v1_env)
     assert expected_v3["rewards"]["platform_scales"]["run_still"] == -.05

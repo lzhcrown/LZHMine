@@ -23,4 +23,5 @@ def configure_environment(cfg):
     configure_g12(cfg)
     cfg.terrain.curriculum_rule = "dreamwaq"
     cfg.rewards.platform_scales = platform_v1_reward_scales()
+    cfg.rewards.base_height_target = 0.50
     cfg.rewards.platform_base_height_target = 0.52

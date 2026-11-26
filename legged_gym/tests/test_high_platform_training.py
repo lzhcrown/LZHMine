@@ -80,9 +80,9 @@ def test_g7_warm_start_retains_target_terrain_commands_rewards_and_two_values(
         expected_scales = platform_v2_reward_scales()
         assert restored.rewards.platform_reward_profile == "dreamwaq_highplatform"
         assert restored.rewards.platform_heading_target == 0.
-        assert restored.rewards.platform_base_height_target == pytest.approx(.556, abs=.0001)
+        assert restored.rewards.platform_base_height_target == .54
     assert restored.rewards.platform_scales == expected_scales
-    expected_height = .54 if target_key == PLATFORM_V4_EXPERIMENT else source_cfg.rewards.base_height_target
+    expected_height = .54 if target_key in (PLATFORM_V2_EXPERIMENT, PLATFORM_V4_EXPERIMENT) else source_cfg.rewards.base_height_target
     assert restored.rewards.base_height_target == expected_height
     assert not getattr(restored.rewards, "platform_climb", False)
     assert restored.terrain.curriculum_rule == ("wf" if target_key == PLATFORM_EXPERIMENT else "dreamwaq")
@@ -94,9 +94,8 @@ def test_g7_warm_start_retains_target_terrain_commands_rewards_and_two_values(
     assert "obstacles" not in restored.terrain.wf_sub_terrains
     expected_commands = {
         "lin_vel_x": [0.5, 1.0], "lin_vel_y": [0.0, 0.0], "ang_vel_yaw": [0.0, 0.0],
+        "heading_feedback": False,
     }
-    if target_key == PLATFORM_V2_EXPERIMENT:
-        expected_commands.update(lin_vel_x=[0.0, 1.0], resampling_time=10.0)
     assert restored.commands.wf_settings["terrain_max_command_ranges"]["high_platform"] == expected_commands
     assert "high_platform" not in source_cfg.terrain.wf_sub_terrains
     assert "high_platform" not in source_cfg.commands.wf_settings["terrain_max_command_ranges"]
@@ -204,11 +203,8 @@ def test_platform_group_transfer_requires_warm_start_and_copies_both_value_heads
     assert restored_cfg.rewards.platform_base_height_target == target_env_cfg.rewards.platform_base_height_target
 
 
-@pytest.mark.parametrize("target_key,minimum,period", [
-    (PLATFORM_EXPERIMENT, .5, 5.), (PLATFORM_V1_EXPERIMENT, .5, 5.), (PLATFORM_V2_EXPERIMENT, 0., 10.),
-    (PLATFORM_V3_EXPERIMENT, .5, 5.), (PLATFORM_V4_EXPERIMENT, .5, 5.),
-])
-def test_high_platform_and_locomotion_commands_in_the_same_resample(actual_config_module, target_key, minimum, period):
+@pytest.mark.parametrize("target_key", PLATFORM_EXPERIMENT_KEYS)
+def test_high_platform_and_locomotion_commands_in_the_same_resample(actual_config_module, target_key):
     env = make_env(("flat",) * 32)
     group_cfg = clone_config(actual_config_module.NezhaMoECTSCfg())
     get_experiment(target_key).configure_environment(group_cfg)
@@ -225,9 +221,9 @@ def test_high_platform_and_locomotion_commands_in_the_same_resample(actual_confi
         env.common_step_counter = iteration * wf.steps_per_iteration
         wf.reset(ids)
         platform = env.commands[env.high_platform_mask, :3]
-        assert torch.all((platform[:, 0] >= minimum) & (platform[:, 0] <= 1.0))
+        assert torch.all((platform[:, 0] >= .5) & (platform[:, 0] <= 1.0))
         assert torch.count_nonzero(platform[:, 1:]) == 0
-        assert torch.all(wf.time_left[env.high_platform_mask] == period)
+        assert torch.all(wf.time_left[env.high_platform_mask] == 5.)
         assert torch.all(wf.time_left[~env.high_platform_mask] == 5.)
         locomotion = env.commands[~env.high_platform_mask, :2]
         assert torch.all(locomotion.abs() == 0.5)
@@ -253,9 +249,18 @@ def test_v3_moving_posture_penalizes_leg_error_on_both_platform_shapes(actual_co
     torch.testing.assert_close(platform_cost, torch.tensor([-.075, -.075]))
 
 
-def test_v2_platform_sampler_activates_both_posture_rewards_and_keeps_episode_timing(actual_config_module, robot):
+def test_legacy_v2_resume_keeps_saved_command_sampler_and_episode_timing(actual_config_module, cpu_task_registry, robot):
     group_cfg = clone_config(actual_config_module.NezhaMoECTSCfg())
     get_experiment(PLATFORM_V2_EXPERIMENT).configure_environment(group_cfg)
+    saved = config_dict(cpu_task_registry, group_cfg)
+    platform = saved["commands"]["wf_settings"]["terrain_max_command_ranges"]["high_platform"]
+    platform.pop("heading_feedback")
+    platform.update(lin_vel_x=[0., 1.], resampling_time=10.)
+    saved["rewards"].update(base_height_target=.50, platform_base_height_target=.556)
+    cpu_task_registry.restore_environment_config(group_cfg, saved)
+    assert group_cfg.rewards.base_height_target == .50
+    assert group_cfg.rewards.platform_base_height_target == .556
+    assert "heading_feedback" not in group_cfg.commands.wf_settings["terrain_max_command_ranges"]["high_platform"]
     env = make_env(("flat", "platform_pit", "platform_block"))
     env.cfg.commands = group_cfg.commands
     env.high_platform_mask = robot.high_platform_mask
