@@ -52,7 +52,7 @@ for terrain in flat stairs_concave_{35,25,30}cm stairs_convex_{35,25,30}cm platf
 done
 ```
 
-组名可用 `g0_mlp`、`g1_student_moe`、`g2_actor_moe`、`g3_student_actor_moe`、`g4_critic_moe`、`g5_student_critic_moe`、`g6_actor_critic_moe`、`g7_all_moe`，或 `all`。原版 G12 使用 `--group g12_high_platform`。对照 v1、v2、v3 时分别使用 `--group g12_v1`、`--group g12_v2`、`--group g12_v3`。只看一个高台时指定单个名称，例如 `--terrain-types platform_110cm`。
+组名可用 `g0_mlp`、`g1_student_moe`、`g2_actor_moe`、`g3_student_actor_moe`、`g4_critic_moe`、`g5_student_critic_moe`、`g6_actor_critic_moe`、`g7_all_moe`，或 `all`。原版 G12 使用 `--group g12_high_platform`。对照各版 G12 时，`--group` 可指定 `g12_v1`、`g12_v2`、`g12_v3` 或 `g12_v4`。只看一个高台时指定单个名称，例如 `--terrain-types platform_110cm`。
 
 ## 记录四条腿的实际关节角
 

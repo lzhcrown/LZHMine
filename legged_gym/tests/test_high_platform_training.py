@@ -7,7 +7,7 @@ import torch
 
 from experiments.registry import (
     PLATFORM_EXPERIMENT, PLATFORM_EXPERIMENT_KEYS, PLATFORM_V1_EXPERIMENT, PLATFORM_V2_EXPERIMENT,
-    PLATFORM_V3_EXPERIMENT, clone_config, configure_experiment, get_experiment,
+    PLATFORM_V3_EXPERIMENT, PLATFORM_V4_EXPERIMENT, clone_config, configure_experiment, get_experiment,
 )
 from legged_gym.terrains.platform_rewards import (
     platform_reward_scales, platform_v1_reward_scales, platform_v2_reward_scales,
@@ -70,11 +70,11 @@ def test_g7_warm_start_retains_target_terrain_commands_rewards_and_two_values(
     env, restored = cpu_task_registry.make_env(group.TASK_NAME, args=args)
     assert restored.rewards.scales.stand_still == -3.1
     expected_scales = platform_reward_scales()
-    if target_key in (PLATFORM_V1_EXPERIMENT, PLATFORM_V3_EXPERIMENT):
+    if target_key in (PLATFORM_V1_EXPERIMENT, PLATFORM_V3_EXPERIMENT, PLATFORM_V4_EXPERIMENT):
         expected_scales = platform_v1_reward_scales()
-        if target_key == PLATFORM_V3_EXPERIMENT:
+        if target_key in (PLATFORM_V3_EXPERIMENT, PLATFORM_V4_EXPERIMENT):
             expected_scales["run_still"] = -.10
-        assert restored.rewards.platform_base_height_target == .52
+        assert restored.rewards.platform_base_height_target == (.54 if target_key == PLATFORM_V4_EXPERIMENT else .52)
         assert getattr(restored.rewards, "platform_reward_profile", None) is None
     elif target_key == PLATFORM_V2_EXPERIMENT:
         expected_scales = platform_v2_reward_scales()
@@ -82,7 +82,8 @@ def test_g7_warm_start_retains_target_terrain_commands_rewards_and_two_values(
         assert restored.rewards.platform_heading_target == 0.
         assert restored.rewards.platform_base_height_target == pytest.approx(.556, abs=.0001)
     assert restored.rewards.platform_scales == expected_scales
-    assert restored.rewards.base_height_target == source_cfg.rewards.base_height_target
+    expected_height = .54 if target_key == PLATFORM_V4_EXPERIMENT else source_cfg.rewards.base_height_target
+    assert restored.rewards.base_height_target == expected_height
     assert not getattr(restored.rewards, "platform_climb", False)
     assert restored.terrain.curriculum_rule == ("wf" if target_key == PLATFORM_EXPERIMENT else "dreamwaq")
     assert (restored.terrain.num_rows, restored.terrain.difficulty_reference_rows) == (20, 10)
@@ -150,6 +151,7 @@ def test_intermediate_highplatform_pitch_rate_snapshot_restores_until_v2_warm_st
     (PLATFORM_V1_EXPERIMENT, PLATFORM_V3_EXPERIMENT),
     (PLATFORM_V2_EXPERIMENT, PLATFORM_V3_EXPERIMENT),
     (PLATFORM_EXPERIMENT, PLATFORM_V3_EXPERIMENT),
+    (PLATFORM_V3_EXPERIMENT, PLATFORM_V4_EXPERIMENT),
 ])
 def test_platform_group_transfer_requires_warm_start_and_copies_both_value_heads(
         tmp_path, monkeypatch, actual_config_module, cpu_task_registry, source_key, target_key):
@@ -179,6 +181,7 @@ def test_platform_group_transfer_requires_warm_start_and_copies_both_value_heads
     args = restore_args("init_from", path)
     env, restored = cpu_task_registry.make_env(task, args=args)
     assert restored.rewards.platform_scales == target_env_cfg.rewards.platform_scales
+    assert restored.rewards.base_height_target == target_env_cfg.rewards.base_height_target
     assert restored.rewards.platform_base_height_target == target_env_cfg.rewards.platform_base_height_target
     for attr in ("platform_heading_target", "platform_reward_profile"):
         assert getattr(restored.rewards, attr, None) == getattr(target_env_cfg.rewards, attr, None)
@@ -197,11 +200,13 @@ def test_platform_group_transfer_requires_warm_start_and_copies_both_value_heads
     resumed, _ = cpu_task_registry.make_alg_runner(resumed_env, task, args=resume, log_root=None)
     assert resumed.cfg["experiment_key"] == target_key
     assert restored_cfg.rewards.platform_scales == target_env_cfg.rewards.platform_scales
+    assert restored_cfg.rewards.base_height_target == target_env_cfg.rewards.base_height_target
+    assert restored_cfg.rewards.platform_base_height_target == target_env_cfg.rewards.platform_base_height_target
 
 
 @pytest.mark.parametrize("target_key,minimum,period", [
     (PLATFORM_EXPERIMENT, .5, 5.), (PLATFORM_V1_EXPERIMENT, .5, 5.), (PLATFORM_V2_EXPERIMENT, 0., 10.),
-    (PLATFORM_V3_EXPERIMENT, .5, 5.),
+    (PLATFORM_V3_EXPERIMENT, .5, 5.), (PLATFORM_V4_EXPERIMENT, .5, 5.),
 ])
 def test_high_platform_and_locomotion_commands_in_the_same_resample(actual_config_module, target_key, minimum, period):
     env = make_env(("flat",) * 32)

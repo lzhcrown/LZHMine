@@ -170,6 +170,7 @@ def test_real_task_registration_preserves_environment_and_training_isolation(
     v1_env, v1_train = cpu_task_registry.get_cfgs(get_experiment("g12_v1").TASK_NAME)
     v2_env, v2_train = cpu_task_registry.get_cfgs(get_experiment("g12_v2").TASK_NAME)
     v3_env, v3_train = cpu_task_registry.get_cfgs(get_experiment("g12_v3").TASK_NAME)
+    v4_env, v4_train = cpu_task_registry.get_cfgs(get_experiment("g12_v4").TASK_NAME)
     assert all(cpu_task_registry.get_task_class(task) is FakeVectorEnv for task in tasks)
     assert not getattr(v1_env.rewards, "platform_climb", False)
     assert "base_height" not in platform_env.rewards.platform_scales
@@ -183,7 +184,14 @@ def test_real_task_registration_preserves_environment_and_training_isolation(
     expected_v3["rewards"]["platform_scales"]["run_still"] = -.10
     assert config_dict(cpu_task_registry, v3_env) == expected_v3
     assert config_dict(cpu_task_registry, v3_train.policy) == config_dict(cpu_task_registry, v1_train.policy)
-    for key, config in (("g12_v1", v1_train), ("g12_v2", v2_train), ("g12_v3", v3_train)):
+    expected_v4 = config_dict(cpu_task_registry, v3_env)
+    assert expected_v4["rewards"]["base_height_target"] == .50
+    assert expected_v4["rewards"]["platform_base_height_target"] == .52
+    expected_v4["rewards"].update(base_height_target=.54, platform_base_height_target=.54)
+    assert config_dict(cpu_task_registry, v4_env) == expected_v4
+    assert config_dict(cpu_task_registry, v4_train.policy) == config_dict(cpu_task_registry, v3_train.policy)
+    for key, config in (("g12_v1", v1_train), ("g12_v2", v2_train),
+                        ("g12_v3", v3_train), ("g12_v4", v4_train)):
         assert config.runner.experiment_key == config.runner.run_name == config.runner.wandb_group == key
         assert config.runner.experiment_name == "nezha_moe_cts/" + key
         assert export_path(key).endswith("/nezha/policy/" + key + "/policy.pt")

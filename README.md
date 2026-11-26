@@ -119,6 +119,17 @@ done
 
 使用各版本的 `play.py` 和相同的 `--platform_height 1.00 --platform_width 5.0 --command_x 0.8 --command_y 0 --command_yaw 0` 对照原 v1 和微调后的 v3。指定 `--platform_shape block --platform_trace <独立CSV路径>` 后，`leg_pose_mae_rad` 记录每一步 12 个腿关节相对默认角的平均绝对偏差。按相同种子分别统计越过高台并在另一侧平稳落地的成功率，在这些成功回合中比较四轮都在台面、仍有前进指令时的关节误差和实际前进速度。
 
+### G12 v4 机身净高对照
+
+`g12_v4` 继承 v3，将普通地形（含平地和楼梯）的目标净高从 0.50 m 调为 0.54 m，凸台和凹台从 0.52 m 调为 0.54 m。净高取机身根坐标相对局部采样地面平均高度的垂直距离。[v4 配置](experiments/g12_v4/config.py)
+
+从 v3 检查点开始微调的示例
+
+```bash
+.venv/bin/python experiments/g12_v4/train.py \
+  --init_from /path/to/g12_v3/model_XXXX.pt --num_envs 4096 --max_iterations 1000 --seed 10
+```
+
 ### G0–G11 对照实验
 
 基于 g7 的动作残差与时间平滑对照已增加为 g8–g11。四组配置、共同检查点初始化、训练/评估命令及结果判定见 [残差实验说明](experiments/RESIDUAL_EXPERIMENTS.md)。首轮使用 `--init_from` 从同一个 g7 checkpoint 公平微调。

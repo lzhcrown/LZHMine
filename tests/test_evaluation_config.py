@@ -111,7 +111,7 @@ def test_joint_angle_csv_cannot_replace_the_final_summary(tmp_path, monkeypatch)
     assert not output.exists()
 
 
-@pytest.mark.parametrize('group', ['g12_high_platform', 'g12_v1', 'g12_v2', 'g12_v3'])
+@pytest.mark.parametrize('group', ['g12_high_platform', 'g12_v1', 'g12_v2', 'g12_v3', 'g12_v4'])
 def test_g12_stair_and_platform_preview_selection(group):
     terrains = ['stairs_convex_35cm'] + [f'platform_{cm}cm' for cm in range(45, 111, 5)]
     args = parse_args(['--group', group, '--terrain-types', ','.join(terrains),
