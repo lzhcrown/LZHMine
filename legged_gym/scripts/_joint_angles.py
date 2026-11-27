@@ -31,16 +31,26 @@ class JointAngleTrace:
         self.student_experts = student_experts
         self.actor_experts = actor_experts
         self.action_step = None
+        self.skill_column = None
+        schema = getattr(env, "observation_config", None) or {}
+        frame_width = 0
+        for term in schema.get("proprioceptive_terms", ()):
+            frame_width += term["dim"]
+            if term["name"] == "skill_id":
+                # Histories are flattened by term, oldest to newest.
+                self.skill_column = frame_width * schema["history_length"] - 1
+                break
         self.attempts = [0] * env.num_envs
         self.writer.writerow(["group", "terrain", "env_id", "attempt", "attempt_step",
                               "attempt_time_s", "terminal", "termination_reason",
                               *(name + "_rad" for name in JOINT_NAMES),
-                              "sim_step", "sim_time_s", *VELOCITY_FIELDS, *FORCE_FIELDS,
+                              "sim_step", "sim_time_s", *VELOCITY_FIELDS,
+                              *(["actor_skill_id"] if self.skill_column is not None else []), *FORCE_FIELDS,
                               *(f"student_expert_{i:02d}_weight" for i in range(student_experts)),
                               *(f"actor_expert_{i:02d}_weight" for i in range(actor_experts)),
                               *ACTION_FIELDS, *TARGET_FIELDS])
 
-    def begin_step(self, student_weights, actor_weights, actions):
+    def begin_step(self, student_weights, actor_weights, actions, observations=None):
         """Snapshot the deployed Actor output before environment clipping or action delay."""
         if (student_weights.shape != (self.env.num_envs, self.student_experts)
                 or actor_weights.shape != (self.env.num_envs, self.actor_experts)):
@@ -50,6 +60,10 @@ class JointAngleTrace:
         # Commands can be resampled inside env.step. The gates are tensors
         # returned by this policy forward and are never resampled for logging.
         self.action_commands = self.env.commands[:, :3].detach().clone()
+        if self.skill_column is not None:
+            if observations is None:
+                raise ValueError("Skill-conditioned traces require the observation sent to the policy")
+            self.action_skill = observations[:, self.skill_column:self.skill_column + 1].detach().clone()
         self.raw_actions = actions.detach().clone()
         self.student_weights = student_weights.detach()
         self.actor_weights = actor_weights.detach()
@@ -85,10 +99,12 @@ class JointAngleTrace:
             steps = [0] * len(row_ids)
             # No physics step or deployed action has run for this fresh pose.
             missing = [""] * (len(FORCE_FIELDS) + self.student_experts + self.actor_experts
-                              + len(ACTION_FIELDS) + len(TARGET_FIELDS))
+                              + len(ACTION_FIELDS) + len(TARGET_FIELDS) + int(self.skill_column is not None))
         else:
             steps = env.episode_length_buf[ids].tolist()
             fz = env.contact_forces[ids, :, 2][:, self.wheel_indices]
+            if self.skill_column is not None:
+                values.append(self.action_skill[ids])
             values.extend((fz, fz.sum(dim=1, keepdim=True), self.student_weights[ids], self.actor_weights[ids],
                            self.raw_actions[ids][:, self.joint_indices]))
             if env.cfg.control.control_type == "P":

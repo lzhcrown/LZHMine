@@ -78,7 +78,7 @@ def run_preview(args, cfg, sim_params, physics_engine, policy, environment_class
                     actions = policy.act_inference(observations)
                 else:
                     actions, student, actor, _, _ = policy.act_inference_with_diagnostics(observations)
-                    trace.begin_step(student, actor, actions)
+                    trace.begin_step(student, actor, actions, observations)
                 env.step(actions)
                 for row in env.completed_episodes:
                     print('env {env_id} | {terrain} | round {number} | {trial_elapsed_s:.2f} s | '

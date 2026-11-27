@@ -7,6 +7,7 @@ import torch
 
 from rsl_rl.utils.cts_observations import (
     CTSObservationHistory,
+    add_skill_id,
     build_privileged_observations,
     build_proprioception,
     contact_history_features,
@@ -30,6 +31,29 @@ def test_wf_dimensions_and_schema_round_trip():
     config["history_length"] = 10
     assert observation_dimensions(config) == (57, 570, 295)
     assert default_observation_config()["history_length"] == 4
+
+
+def test_skill_id_is_clean_and_follows_the_episode_in_every_history_frame():
+    base = default_observation_config()
+    config = add_skill_id(base)
+    assert observation_dimensions(config) == (58, 232, 296)
+    assert config == add_skill_id(config)
+    assert observation_dimensions(base) == (57, 228, 295)
+    history = CTSObservationHistory(2, config)
+    raw = raw_observations()
+    raw["skill_id"] = torch.tensor([[0.], [1.]])
+    frame = build_proprioception(raw, config, add_noise=True)
+    obs = history.update(frame)
+    assert torch.equal(obs[:, -4:], raw["skill_id"].expand(-1, 4))
+    assert torch.equal(extract_current_observation(obs, 4, history.term_dims), frame)
+    privileged = build_privileged_observations(raw, config)
+    assert torch.equal(privileged[:, :-1], build_privileged_observations(raw, base))
+    assert torch.equal(privileged[:, -1:], raw["skill_id"])
+
+    history.reset(torch.tensor([1]))
+    raw["skill_id"][1] = 0.
+    obs = history.update(build_proprioception(raw, config, add_noise=True))
+    assert torch.count_nonzero(obs[:, -4:]) == 0
 
 
 def test_proprioception_preserves_wheel_rates_and_masks_only_wheel_positions():

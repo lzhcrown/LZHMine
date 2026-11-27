@@ -601,11 +601,16 @@ class LeggedRobot(BaseTask):
             # don't change on initial reset
             return
         move_up, move_down = self._terrain_move_masks(env_ids)
-        self.terrain_levels[env_ids] += move_up.long() - move_down.long()
-        # Robots that solve the last level are sent to a random one
-        self.terrain_levels[env_ids] = torch.where(self.terrain_levels[env_ids]>=self.max_terrain_level,
-                                                   torch.randint_like(self.terrain_levels[env_ids], self.max_terrain_level),
-                                                   torch.clip(self.terrain_levels[env_ids], 0)) # (the minumum level is zero)
+        levels = self.terrain_levels[env_ids] + move_up.long() - move_down.long()
+        level_counts = getattr(self, "terrain_level_counts", None)
+        if level_counts is None:
+            count = self.max_terrain_level
+            random_levels = torch.randint_like(levels, count)
+        else:
+            count = level_counts[env_ids]
+            random_levels = (torch.rand_like(levels, dtype=torch.float32) * count).long()
+        # Solving the last level samples another level of the same terrain.
+        self.terrain_levels[env_ids] = torch.where(levels >= count, random_levels, levels.clamp_min(0))
         self.env_origins[env_ids] = self.terrain_origins[self.terrain_levels[env_ids], self.terrain_types[env_ids]]
 
     def _terrain_move_masks(self, env_ids):

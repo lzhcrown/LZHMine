@@ -39,6 +39,7 @@ class CTSStudentExporter(nn.Module):
         self.actor_expert_num = int(actor_critic.actor_expert_num)
         self.critic_type = actor_critic.critic_type
         self.critic_expert_num = int(actor_critic.critic_expert_num)
+        self.critic_task_count = int(actor_critic.critic_task_count)
         self.history_length = int(actor_critic.history_length)
         self.observation_config_json = json.dumps(observation_config, sort_keys=True)
         self.control_config_json = json.dumps(control_config or {}, sort_keys=True)
@@ -118,6 +119,10 @@ class CTSStudentExporter(nn.Module):
         return self.critic_expert_num
 
     @torch.jit.export
+    def get_critic_task_count(self) -> int:
+        return self.critic_task_count
+
+    @torch.jit.export
     def get_num_actor_experts(self) -> int:
         return self.actor_expert_num
 
@@ -166,6 +171,7 @@ class CTSStudentExporter(nn.Module):
             "actor_expert_num": self.actor_expert_num,
             "critic_type": self.critic_type,
             "critic_expert_num": self.critic_expert_num,
+            "critic_task_count": self.critic_task_count,
             "residual_enabled": self.residual_enabled,
             "residual_hidden_dims": self.residual_hidden_dims,
             "residual_action_scales": json.loads(self.residual_action_scales_json),

@@ -65,7 +65,7 @@ def test_combined_preview_uses_routing_from_the_forward_that_stepped_the_robot(t
 
     def step(applied):
         assert applied is actions
-        trace.begin_step.assert_called_once_with(student, actor, actions)
+        trace.begin_step.assert_called_once_with(student, actor, actions, env.get_observations.return_value)
         env.evaluation_complete = True
 
     env.step = step

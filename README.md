@@ -129,6 +129,45 @@ done
   --init_from /path/to/g12_v3/model_XXXX.pt --num_envs 4096 --max_iterations 1000 --seed 10
 ```
 
+### G12 v5 常规地形课程上限对照
+
+`g12_v5` 从 `g12_v1` 派生。平地、上下楼梯及其他常规地形训练等级为 **0–9**，凸台和凹台为 **0–19**。每类地形通过自身最高等级后，按 v1 的规则在该类的有效等级内随机重采样。难度插值继续使用 `d = (等级 + u) / 10`，其中 `u` 在 [0, 1) 内按地块采样。第 9 级训练楼梯的单阶高度约为 23.5–25.5 cm，踏面宽 35 cm。第 19 级凸台高度和凹台深度为 115–120 cm。[v5 配置](experiments/g12_v5/config.py)
+
+从已有 v1 检查点微调的示例
+
+```bash
+.venv/bin/python experiments/g12_v5/train.py \
+  --init_from /path/to/g12_v1/model_XXXX.pt --num_envs 4096 --max_iterations 1000 --seed 10
+```
+
+### G13 v1 技能编号与楼梯步态对照
+
+`g13_v1` 使用 `g12_v1` 的奖励、地形、指令和两个价值输出。模拟器按回合地块提供一个无噪声标量，平地、楼梯和坡地为 0，凸台和凹台为 1。编号进入当前本体帧、学生的四帧历史和教师/价值网络的特权观测，启动时三个宽度应分别为 58、232、296。攀上台面后仍使用该回合的编号 1。
+
+从**同一个**已验证的 v1 检查点启动有编号与无编号两组，使用相同种子和追加训练轮数。G13 对新增输入的权重以零初始化，微调前两个编号都复现源策略。示例追加 1000 轮。
+
+```bash
+V1_CKPT=/path/to/g12_v1/model_XXXX.pt
+for group in g12_v1 g13_v1; do
+  .venv/bin/python "experiments/$group/train.py" --init_from "$V1_CKPT" \
+    --num_envs 4096 --max_iterations 1000 --seed 10 --run_name "${group}_stair_ablation"
+done
+```
+
+用训练好的 G7 作为楼梯动作参考，将 G7、等轮数微调的 v1 和 G13 分别代入以下命令。固定楼梯预设为单阶高 35 cm、踏面宽 30 cm，训练楼梯踏面宽 35 cm。各组应使用同一评估预设、指令和出生扰动。下例为每种地形运行 20 次，CSV 需使用新的输出路径。
+
+```bash
+GROUP=g13_v1
+CKPT=/path/to/trained/model_XXXX.pt
+.venv/bin/python legged_gym/scripts/evaluate_nezha_moe_cts.py \
+  --group "$GROUP" --checkpoint-path "$CKPT" --viewer --no-record \
+  --terrain-types stairs_convex_35cm,stairs_concave_35cm,platform_100cm --speed 0.8 --seed 10 \
+  --spawn-xy-jitter 0.05 --envs-per-terrain 1 --episodes-per-env 20 \
+  --joint-angles-csv "evaluations/${GROUP}_stairs35_block100.csv"
+```
+
+先核对 G13 轨迹中的 `actor_skill_id`，有动作的楼梯行应为 0，高台行为 1。在相同的上阶阶段比较三组的通过率、实际前进速度和后腿大腿/小腿角度，对突然下蹲的回合同时查看关节目标角和实际角。用 100 cm 凸台的完整通过率核对攀台能力。
+
 ### G0–G11 对照实验
 
 基于 g7 的动作残差与时间平滑对照已增加为 g8–g11。四组配置、共同检查点初始化、训练/评估命令及结果判定见 [残差实验说明](experiments/RESIDUAL_EXPERIMENTS.md)。首轮使用 `--init_from` 从同一个 g7 checkpoint 公平微调。

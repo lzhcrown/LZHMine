@@ -86,6 +86,19 @@ def observation_dimensions(config):
     return current, current * int(config["history_length"]), privileged
 
 
+def add_skill_id(config):
+    """Append the oracle task to each observation without moving existing features."""
+    config = deepcopy(config)
+    term = {"name": "skill_id", "dim": 1, "scale": 1.0, "noise": 0.0, "clip": [0.0, 1.0]}
+    for key in ("proprioceptive_terms", "privileged_terms"):
+        terms = config[key]
+        if not any(item["name"] == "skill_id" for item in terms):
+            terms.append(deepcopy(term))
+        elif terms[-1] != term:
+            raise ValueError("Expected a clean skill_id scalar at the end of " + key)
+    return validate_observation_config(config)
+
+
 def _build_terms(raw, terms, wheel_indices, add_noise, noise_level):
     values = []
     for term in terms:

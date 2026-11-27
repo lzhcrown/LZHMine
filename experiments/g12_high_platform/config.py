@@ -28,6 +28,8 @@ def configure_environment(cfg):
                  "platform_reward_profile", "platform_heading_target"):
         if name in vars(cfg.rewards):
             delattr(cfg.rewards, name)
+    # A v5 source checkpoint may carry its experiment-specific terrain cap.
+    vars(cfg.terrain).pop("ordinary_max_level", None)
     cfg.terrain.curriculum_rule = "wf"
     cfg.terrain.wf_sub_terrains = high_platform_wf_sub_terrains()
     cfg.terrain.terrain_proportions = [

@@ -148,10 +148,11 @@ def evaluate_one(args, group, path, output):
             with torch.inference_mode():
                 while not env.evaluation_complete:
                     if args.expert_weights_only or args.record_residual or trace is not None:
+                        observations = env.get_observations()
                         actions, student_gate, actor_gate, pre, correction = policy.act_inference_with_diagnostics(
-                            env.get_observations())
+                            observations)
                         if trace is not None:
-                            trace.begin_step(student_gate, actor_gate, actions)
+                            trace.begin_step(student_gate, actor_gate, actions, observations)
                         if args.expert_weights_only:
                             record_expert_step(writer, env, {'student': student_gate, 'actor': actor_gate})
                         if args.record_residual:

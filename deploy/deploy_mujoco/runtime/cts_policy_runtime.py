@@ -33,6 +33,7 @@ class NezhaCTSPolicyRuntime:
         joint_names: Sequence[str] = None,
         policy=None,
         expected_policy=None,
+        skill_id: int = None,
     ):
         self.device = torch.device(device)
         self.policy = (
@@ -54,6 +55,7 @@ class NezhaCTSPolicyRuntime:
             "actor_expert_num": self.policy.get_num_actor_experts() if hasattr(self.policy, "get_num_actor_experts") else 0,
             "critic_type": self.policy.get_critic_type() if hasattr(self.policy, "get_critic_type") else "mlp",
             "critic_expert_num": self.policy.get_num_critic_experts() if hasattr(self.policy, "get_num_critic_experts") else 0,
+            "critic_task_count": self.policy.get_critic_task_count() if hasattr(self.policy, "get_critic_task_count") else 1,
             "num_actions": NUM_ACTIONS,
         }
         if hasattr(self.policy, "get_residual_config_json"):
@@ -77,8 +79,23 @@ class NezhaCTSPolicyRuntime:
             if actual_scales.shape != saved_scales.shape or not torch.allclose(
                     actual_scales, saved_scales, rtol=1e-6, atol=1e-8):
                 raise ValueError("Export residual scales disagree with metadata")
-        validate_checkpoint_policy({"policy_config": self.policy_config}, expected_policy)
         self.observation_config = json.loads(self.policy.get_observation_config_json())
+        terms = self.observation_config["proprioceptive_terms"]
+        self.policy_config["observation_dims"] = [term["dim"] for term in terms]
+        if expected_policy and not hasattr(self.policy, "get_critic_task_count"):
+            # Older student exports omit the training-only critic's head count.
+            expected_policy = {k: v for k, v in expected_policy.items() if k != "critic_task_count"}
+        validate_checkpoint_policy(
+            {"policy_config": self.policy_config, "observation_config": self.observation_config},
+            expected_policy,
+        )
+        self.skill_observation = None
+        if any(term["name"] == "skill_id" for term in terms):
+            if type(skill_id) is not int or skill_id not in (0, 1):
+                raise ValueError("Set --skill-id 0 for ordinary terrain (including stairs) or 1 for platforms.")
+            self.skill_observation = torch.tensor([[skill_id]], device=self.device, dtype=torch.float32)
+        elif skill_id is not None:
+            raise ValueError("--skill-id requires a policy trained with the skill_id observation")
         self.control_config = json.loads(self.policy.get_control_config_json())
         self.clip_actions = float(self.control_config.get("clip_actions", 100.0))
         if self.clip_actions <= 0:
@@ -161,18 +178,17 @@ class NezhaCTSPolicyRuntime:
             if tensor.shape != (width,):
                 raise ValueError("Runtime input has shape {}; expected [{}]".format(tuple(tensor.shape), width))
         angular, gravity, command, position, velocity = tensors
-        return build_proprioception(
-            {
-                "base_ang_vel": angular.unsqueeze(0),
-                "projected_gravity": gravity.unsqueeze(0),
-                "velocity_commands": command.unsqueeze(0),
-                "joint_pos": (position - self.default_dof_pos).unsqueeze(0),
-                "joint_vel": velocity.unsqueeze(0),
-                "actions": self.previous_actions.unsqueeze(0),
-            },
-            config=self.observation_config,
-            add_noise=False,
-        )
+        raw = {
+            "base_ang_vel": angular.unsqueeze(0),
+            "projected_gravity": gravity.unsqueeze(0),
+            "velocity_commands": command.unsqueeze(0),
+            "joint_pos": (position - self.default_dof_pos).unsqueeze(0),
+            "joint_vel": velocity.unsqueeze(0),
+            "actions": self.previous_actions.unsqueeze(0),
+        }
+        if self.skill_observation is not None:
+            raw["skill_id"] = self.skill_observation
+        return build_proprioception(raw, config=self.observation_config, add_noise=False)
 
     @torch.inference_mode()
     def step(self, base_ang_vel, projected_gravity, commands, dof_pos, dof_vel) -> Tuple[torch.Tensor, torch.Tensor]:

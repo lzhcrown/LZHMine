@@ -223,6 +223,38 @@ def test_curriculum_difficulty_uses_column_major_independent_rng():
     assert np.all(terrain.difficulties < (np.arange(10)[:, None] + 1) / 10)
 
 
+def test_v5_keeps_v1_geometry_at_each_reachable_curriculum_level():
+    common = dict(wf_sub_terrains=high_platform_wf_sub_terrains(), num_rows=20,
+                  difficulty_reference_rows=10, border_size=0.)
+    np.random.seed(17)
+    v1 = WFTerrain(terrain_cfg(**common), 1, None)
+    np.random.seed(17)
+    v5 = WFTerrain(terrain_cfg(ordinary_max_level=9, **common), 1, None)
+    np.testing.assert_array_equal(v5.tile_types, v1.tile_types)
+    np.testing.assert_array_equal(v5.difficulties[:10], v1.difficulties[:10])
+    np.testing.assert_array_equal(v5.height_field_raw[:10 * v5.length_per_env_pixels + 1],
+                                  v1.height_field_raw[:10 * v1.length_per_env_pixels + 1])
+    for col, kind in enumerate(v5.column_types):
+        if kind in ("platform_block", "platform_pit"):
+            np.testing.assert_array_equal(v5.difficulties[:, col], v1.difficulties[:, col])
+            start = col * v5.width_per_env_pixels
+            stop = start + v5.width_per_env_pixels + 1
+            np.testing.assert_array_equal(v5.height_field_raw[:, start:stop], v1.height_field_raw[:, start:stop])
+        else:
+            assert np.all(v5.difficulties[10:, col] < 1.)
+
+
+def test_v5_random_play_caps_ordinary_difficulty_by_actual_tile_type():
+    terrain = WFTerrain(terrain_cfg(
+        wf_sub_terrains=high_platform_wf_sub_terrains(), num_rows=20, difficulty_reference_rows=10,
+        ordinary_max_level=9, curriculum=False, border_size=0.,
+    ), 1, None)
+    platforms = np.isin(terrain.tile_types, ("platform_block", "platform_pit"))
+    assert np.all(terrain.difficulties[~platforms] < 1.)
+    for kind in ("platform_block", "platform_pit"):
+        assert terrain.difficulties[terrain.tile_types == kind].max() > 1.
+
+
 def test_full_map_has_shared_edges_outer_border_and_correct_origins():
     np.random.seed(17)
     terrain = WFTerrain(terrain_cfg(), 64, mesh_converter=None)

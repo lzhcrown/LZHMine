@@ -18,6 +18,7 @@ from deploy.deploy_mujoco.runtime import NezhaCTSPolicyRuntime
 from legged_gym.scripts import export_nezha_moe_cts as export_script
 from rsl_rl.runners.on_policy_runner_cts import MoECTSOnPolicyRunner
 from rsl_rl.utils import cts_checkpoint
+from rsl_rl.utils.cts_observations import add_skill_id, default_observation_config
 from test_cts_runner import (
     FakeVectorEnv, assert_nested_equal, cpu_task_registry, runner_config,
 )
@@ -171,6 +172,8 @@ def test_real_task_registration_preserves_environment_and_training_isolation(
     v2_env, v2_train = cpu_task_registry.get_cfgs(get_experiment("g12_v2").TASK_NAME)
     v3_env, v3_train = cpu_task_registry.get_cfgs(get_experiment("g12_v3").TASK_NAME)
     v4_env, v4_train = cpu_task_registry.get_cfgs(get_experiment("g12_v4").TASK_NAME)
+    v5_env, v5_train = cpu_task_registry.get_cfgs(get_experiment("g12_v5").TASK_NAME)
+    skill_env, skill_train = cpu_task_registry.get_cfgs(get_experiment("g13_v1").TASK_NAME)
     assert all(cpu_task_registry.get_task_class(task) is FakeVectorEnv for task in tasks)
     assert not getattr(v1_env.rewards, "platform_climb", False)
     assert "base_height" not in platform_env.rewards.platform_scales
@@ -197,8 +200,20 @@ def test_real_task_registration_preserves_environment_and_training_isolation(
     expected_v4["rewards"].update(base_height_target=.54, platform_base_height_target=.54)
     assert config_dict(cpu_task_registry, v4_env) == expected_v4
     assert config_dict(cpu_task_registry, v4_train.policy) == config_dict(cpu_task_registry, v3_train.policy)
+    expected_v5 = config_dict(cpu_task_registry, v1_env)
+    assert "ordinary_max_level" not in expected_v5["terrain"]
+    expected_v5["terrain"]["ordinary_max_level"] = 9
+    assert config_dict(cpu_task_registry, v5_env) == expected_v5
+    assert config_dict(cpu_task_registry, v5_train.policy) == config_dict(cpu_task_registry, v1_train.policy)
+    expected_skill = config_dict(cpu_task_registry, v1_env)
+    expected_skill["env"].update(observation_config=add_skill_id(default_observation_config()),
+                                 num_one_step_observations=58, num_observations=232,
+                                 num_one_step_privileged_obs=296, num_privileged_obs=296)
+    assert config_dict(cpu_task_registry, skill_env) == expected_skill
+    assert config_dict(cpu_task_registry, skill_train.policy) == dict(
+        config_dict(cpu_task_registry, v1_train.policy), observation_dims=[3, 3, 3, 16, 16, 16, 1])
     for key, config in (("g12_v1", v1_train), ("g12_v2", v2_train),
-                        ("g12_v3", v3_train), ("g12_v4", v4_train)):
+                        ("g12_v3", v3_train), ("g12_v4", v4_train), ("g12_v5", v5_train), ("g13_v1", skill_train)):
         assert config.runner.experiment_key == config.runner.run_name == config.runner.wandb_group == key
         assert config.runner.experiment_name == "nezha_moe_cts/" + key
         assert export_path(key).endswith("/nezha/policy/" + key + "/policy.pt")

@@ -72,6 +72,11 @@ def validate_checkpoint_policy(checkpoint, expected_policy):
         return checkpoint
     policy = normalize_policy_config(checkpoint["policy_config"])
     expected = normalize_policy_config(expected_policy)
+    spec = checkpoint.get("observation_config", {})
+    has_skill = any(term["name"] == "skill_id" for term in spec.get("proprioceptive_terms", ()))
+    if ("observation_dims" in expected and expected["observation_dims"] != policy.get("observation_dims")
+            or has_skill and "observation_dims" not in expected):
+        raise ValueError("Checkpoint observation_dims do not match the selected experiment")
     for key in STRUCTURE_KEYS:
         if policy[key] != expected[key]:
             raise ValueError(

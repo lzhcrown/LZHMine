@@ -137,7 +137,30 @@ def test_trace_only_exports_real_moe_columns(tmp_path, student_n, actor_n):
         gate_fields = [name for name in reader.fieldnames if name.endswith("_weight")]
         last = list(reader)[-1]
     assert len(gate_fields) == student_n + actor_n
+    assert "actor_skill_id" not in last
     assert all(float(last[name]) > 0. for name in gate_fields)
+
+
+def test_trace_records_newest_skill_from_the_actual_actor_input(tmp_path):
+    env = make_env()
+    env.observation_config = {
+        "history_length": 2,
+        "proprioceptive_terms": [{"name": "base", "dim": 2}, {"name": "skill_id", "dim": 1}],
+    }
+    observations = torch.zeros(2, 6)
+    observations[:, -2:] = torch.tensor([[1., 0.], [0., 1.]])
+    gates = torch.empty(2, 0)
+    path = tmp_path / "skills.csv"
+    with open_joint_angles(path, env, "g13_v1", ["stairs_convex_35cm", "platform_100cm"]) as trace:
+        trace.start()
+        trace.begin_step(gates, gates, torch.zeros_like(env.dof_pos), observations)
+        observations.zero_()  # env.step can replace the observation, including on reset
+        env.common_step_counter += 1
+        env.episode_length_buf += 1
+        trace.sample(terminal_reasons={1: "fall"})
+    with path.open(newline="") as stream:
+        rows = list(csv.DictReader(stream))
+    assert [row["actor_skill_id"] for row in rows] == ["", "", "0.0", "1.0"]
 
 
 @pytest.mark.parametrize("mode", ["V", "T"])

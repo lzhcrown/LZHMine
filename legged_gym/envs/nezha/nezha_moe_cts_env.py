@@ -26,6 +26,9 @@ class NezhaMoECTSEnv(NezhaRobot):
             if provided is None else provided
         )
         validate_observation_config(self.observation_config)
+        self.uses_skill_id = any(
+            term["name"] == "skill_id" for term in self.observation_config["proprioceptive_terms"]
+        )
         current, history, privileged = observation_dimensions(self.observation_config)
         cfg.env.num_one_step_observations = current
         cfg.env.num_observations = history
@@ -178,7 +181,7 @@ class NezhaMoECTSEnv(NezhaRobot):
         self.base_height = (self.root_states[:, 2:3] - self.measured_heights).mean(dim=-1)
 
     def _raw_observations(self):
-        return {
+        raw = {
             "base_lin_vel": self.base_lin_vel,
             "base_ang_vel": self.base_ang_vel,
             "projected_gravity": self.projected_gravity,
@@ -191,6 +194,9 @@ class NezhaMoECTSEnv(NezhaRobot):
             "contact_force": contact_history_features(self.wheel_contact_history),
             "height_scan": self.root_states[:, 2:3] - self.observation_config["height_offset"] - self.measured_heights,
         }
+        if self.uses_skill_id:
+            raw["skill_id"] = self.high_platform_mask[:, None].to(dtype=self.dof_pos.dtype)
+        return raw
 
     def compute_observations(self):
         # WF may reset the pose or resample commands after the reward was scored.

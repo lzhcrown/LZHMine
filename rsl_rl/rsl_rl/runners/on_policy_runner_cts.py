@@ -16,7 +16,9 @@ from rsl_rl.modules.actor_critic_moe_cts import ActorCriticMoECTS
 from rsl_rl.utils.cts_checkpoint import (
     ARCHITECTURE, FORMAT_VERSION, load_cts_checkpoint, normalize_policy_config,
 )
-from rsl_rl.utils.cts_initialization import base_policy_config, validate_initialization_source
+from rsl_rl.utils.cts_initialization import (
+    extend_skill_input_weights, skill_input_extension, validate_initialization_source,
+)
 
 
 def _config_dict(value):
@@ -390,14 +392,13 @@ class MoECTSOnPolicyRunner:
             raise ValueError("initialize_from requires a fresh runner; use load to resume")
         checkpoint = load_cts_checkpoint(path, map_location=self.device)
         validate_initialization_source(checkpoint, self.policy_config)
-        if base_policy_config(checkpoint["policy_config"]) != base_policy_config(self.policy_config):
-            raise ValueError("Initialization must preserve the complete base policy configuration")
-        if checkpoint["observation_config"] != self.observation_config:
-            raise ValueError("Initialization observation schema differs from checkpoint")
+        append_skill = skill_input_extension(checkpoint, self.policy_config, self.observation_config)
         if checkpoint["train_config"]["runner"]["num_steps_per_env"] != self.num_steps_per_env:
             raise ValueError("Initialization must preserve the rollout length")
         current = self.alg.actor_critic.state_dict()
         source = checkpoint["model_state_dict"].copy()
+        if append_skill:
+            extend_skill_input_weights(source, self.observation_config["history_length"])
         if checkpoint["policy_config"]["critic_task_count"] < self.policy_config["critic_task_count"]:
             # Grouped Conv1d outputs are laid out [expert, task]. Duplicate
             # each expert's G7 scalar, keeping both initial values identical.

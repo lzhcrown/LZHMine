@@ -154,7 +154,7 @@ def play(args, task_name=TASK_NAME, export_path=None,
         for step in (count() if total_steps is None else range(total_steps)):
             actions, student_weights, actor_weights, _, _ = policy.act_inference_with_diagnostics(observations)
             if joint_angles is not None:
-                joint_angles.begin_step(student_weights, actor_weights, actions)
+                joint_angles.begin_step(student_weights, actor_weights, actions, observations)
             if args.gate_log_interval > 0 and step % args.gate_log_interval == 0:
                 weights = student_weights.mean(dim=0).cpu().tolist()
                 print("step {} | {}".format(step, " ".join(

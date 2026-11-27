@@ -50,6 +50,16 @@ def high_platform_wf_sub_terrains():
     return default_wf_sub_terrains(platform_height_range=(0.20, 0.70), round_platform_height=True)
 
 
+def terrain_level_count(cfg, kind):
+    """Number of accessible difficulty levels for a WF terrain type."""
+    limit = getattr(cfg, "ordinary_max_level", None)
+    if limit is None or kind in PLATFORM_TYPES or kind == "high_platform":
+        return cfg.num_rows
+    if type(limit) is not int or limit < 0:
+        raise ValueError("ordinary_max_level must be a nonnegative integer")
+    return min(cfg.num_rows, limit + 1)
+
+
 def column_types(cfg):
     specs = cfg.wf_sub_terrains
     names = list(specs)
@@ -221,6 +231,7 @@ class WFTerrain:
         self.np_rng = np.random.default_rng(np.random.get_state()[1][0] if seed is None else seed)
         meshes, vertex_count = [], 0
         names = list(cfg.wf_sub_terrains)
+        level_counts = {name: terrain_level_count(cfg, name) for name in names}
         probabilities = np.array([cfg.wf_sub_terrains[name]["proportion"] for name in names])
         probabilities /= probabilities.sum()
         reference_rows = getattr(cfg, "difficulty_reference_rows", cfg.num_rows)
@@ -238,8 +249,10 @@ class WFTerrain:
         for row, col in indices:
             name = self.column_types[col] if cfg.curriculum else names[self.np_rng.choice(len(names), p=probabilities)]
             jitter = self.np_rng.uniform()
-            difficulty = ((row + jitter) / reference_rows if cfg.curriculum
-                          else jitter * (cfg.num_rows / reference_rows))
+            levels = level_counts[name]
+            # Extra rows keep the rectangular mesh; only platform columns need all 20 in v5.
+            difficulty = ((min(row, levels - 1) + jitter) / reference_rows if cfg.curriculum
+                          else jitter * (levels / reference_rows))
             difficulty = lower + (upper - lower) * difficulty
             self.difficulties[row, col], self.tile_types[row, col] = difficulty, name
             heights = make_height_field(name, difficulty, cfg)

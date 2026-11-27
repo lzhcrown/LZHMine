@@ -13,7 +13,7 @@ from legged_gym.evaluation.presets import PATCH_HIGH_PLATFORM_HEIGHTS_M
 from legged_gym.terrains.platform_rewards import (
     platform_reward_scales, platform_v1_reward_scales, platform_v2_reward_scales,
 )
-from legged_gym.terrains.wf import PLATFORM_TYPES, column_types, high_platform_wf_sub_terrains
+from legged_gym.terrains.wf import PLATFORM_TYPES, column_types, high_platform_wf_sub_terrains, terrain_level_count
 from test_wf_curriculum import make_env
 
 
@@ -27,6 +27,7 @@ def robot():
         return vector + quaternion[:, 3:] * cross + torch.cross(xyz, cross, dim=-1)
 
     namespace = {"BaseTask": object, "torch": torch, "np": np, "PLATFORM_TYPES": PLATFORM_TYPES,
+                 "terrain_level_count": terrain_level_count,
                  "quat_apply": rotate_vector, "wrap_to_pi": lambda a: (a + torch.pi) % (2 * torch.pi) - torch.pi,
                  "PATCH_HIGH_PLATFORM_HEIGHTS_M": PATCH_HIGH_PLATFORM_HEIGHTS_M}
     for path in (root / "base/legged_robot.py", root / "nezha/nezha_robot.py"):
@@ -235,6 +236,60 @@ def test_small_g12_batches_visit_ordinary_and_platform_terrain(robot, monkeypatc
     assert kinds.difference(PLATFORM_TYPES)
     assert len(kinds.intersection(PLATFORM_TYPES)) == min(2, count - 1)
     torch.testing.assert_close(robot.env_origins, robot.terrain_origins[0, robot.terrain_types])
+
+
+def test_v5_initial_assignment_promotion_and_wrap_use_each_columns_level_range(robot):
+    kinds = ["stairs_up", "flat", "rough_slope", "platform_pit", "platform_block"]
+    rows, cols = 20, len(kinds)
+    robot.cfg.terrain = SimpleNamespace(
+        mesh_type="heightfield", curriculum=True, curriculum_rule="dreamwaq", num_rows=rows,
+        num_cols=cols, max_init_terrain_level=19, ordinary_max_level=9,
+    )
+    robot.cfg.rewards.platform_scales = platform_v1_reward_scales()
+    robot.terrain = SimpleNamespace(
+        column_types=kinds, tile_types=np.tile(kinds, (rows, 1)), env_length=9.,
+        env_origins=np.arange(rows * cols * 3, dtype=np.float32).reshape(rows, cols, 3),
+    )
+    robot.num_envs = cols * 256
+    with torch.random.fork_rng(devices=[]):
+        torch.manual_seed(42)
+        robot._get_env_origins()
+        robot._init_platform_terrain_mask()
+        ceiling = torch.where(robot.high_platform_mask, 19, 9)
+        assert torch.all((robot.terrain_levels >= 0) & (robot.terrain_levels <= ceiling))
+        for col, kind in enumerate(kinds):
+            levels = robot.terrain_levels[robot.terrain_types == col]
+            assert levels.max().item() == (19 if kind in PLATFORM_TYPES else 9)
+
+        robot.init_done = True
+        robot.max_episode_length_s = 20.
+        robot.episode_length_buf = torch.ones(robot.num_envs, dtype=torch.long)
+        robot.commands = torch.ones(robot.num_envs, 3)
+        robot.root_states = torch.zeros(robot.num_envs, 13)
+        env_ids = torch.arange(robot.num_envs)
+        robot.terrain_levels.copy_(ceiling - 1)
+        robot.env_origins.copy_(robot.terrain_origins[robot.terrain_levels, robot.terrain_types])
+        # Both tasks can reach their own last level and are sent to a random
+        # legal level on the next success. Only even environments reset twice.
+        robot.root_states[:, :2] = robot.env_origins[:, :2] + 5.
+        robot._update_terrain_curriculum(env_ids)
+        assert torch.equal(robot.terrain_levels, ceiling)
+        reset_ids = env_ids[::2]
+        robot.root_states[:, :2] = robot.env_origins[:, :2] + 5.
+        robot._update_terrain_curriculum(reset_ids)
+        assert torch.equal(robot.terrain_levels[1::2], ceiling[1::2])
+        for col, kind in enumerate(kinds):
+            levels = robot.terrain_levels[reset_ids[robot.terrain_types[reset_ids] == col]]
+            assert levels.min().item() >= 0
+            assert levels.max().item() <= (19 if kind in PLATFORM_TYPES else 9)
+            assert levels.unique().numel() > 1
+        torch.testing.assert_close(robot.env_origins, robot.terrain_origins[robot.terrain_levels, robot.terrain_types])
+
+        # A failed attempt still drops one level, with a lower bound of zero.
+        before = robot.terrain_levels.clone()
+        robot.root_states[:, :2] = robot.env_origins[:, :2]
+        robot._update_terrain_curriculum(env_ids)
+        assert torch.equal(robot.terrain_levels, (before - 1).clamp_min(0))
 
 
 def test_reset_faces_raised_platform_from_approach_and_keeps_other_headings(robot, monkeypatch):

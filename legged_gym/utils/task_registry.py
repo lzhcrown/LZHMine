@@ -82,8 +82,6 @@ class TaskRegistry:
     @staticmethod
     def _validate_experiment_checkpoint(train_cfg, checkpoint):
         experiment_key = getattr(train_cfg.runner, "experiment_key", None)
-        if experiment_key:
-            validate_checkpoint_policy(checkpoint, class_to_dict(train_cfg.policy))
         source_key = checkpoint.get("train_config", {}).get("runner", {}).get("experiment_key")
         # These tasks share a policy shape with G12 but use different rewards.
         # Older G13 checkpoints also carry their own task-specific environment.
@@ -96,6 +94,8 @@ class TaskRegistry:
                 "checkpoint={!r}, target={!r}. Use --init_from to change training tasks."
                 .format(source_key, experiment_key)
             )
+        if experiment_key:
+            validate_checkpoint_policy(checkpoint, class_to_dict(train_cfg.policy))
         if experiment_key in RESIDUAL_EXPERIMENT_KEYS:
             saved = checkpoint.get("train_config", {})
             if source_key != experiment_key:
@@ -215,13 +215,14 @@ class TaskRegistry:
                 self._validate_experiment_checkpoint(train_cfg, checkpoint)
             if "environment_config" in checkpoint:
                 self.restore_environment_config(env_cfg, checkpoint["environment_config"], warm_start=bool(init_path))
+            # Keep the source schema (including its scales and history) as the
+            # base for any target-specific extension before buffers are created.
+            env_cfg.env.observation_config = copy.deepcopy(checkpoint["observation_config"])
             experiment_key = getattr(train_cfg.runner, "experiment_key", None)
             if init_path and experiment_key in PLATFORM_EXPERIMENT_KEYS:
                 # The source snapshot may use a different terrain mix or climbing reward.
                 get_experiment(experiment_key).configure_environment(env_cfg)
             self._restore_asset_path(env_cfg)
-            # Restore the schema before simulator buffers are allocated.
-            env_cfg.env.observation_config = copy.deepcopy(checkpoint["observation_config"])
             # Keep the resolved file even after a new run directory exists.
             if init_path:
                 args.cts_init_from = init_path

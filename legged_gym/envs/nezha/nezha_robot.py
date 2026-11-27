@@ -14,7 +14,7 @@ from isaacgym.torch_utils import (
 
 from legged_gym.envs.base.legged_robot import LeggedRobot
 from legged_gym.evaluation.presets import PATCH_HIGH_PLATFORM_HEIGHTS_M
-from legged_gym.terrains.wf import PLATFORM_TYPES
+from legged_gym.terrains.wf import PLATFORM_TYPES, terrain_level_count
 from legged_gym.utils.math import wrap_to_pi
 from rsl_rl.utils.wf_curriculum import WFCurriculum, configure_wf_timing, is_wf_profile
 
@@ -42,12 +42,26 @@ class NezhaRobot(LeggedRobot):
 
     def _get_env_origins(self):
         super()._get_env_origins()
-        if (not self.cfg.terrain.curriculum or self.num_envs >= self.cfg.terrain.num_cols
-                or not getattr(self.cfg.rewards, "platform_scales", None)):
+        terrain_cfg = self.cfg.terrain
+        if not terrain_cfg.curriculum or not getattr(self.cfg.rewards, "platform_scales", None):
             return
+        columns = getattr(getattr(self, "terrain", None), "column_types", [])
+        if self.num_envs < terrain_cfg.num_cols:
+            self._include_platform_columns(columns)
+        if getattr(terrain_cfg, "ordinary_max_level", None) is not None:
+            counts = torch.tensor([terrain_level_count(terrain_cfg, kind) for kind in columns],
+                                  device=self.device, dtype=torch.long)
+            self.terrain_level_counts = counts[self.terrain_types]
+            if terrain_cfg.max_init_terrain_level > terrain_cfg.ordinary_max_level:
+                # Redraw only out-of-range starts so the allowed levels remain equiprobable.
+                outside = self.terrain_levels >= self.terrain_level_counts
+                count = self.terrain_level_counts[outside]
+                self.terrain_levels[outside] = (torch.rand_like(count, dtype=torch.float32) * count).long()
+        self.env_origins.copy_(self.terrain_origins[self.terrain_levels, self.terrain_types])
+
+    def _include_platform_columns(self, columns):
         # A small G12 batch samples only some map columns. Include a climb
         # alongside ordinary terrain, and both shapes when at least 3 slots fit.
-        columns = getattr(getattr(self, "terrain", None), "column_types", [])
         if not all(kind in columns for kind in PLATFORM_TYPES):
             return
         selected = self.terrain_types.tolist()
@@ -61,7 +75,6 @@ class NezhaRobot(LeggedRobot):
             nearest = min(ordinary, key=lambda i: abs(selected[i] - target))
             selected[nearest] = target
         self.terrain_types.copy_(torch.as_tensor(selected, device=self.device))
-        self.env_origins.copy_(self.terrain_origins[self.terrain_levels, self.terrain_types])
 
     def _init_buffers(self):
         super()._init_buffers()

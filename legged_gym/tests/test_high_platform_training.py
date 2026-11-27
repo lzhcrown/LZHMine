@@ -7,12 +7,14 @@ import torch
 
 from experiments.registry import (
     PLATFORM_EXPERIMENT, PLATFORM_EXPERIMENT_KEYS, PLATFORM_V1_EXPERIMENT, PLATFORM_V2_EXPERIMENT,
-    PLATFORM_V3_EXPERIMENT, PLATFORM_V4_EXPERIMENT, clone_config, configure_experiment, get_experiment,
+    PLATFORM_V3_EXPERIMENT, PLATFORM_V4_EXPERIMENT, PLATFORM_V5_EXPERIMENT, SKILL_V1_EXPERIMENT,
+    clone_config, configure_experiment, get_experiment,
 )
 from legged_gym.terrains.platform_rewards import (
     platform_reward_scales, platform_v1_reward_scales, platform_v2_reward_scales,
 )
 from rsl_rl.runners.on_policy_runner_cts import MoECTSOnPolicyRunner
+from rsl_rl.utils.cts_observations import observation_dimensions
 from rsl_rl.utils.wf_curriculum import WFCurriculum
 from test_cts_checkpoint_restoration import restore_args
 from test_cts_experiments import actual_config_module, config_dict
@@ -24,7 +26,12 @@ from test_wf_curriculum import make_env
 
 class CpuPlatformEnv(FakeVectorEnv):
     def __init__(self, cfg, **kwargs):
+        schema = cfg.env.observation_config
+        if schema is not None:
+            self.num_one_step_obs, self.num_obs, self.num_privileged_obs = observation_dimensions(schema)
         super().__init__()
+        if schema is not None:
+            self.observation_config = schema
         self.cfg = cfg
         self.dt = cfg.sim.dt * cfg.control.decimation
         self.high_platform_mask = torch.arange(self.num_envs) % 2 == 0
@@ -70,7 +77,8 @@ def test_g7_warm_start_retains_target_terrain_commands_rewards_and_two_values(
     env, restored = cpu_task_registry.make_env(group.TASK_NAME, args=args)
     assert restored.rewards.scales.stand_still == -3.1
     expected_scales = platform_reward_scales()
-    if target_key in (PLATFORM_V1_EXPERIMENT, PLATFORM_V3_EXPERIMENT, PLATFORM_V4_EXPERIMENT):
+    if target_key in (PLATFORM_V1_EXPERIMENT, PLATFORM_V3_EXPERIMENT, PLATFORM_V4_EXPERIMENT,
+                      PLATFORM_V5_EXPERIMENT, SKILL_V1_EXPERIMENT):
         expected_scales = platform_v1_reward_scales()
         if target_key in (PLATFORM_V3_EXPERIMENT, PLATFORM_V4_EXPERIMENT):
             expected_scales["run_still"] = -.10
@@ -88,6 +96,7 @@ def test_g7_warm_start_retains_target_terrain_commands_rewards_and_two_values(
     assert restored.rewards.base_height_target == expected_height
     assert not getattr(restored.rewards, "platform_climb", False)
     assert restored.terrain.curriculum_rule == ("wf" if target_key == PLATFORM_EXPERIMENT else "dreamwaq")
+    assert getattr(restored.terrain, "ordinary_max_level", None) == (9 if target_key == PLATFORM_V5_EXPERIMENT else None)
     assert (restored.terrain.num_rows, restored.terrain.difficulty_reference_rows) == (20, 10)
     for kind in ("platform_pit", "platform_block"):
         spec = restored.terrain.wf_sub_terrains[kind]
@@ -105,7 +114,18 @@ def test_g7_warm_start_retains_target_terrain_commands_rewards_and_two_values(
     target, _ = cpu_task_registry.make_alg_runner(env, group.TASK_NAME, args=args, log_root=None)
     assert target.policy_config["critic_task_count"] == 2
     probe = torch.randn(5, source.env.num_obs)
-    torch.testing.assert_close(target.alg.actor_critic.act_inference(probe),
+    target_probe = probe
+    if target_key == SKILL_V1_EXPERIMENT:
+        assert (env.num_one_step_obs, env.num_obs, env.num_privileged_obs) == (58, 232, 296)
+        skills = (torch.arange(5) % 2).float()[:, None]
+        target_probe = torch.cat((probe, skills.expand(-1, 4)), dim=1)
+        privileged = torch.randn(5, 295)
+        for teacher in (False, True):
+            actual = target.alg.actor_critic.evaluate(
+                target_probe, torch.cat((privileged, skills), dim=1), teacher, skills[:, 0].bool())
+            expected = source.alg.actor_critic.evaluate(probe, privileged, teacher)
+            torch.testing.assert_close(actual, expected)
+    torch.testing.assert_close(target.alg.actor_critic.act_inference(target_probe),
                                source.alg.actor_critic.act_inference(probe))
     target.learn(1)
     assert target.current_learning_iteration == source.current_learning_iteration + 1
@@ -156,6 +176,9 @@ def test_intermediate_highplatform_pitch_rate_snapshot_restores_until_v2_warm_st
     (PLATFORM_EXPERIMENT, PLATFORM_V3_EXPERIMENT),
     (PLATFORM_V3_EXPERIMENT, PLATFORM_V4_EXPERIMENT),
     (PLATFORM_V4_EXPERIMENT, PLATFORM_V2_EXPERIMENT),
+    (PLATFORM_V1_EXPERIMENT, PLATFORM_V5_EXPERIMENT),
+    (PLATFORM_V5_EXPERIMENT, PLATFORM_V1_EXPERIMENT),
+    (PLATFORM_V1_EXPERIMENT, SKILL_V1_EXPERIMENT),
 ])
 def test_platform_group_transfer_requires_warm_start_and_copies_both_value_heads(
         tmp_path, monkeypatch, actual_config_module, cpu_task_registry, source_key, target_key):
@@ -184,6 +207,8 @@ def test_platform_group_transfer_requires_warm_start_and_copies_both_value_heads
         cpu_task_registry.make_alg_runner(source.env, task, args=restore_args("resume", path), log_root=None)
     args = restore_args("init_from", path)
     env, restored = cpu_task_registry.make_env(task, args=args)
+    expected_cap = 9 if target_key == PLATFORM_V5_EXPERIMENT else None
+    assert getattr(restored.terrain, "ordinary_max_level", None) == expected_cap
     assert restored.rewards.platform_scales == target_env_cfg.rewards.platform_scales
     assert restored.rewards.base_height_target == target_env_cfg.rewards.base_height_target
     assert restored.rewards.platform_base_height_target == target_env_cfg.rewards.platform_base_height_target
@@ -194,7 +219,12 @@ def test_platform_group_transfer_requires_warm_start_and_copies_both_value_heads
     assert target.current_learning_iteration == 1
     assert not target.alg.optimizer.state and not target.alg.optimizer_stu_enc.state
     for name, tensor in source.alg.actor_critic.state_dict().items():
-        torch.testing.assert_close(target.alg.actor_critic.state_dict()[name], tensor, rtol=0, atol=0)
+        transferred = target.alg.actor_critic.state_dict()[name]
+        if target_key == SKILL_V1_EXPERIMENT and transferred.shape != tensor.shape:
+            assert transferred.ndim == tensor.ndim == 2 and transferred.shape[1] > tensor.shape[1]
+            assert torch.count_nonzero(transferred[:, tensor.shape[1]:]) == 0
+            transferred = transferred[:, :tensor.shape[1]]
+        torch.testing.assert_close(transferred, tensor, rtol=0, atol=0)
     target_path = tmp_path / (target_key + ".pt")
     target.save(target_path)
     train_cfg.runner.resume_path = str(target_path)
@@ -203,9 +233,16 @@ def test_platform_group_transfer_requires_warm_start_and_copies_both_value_heads
     resumed_env, restored_cfg = cpu_task_registry.make_env(task, args=resume)
     resumed, _ = cpu_task_registry.make_alg_runner(resumed_env, task, args=resume, log_root=None)
     assert resumed.cfg["experiment_key"] == target_key
+    assert getattr(restored_cfg.terrain, "ordinary_max_level", None) == expected_cap
     assert restored_cfg.rewards.platform_scales == target_env_cfg.rewards.platform_scales
     assert restored_cfg.rewards.base_height_target == target_env_cfg.rewards.base_height_target
     assert restored_cfg.rewards.platform_base_height_target == target_env_cfg.rewards.platform_base_height_target
+    if target_key == SKILL_V1_EXPERIMENT:
+        assert resumed_env.num_obs == 232
+        with pytest.raises(ValueError, match="cannot discard trained skill_id"):
+            cpu_task_registry.make_alg_runner(
+                source.env, args=restore_args("init_from", target_path),
+                train_cfg=configure_experiment(train_namespace(source_config, path), source_key), log_root=None)
 
 
 @pytest.mark.parametrize("target_key", PLATFORM_EXPERIMENT_KEYS)

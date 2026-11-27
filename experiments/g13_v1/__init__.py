@@ -1,1 +1,1 @@
-"""Skill-conditioned low-level CTS policy based on G12 v3."""
+"""Skill-conditioned low-level CTS policy based on G12 v1."""
