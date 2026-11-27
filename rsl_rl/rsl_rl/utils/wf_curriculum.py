@@ -220,7 +220,7 @@ class WFCurriculum:
             self.env_command_ranges[key][ids, 1] = min(limits[key][1], self.env.command_ranges[key][1])
 
     def update_reward_curriculum(self):
-        if not self.env.cfg.commands.curriculum:
+        if not self.env.cfg.commands.curriculum or getattr(self.env, "uses_shared_platform_rewards", False):
             return
         for name, schedule in self.cfg["reward_curriculum"].items():
             self.env.reward_scales[name] = linear_schedule(

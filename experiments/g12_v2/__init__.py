@@ -1,1 +1,1 @@
-"""G12 v2 with Dreamwaq/highplatform rewards for Nezha."""
+"""G12 v2 with shared platform rewards and stronger posture penalties."""

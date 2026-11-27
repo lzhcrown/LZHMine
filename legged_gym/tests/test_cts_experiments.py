@@ -176,14 +176,15 @@ def test_real_task_registration_preserves_environment_and_training_isolation(
     assert "base_height" not in platform_env.rewards.platform_scales
     assert v1_env.rewards.platform_scales["base_height"] == -10.
     assert "highplatform_yaw" not in v1_env.rewards.platform_scales
-    assert v2_env.rewards.platform_scales["base_height"] == -5.
-    assert v2_env.rewards.platform_scales["highplatform_yaw"] == -3.5
-    expected_v2 = config_dict(cpu_task_registry, v1_env)
+    expected_v2 = config_dict(cpu_task_registry, v4_env)
     expected_v2["rewards"].update(
-        platform_scales=v2_env.rewards.platform_scales, platform_reward_profile="dreamwaq_highplatform",
-        platform_heading_target=0., base_height_target=.54, platform_base_height_target=.54,
+        platform_reward_profile="shared_platform", base_height_target=.55, platform_base_height_target=.55,
+    )
+    expected_v2["rewards"]["platform_scales"].update(
+        hip_default=-6., stand_still=-2.25, orientation=-1.5, ang_vel_xz=-.15,
     )
     assert config_dict(cpu_task_registry, v2_env) == expected_v2
+    assert config_dict(cpu_task_registry, v2_train.policy) == config_dict(cpu_task_registry, v4_train.policy)
     assert v2_train.policy.critic_task_count == v1_train.policy.critic_task_count == platform_train.policy.critic_task_count
     expected_v3 = config_dict(cpu_task_registry, v1_env)
     assert expected_v3["rewards"]["platform_scales"]["run_still"] == -.05

@@ -1,6 +1,6 @@
-"""Train Nezha on platform tiles with M20 rewards and MUJICA's roll/yaw rate penalty."""
+"""Train all terrains with 0.55 m clearance and stronger posture penalties."""
 
-from experiments.g12_v1.config import POLICY, configure_environment as configure_v1
+from experiments.g12_v4.config import POLICY, configure_environment as configure_v4
 from experiments.registry import PLATFORM_V2_EXPERIMENT
 
 
@@ -13,19 +13,22 @@ RUNNER = {
     "wandb_group": KEY,
     "wandb_tags": ["nezha", "cts", KEY],
     "wandb_notes": (
-        "G12 v1 commands and curriculum with Dreamwaq/highplatform M20 rewards, "
-        "MUJICA's roll/yaw rate penalty and a 0.54 m clearance target on all terrains."
+        "Shared v4 platform rewards with 0.55 m clearance and hip, standing posture, "
+        "and tilt penalties at 75% of the G7 ordinary-terrain weights. "
+        "The roll and yaw rate penalty weight is -0.15."
     ),
 }
 EXPORT_PATH = "deploy/deploy_mujoco/nezha/policy/" + KEY + "/policy.pt"
 
 
 def configure_environment(cfg):
-    from legged_gym.terrains.platform_rewards import platform_v2_reward_scales
-
-    configure_v1(cfg)
-    cfg.rewards.platform_scales = platform_v2_reward_scales()
-    cfg.rewards.platform_reward_profile = "dreamwaq_highplatform"
-    cfg.rewards.platform_heading_target = 0.0
-    cfg.rewards.base_height_target = 0.54
+    configure_v4(cfg)
+    cfg.rewards.platform_reward_profile = "shared_platform"
+    cfg.rewards.platform_scales.update(
+        hip_default=-6.0,
+        stand_still=-2.25,
+        orientation=-1.5,
+        ang_vel_xz=-0.15,
+    )
+    cfg.rewards.base_height_target = 0.55
     cfg.rewards.platform_base_height_target = cfg.rewards.base_height_target

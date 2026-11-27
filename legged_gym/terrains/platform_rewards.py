@@ -35,7 +35,7 @@ def platform_v1_reward_scales():
 
 
 def platform_v2_reward_scales():
-    """Dreamwaq/highplatform M20 coefficients with MUJICA's roll/yaw rate penalty."""
+    """Historical v2 coefficients for checkpoints using the Dreamwaq/highplatform profile."""
     return {
         "tracking_lin_vel": 3.0,
         "tracking_ang_vel": 1.5,

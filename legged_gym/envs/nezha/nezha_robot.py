@@ -29,6 +29,10 @@ class NezhaRobot(LeggedRobot):
         return (getattr(self.cfg.rewards, "platform_reward_profile", None) == "dreamwaq_highplatform"
                 and bool(self.platform_scales))
 
+    @property
+    def uses_shared_platform_rewards(self):
+        return getattr(self.cfg.rewards, "platform_reward_profile", None) == "shared_platform"
+
     def _parse_cfg(self, cfg):
         super()._parse_cfg(cfg)
         configure_wf_timing(self)
@@ -134,6 +138,9 @@ class NezhaRobot(LeggedRobot):
         self.high_platform_mask.copy_(self.platform_tiles[self.terrain_levels, self.terrain_types])
 
     def _prepare_reward_function(self):
+        if self.uses_shared_platform_rewards:
+            # The base class registers these terms and converts their coefficients to step units.
+            self.reward_scales = self.cfg.rewards.platform_scales.copy()
         super()._prepare_reward_function()
         for name in self.platform_scales:
             if name not in self.reward_scales:
@@ -142,7 +149,6 @@ class NezhaRobot(LeggedRobot):
                     self.reward_names.append(name)
                     self.reward_functions.append(getattr(self, "_reward_" + name))
         if self.platform_scales and not self._uses_dreamwaq_highplatform_rewards:
-            # Legacy G12 profiles log the adjustment from flooring the sum.
             self.episode_sums["platform_positive_clip"] = torch.zeros_like(self.rew_buf)
         if self.wf_curriculum is not None:
             self.wf_curriculum.update_reward_curriculum()
@@ -188,18 +194,23 @@ class NezhaRobot(LeggedRobot):
     def compute_reward(self):
         self.rew_buf[:] = 0.0
         clip = self.cfg.rewards.clip_single_reward * self.dt
+        shared = self.uses_shared_platform_rewards
         for name, reward_function in zip(
             self.reward_names, self.reward_functions
         ):
             raw = reward_function()
-            reward = torch.clip(raw * self.reward_scales.get(name, 0.0), -clip, clip)
-            if self.platform_scales:
-                platform_reward = raw * self.platform_scales[name] if name in self.platform_scales else 0.0
-                reward = torch.where(self.high_platform_mask, platform_reward, reward)
+            reward = raw * self.reward_scales.get(name, 0.0)
+            if not shared:
+                reward = torch.clip(reward, -clip, clip)
+                if self.platform_scales:
+                    platform_reward = raw * self.platform_scales[name] if name in self.platform_scales else 0.0
+                    reward = torch.where(self.high_platform_mask, platform_reward, reward)
             self.rew_buf += reward
             self.episode_sums[name] += reward
         if self.platform_scales and not self._uses_dreamwaq_highplatform_rewards:
-            adjustment = torch.where(self.high_platform_mask, (-self.rew_buf).clamp_min(0.0), 0.0)
+            adjustment = (-self.rew_buf).clamp_min(0.0)
+            if not shared:
+                adjustment = torch.where(self.high_platform_mask, adjustment, 0.0)
             self.episode_sums["platform_positive_clip"] += adjustment
             self.rew_buf += adjustment
         if self.cfg.rewards.only_positive_rewards:
@@ -209,7 +220,7 @@ class NezhaRobot(LeggedRobot):
             self.rew_buf[:] = clipped
         if "termination" in self.reward_scales or "termination" in self.platform_scales:
             rate = self.reward_scales.get("termination", 0.0)
-            if self.platform_scales:
+            if self.platform_scales and not shared:
                 rate = torch.where(self.high_platform_mask, self.platform_scales.get("termination", 0.0), rate)
             reward = self._reward_termination() * rate
             self.rew_buf += reward
@@ -680,7 +691,9 @@ class NezhaRobot(LeggedRobot):
         if self.platform_scales and not self._uses_dreamwaq_highplatform_rewards:
             # The original M20 profile also counts trunk contact.
             trunk_contact = self.contact_forces[:, self.trunk_body_index].norm(dim=1) > 0.1
-            contacts = contacts + (self.high_platform_mask & trunk_contact)
+            if not self.uses_shared_platform_rewards:
+                trunk_contact = self.high_platform_mask & trunk_contact
+            contacts = contacts + trunk_contact
         return contacts
 
     def _reward_dof_vel(self):

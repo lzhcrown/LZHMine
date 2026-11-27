@@ -77,12 +77,14 @@ def test_g7_warm_start_retains_target_terrain_commands_rewards_and_two_values(
         assert restored.rewards.platform_base_height_target == (.54 if target_key == PLATFORM_V4_EXPERIMENT else .52)
         assert getattr(restored.rewards, "platform_reward_profile", None) is None
     elif target_key == PLATFORM_V2_EXPERIMENT:
-        expected_scales = platform_v2_reward_scales()
-        assert restored.rewards.platform_reward_profile == "dreamwaq_highplatform"
-        assert restored.rewards.platform_heading_target == 0.
-        assert restored.rewards.platform_base_height_target == .54
+        expected_scales = dict(platform_v1_reward_scales(), run_still=-.10, hip_default=-6.,
+                               stand_still=-2.25, orientation=-1.5, ang_vel_xz=-.15)
+        assert restored.rewards.platform_reward_profile == "shared_platform"
+        assert restored.rewards.platform_base_height_target == .55
     assert restored.rewards.platform_scales == expected_scales
-    expected_height = .54 if target_key in (PLATFORM_V2_EXPERIMENT, PLATFORM_V4_EXPERIMENT) else source_cfg.rewards.base_height_target
+    expected_height = {PLATFORM_V2_EXPERIMENT: .55, PLATFORM_V4_EXPERIMENT: .54}.get(
+        target_key, source_cfg.rewards.base_height_target,
+    )
     assert restored.rewards.base_height_target == expected_height
     assert not getattr(restored.rewards, "platform_climb", False)
     assert restored.terrain.curriculum_rule == ("wf" if target_key == PLATFORM_EXPERIMENT else "dreamwaq")
@@ -131,14 +133,16 @@ def test_intermediate_highplatform_pitch_rate_snapshot_restores_until_v2_warm_st
     cfg = clone_config(actual_config_module.NezhaMoECTSCfg())
     group = get_experiment(PLATFORM_V2_EXPERIMENT)
     group.configure_environment(cfg)
-    previous = dict(cfg.rewards.platform_scales)
+    previous = platform_v2_reward_scales()
     previous["ang_vel_xy"] = previous.pop("ang_vel_xz")
     saved = {"rewards": {"platform_scales": previous, "platform_reward_profile": "dreamwaq_highplatform"}}
     cpu_task_registry.restore_environment_config(cfg, saved)
+    assert cfg.rewards.platform_reward_profile == "dreamwaq_highplatform"
     assert cfg.rewards.platform_scales["ang_vel_xy"] == -.05
     assert "ang_vel_xz" not in cfg.rewards.platform_scales
     group.configure_environment(cfg)
-    assert cfg.rewards.platform_scales["ang_vel_xz"] == -.05
+    assert cfg.rewards.platform_reward_profile == "shared_platform"
+    assert cfg.rewards.platform_scales["ang_vel_xz"] == -.15
     assert "ang_vel_xy" not in cfg.rewards.platform_scales
     assert cfg.rewards.scales.ang_vel_xy == -.2
 
@@ -151,6 +155,7 @@ def test_intermediate_highplatform_pitch_rate_snapshot_restores_until_v2_warm_st
     (PLATFORM_V2_EXPERIMENT, PLATFORM_V3_EXPERIMENT),
     (PLATFORM_EXPERIMENT, PLATFORM_V3_EXPERIMENT),
     (PLATFORM_V3_EXPERIMENT, PLATFORM_V4_EXPERIMENT),
+    (PLATFORM_V4_EXPERIMENT, PLATFORM_V2_EXPERIMENT),
 ])
 def test_platform_group_transfer_requires_warm_start_and_copies_both_value_heads(
         tmp_path, monkeypatch, actual_config_module, cpu_task_registry, source_key, target_key):
@@ -249,6 +254,61 @@ def test_v3_moving_posture_penalizes_leg_error_on_both_platform_shapes(actual_co
     torch.testing.assert_close(platform_cost, torch.tensor([-.075, -.075]))
 
 
+@pytest.mark.parametrize("command_x,posture_weight", [(.8, -.10), (0., -2.25)])
+def test_v2_scores_identical_states_equally_on_stairs_pit_and_block(
+        actual_config_module, cpu_task_registry, robot, command_x, posture_weight):
+    cfg = clone_config(actual_config_module.NezhaMoECTSCfg())
+    get_experiment(PLATFORM_V2_EXPERIMENT).configure_environment(cfg)
+    robot.cfg = cfg
+    robot.platform_scales = {key: value * robot.dt for key, value in cfg.rewards.platform_scales.items()}
+    robot.reward_scales = config_dict(cpu_task_registry, cfg.rewards.scales)
+    robot.wf_curriculum = make_env().wf
+    robot.wf_curriculum.env = robot
+    robot.common_step_counter = 0
+    robot.rew_buf = torch.zeros(3)
+    robot._prepare_reward_function()
+    robot.common_step_counter = 5000 * robot.wf_curriculum.steps_per_iteration
+    robot.wf_curriculum.update_reward_curriculum()
+    assert robot.reward_scales == robot.platform_scales
+    assert set(robot.reward_names) == set(robot.platform_scales) - {"termination"}
+    assert robot.high_platform_mask.tolist() == [False, True, True]
+
+    robot.commands = torch.tensor([[command_x, 0., 0.]] * 3)
+    robot.base_lin_vel = robot.commands.clone()
+    robot.commands[:, 2] = .2
+    robot.base_ang_vel = torch.tensor([[.4, 2., .2]] * 3)
+    robot.projected_gravity = torch.tensor([[.6, 0., -.8]] * 3)
+    robot.base_height = torch.full((3,), .50)
+    robot.default_dof_pos = torch.zeros(1, 16)
+    for field in ("dof_pos", "dof_vel", "last_dof_vel", "torques", "actions", "last_actions"):
+        setattr(robot, field, torch.zeros(3, 16))
+    robot.dof_pos[:, :3] = torch.tensor([.2, .3, .4])
+    robot.dof_pos_limits = torch.tensor([[-1., 1.]] * 16)
+    robot.wheel_indices = [3, 7, 11, 15]
+    robot.contact_forces = torch.zeros(3, 2, 3)
+    robot.penalised_contact_indices = [0]
+    robot.trunk_body_index = 1
+    robot.contact_forces[:, 1, 2] = 2.0
+    robot.reset_buf = torch.zeros(3, dtype=torch.bool)
+    robot.time_out_buf = torch.zeros_like(robot.reset_buf)
+    robot.compute_reward()
+    # Apply hip and tilt costs at both command speeds. Only the L1 leg posture weight changes.
+    angular_rate_cost = -.15 * (.4**2 + .2**2)
+    torch.testing.assert_close(robot.episode_sums["ang_vel_xz"], torch.full((3,), angular_rate_cost * robot.dt))
+    expected_rate = 3. + 1.5 + angular_rate_cost + posture_weight * .9 - 6. * .2**2 - 1.5 * .6**2 - 10. * .05**2 - 1.
+    torch.testing.assert_close(robot.rew_buf, torch.full((3,), expected_rate * robot.dt))
+
+    robot.base_lin_vel[:, 2] = 4.
+    robot.reset_buf.fill_(True)
+    robot.compute_reward()
+    # The vertical cost exceeds the ordinary single-term clip. All tiles apply
+    # the full cost, floor the sum, then add the failure penalty.
+    torch.testing.assert_close(robot.episode_sums["lin_vel_z"], torch.full((3,), -32. * robot.dt))
+    torch.testing.assert_close(robot.episode_sums["platform_positive_clip"],
+                               torch.full((3,), (32. - expected_rate) * robot.dt))
+    torch.testing.assert_close(robot.rew_buf, torch.full((3,), -.8 * robot.dt))
+
+
 def test_legacy_v2_resume_keeps_saved_command_sampler_and_episode_timing(actual_config_module, cpu_task_registry, robot):
     group_cfg = clone_config(actual_config_module.NezhaMoECTSCfg())
     get_experiment(PLATFORM_V2_EXPERIMENT).configure_environment(group_cfg)
@@ -256,7 +316,10 @@ def test_legacy_v2_resume_keeps_saved_command_sampler_and_episode_timing(actual_
     platform = saved["commands"]["wf_settings"]["terrain_max_command_ranges"]["high_platform"]
     platform.pop("heading_feedback")
     platform.update(lin_vel_x=[0., 1.], resampling_time=10.)
-    saved["rewards"].update(base_height_target=.50, platform_base_height_target=.556)
+    saved["rewards"].update(
+        base_height_target=.50, platform_base_height_target=.556, platform_scales=platform_v2_reward_scales(),
+        platform_reward_profile="dreamwaq_highplatform", platform_heading_target=0.,
+    )
     cpu_task_registry.restore_environment_config(group_cfg, saved)
     assert group_cfg.rewards.base_height_target == .50
     assert group_cfg.rewards.platform_base_height_target == .556
