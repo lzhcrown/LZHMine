@@ -160,6 +160,11 @@ class TaskRegistry:
                                              platform_heading_target=None))
         saved_terrain = saved.get("terrain", {})
         target = getattr(env_cfg, "terrain", None)
+        if (not warm_start and saved_terrain.get("generator_profile") == "legbot_wf"
+                and "num_rows" in saved_terrain and "ordinary_max_level" not in saved_terrain
+                and getattr(target, "ordinary_max_level", None) is not None):
+            # Earlier G13 runs allowed every terrain to use all rows. Replay/resume their recorded map.
+            vars(target).pop("ordinary_max_level", None)
         legacy_wf = (saved_terrain.get("generator_profile") == "legbot_wf"
                      and getattr(target, "generator_profile", None) == "legbot_wf"
                      and "num_rows" in saved_terrain and "difficulty_reference_rows" not in saved_terrain)

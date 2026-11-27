@@ -29,6 +29,10 @@ class NezhaMoECTSEnv(NezhaRobot):
         self.uses_skill_id = any(
             term["name"] == "skill_id" for term in self.observation_config["proprioceptive_terms"]
         )
+        self.fixed_actor_skill_id = getattr(cfg.env, "fixed_actor_skill_id", None)
+        if self.fixed_actor_skill_id is not None:
+            if self.fixed_actor_skill_id not in (0, 1) or not self.uses_skill_id:
+                raise ValueError("--skill-id requires 0 or 1 and a checkpoint trained with a skill_id observation")
         current, history, privileged = observation_dimensions(self.observation_config)
         cfg.env.num_one_step_observations = current
         cfg.env.num_observations = history
@@ -204,7 +208,7 @@ class NezhaMoECTSEnv(NezhaRobot):
         raw = self._raw_observations()
         self.current_obs.copy_(build_proprioception(
             raw, self.observation_config, add_noise=self.add_noise,
-            noise_level=self.cfg.noise.noise_level,
+            noise_level=self.cfg.noise.noise_level, fixed_skill_id=self.fixed_actor_skill_id,
         ))
         self.obs_buf.copy_(self.observation_history.update(self.current_obs))
         self.privileged_obs_buf.copy_(build_privileged_observations(raw, self.observation_config))

@@ -205,7 +205,7 @@ def test_real_task_registration_preserves_environment_and_training_isolation(
     expected_v5["terrain"]["ordinary_max_level"] = 9
     assert config_dict(cpu_task_registry, v5_env) == expected_v5
     assert config_dict(cpu_task_registry, v5_train.policy) == config_dict(cpu_task_registry, v1_train.policy)
-    expected_skill = config_dict(cpu_task_registry, v1_env)
+    expected_skill = config_dict(cpu_task_registry, v5_env)
     expected_skill["env"].update(observation_config=add_skill_id(default_observation_config()),
                                  num_one_step_observations=58, num_observations=232,
                                  num_one_step_privileged_obs=296, num_privileged_obs=296)
@@ -218,6 +218,12 @@ def test_real_task_registration_preserves_environment_and_training_isolation(
         assert config.runner.experiment_name == "nezha_moe_cts/" + key
         assert export_path(key).endswith("/nezha/policy/" + key + "/policy.pt")
     general_env, _ = cpu_task_registry.get_cfgs(get_experiment("g7_all_moe").TASK_NAME)
+    assert config_dict(cpu_task_registry, v5_env.rewards) == dict(
+        config_dict(cpu_task_registry, general_env.rewards),
+        platform_scales=v1_env.rewards.platform_scales, platform_base_height_target=.52,
+    )
+    assert (skill_env.commands.wf_settings["reward_curriculum"] == v5_env.commands.wf_settings["reward_curriculum"]
+            == general_env.commands.wf_settings["reward_curriculum"])
     for kind in ("platform_pit", "platform_block"):
         assert platform_env.terrain.wf_sub_terrains[kind]["platform_height_range"] == [.20, .70]
         assert general_env.terrain.wf_sub_terrains[kind]["platform_height_range"] == [.05, .275]

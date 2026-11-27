@@ -56,6 +56,21 @@ def test_skill_id_is_clean_and_follows_the_episode_in_every_history_frame():
     assert torch.count_nonzero(obs[:, -4:]) == 0
 
 
+@pytest.mark.parametrize("skill", [0, 1])
+def test_fixed_student_skill_on_both_terrains_and_after_partial_reset(skill):
+    config = add_skill_id(default_observation_config())
+    history = CTSObservationHistory(2, config)
+    raw = raw_observations()
+    raw["skill_id"] = torch.tensor([[0.], [1.]])
+    for step in range(5):
+        if step == 2:
+            history.reset(torch.tensor([1]))
+        frame = build_proprioception(raw, config, fixed_skill_id=skill)
+        assert torch.all(history.update(frame)[:, -4:] == skill)
+        assert torch.equal(frame[:, :-1], build_proprioception(raw, config)[:, :-1])
+        assert build_privileged_observations(raw, config)[:, -1].tolist() == [0., 1.]
+
+
 def test_proprioception_preserves_wheel_rates_and_masks_only_wheel_positions():
     raw = raw_observations()
     raw["base_ang_vel"].fill_(4)

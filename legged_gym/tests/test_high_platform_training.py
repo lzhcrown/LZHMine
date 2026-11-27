@@ -96,7 +96,8 @@ def test_g7_warm_start_retains_target_terrain_commands_rewards_and_two_values(
     assert restored.rewards.base_height_target == expected_height
     assert not getattr(restored.rewards, "platform_climb", False)
     assert restored.terrain.curriculum_rule == ("wf" if target_key == PLATFORM_EXPERIMENT else "dreamwaq")
-    assert getattr(restored.terrain, "ordinary_max_level", None) == (9 if target_key == PLATFORM_V5_EXPERIMENT else None)
+    expected_cap = 9 if target_key in (PLATFORM_V5_EXPERIMENT, SKILL_V1_EXPERIMENT) else None
+    assert getattr(restored.terrain, "ordinary_max_level", None) == expected_cap
     assert (restored.terrain.num_rows, restored.terrain.difficulty_reference_rows) == (20, 10)
     for kind in ("platform_pit", "platform_block"):
         spec = restored.terrain.wf_sub_terrains[kind]
@@ -129,6 +130,20 @@ def test_g7_warm_start_retains_target_terrain_commands_rewards_and_two_values(
                                source.alg.actor_critic.act_inference(probe))
     target.learn(1)
     assert target.current_learning_iteration == source.current_learning_iteration + 1
+
+
+@pytest.mark.parametrize("warm_start", [False, True])
+def test_restore_g13_map_from_before_the_ordinary_cap(actual_config_module, cpu_task_registry, warm_start):
+    cfg = clone_config(actual_config_module.NezhaMoECTSCfg())
+    group = get_experiment(SKILL_V1_EXPERIMENT)
+    group.configure_environment(cfg)
+    saved = config_dict(cpu_task_registry, cfg)
+    assert saved["terrain"].pop("ordinary_max_level") == 9
+    cpu_task_registry.restore_environment_config(cfg, saved, warm_start=warm_start)
+    if warm_start:
+        group.configure_environment(cfg)
+    assert getattr(cfg.terrain, "ordinary_max_level", None) == (9 if warm_start else None)
+    assert (cfg.terrain.num_rows, cfg.terrain.difficulty_reference_rows) == (20, 10)
 
 
 def test_resume_preserves_pre_alignment_g12_v1_rewards_and_commands(actual_config_module, cpu_task_registry):
@@ -207,7 +222,7 @@ def test_platform_group_transfer_requires_warm_start_and_copies_both_value_heads
         cpu_task_registry.make_alg_runner(source.env, task, args=restore_args("resume", path), log_root=None)
     args = restore_args("init_from", path)
     env, restored = cpu_task_registry.make_env(task, args=args)
-    expected_cap = 9 if target_key == PLATFORM_V5_EXPERIMENT else None
+    expected_cap = 9 if target_key in (PLATFORM_V5_EXPERIMENT, SKILL_V1_EXPERIMENT) else None
     assert getattr(restored.terrain, "ordinary_max_level", None) == expected_cap
     assert restored.rewards.platform_scales == target_env_cfg.rewards.platform_scales
     assert restored.rewards.base_height_target == target_env_cfg.rewards.base_height_target

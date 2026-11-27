@@ -120,13 +120,16 @@ def _build_terms(raw, terms, wheel_indices, add_noise, noise_level):
     return torch.cat(values, dim=-1)
 
 
-def build_proprioception(raw, config=None, add_noise=False, noise_level=1.0):
+def build_proprioception(raw, config=None, add_noise=False, noise_level=1.0, *, fixed_skill_id=None):
     """Construct a current frame: uniform noise, clipping, then scaling.
 
     ``raw['joint_pos']`` is already relative to the robot's default pose.
     Wheel rates are preserved; only wheel positions are masked.
     """
     config = default_observation_config() if config is None else config
+    if fixed_skill_id is not None:
+        # Override only the student's copy. Privileged observations use the actual terrain.
+        raw = dict(raw, skill_id=torch.full_like(raw["skill_id"], fixed_skill_id))
     return _build_terms(raw, config["proprioceptive_terms"], config["wheel_indices"], add_noise, noise_level)
 
 

@@ -56,6 +56,7 @@ def test_evaluation_overrides_do_not_mutate_training_snapshot():
     ['--speed', 'nan'], ['--speed', '0'], ['--max-seconds', 'inf'], ['--max-seconds', '30.01'],
     ['--envs-per-terrain', '0'], ['--spawn-xy-jitter', '.06'],
     ['--terrain-types', 'flat,flat'], ['--checkpoint-path', '/tmp/model.pt'],
+    ['--group', 'g12_v1', '--skill-id', '0'], ['--group', 'g13_v1', '--skill-id', '2'],
     ['--episodes-per-terrain', '0'], ['--episodes-per-terrain', '-500'],
     ['--episodes-per-env', '0'], ['--episodes-per-env', '-1'],
     ['--envs-per-terrain', '16', '--episodes-per-terrain', '500'],
@@ -86,6 +87,14 @@ def test_preview_defaults_and_rejects_output_destination():
     assert protocol_dict(args)['terrain_roi_size_xy_m']['slope'] == [6.5, 5.6]
     with pytest.raises(SystemExit):
         parse_args(['--no-record', '--output-dir', '/tmp/not-a-capture'])
+
+
+@pytest.mark.parametrize('skill', [0, 1])
+def test_fixed_skill_on_same_evaluation_terrains(skill):
+    args = parse_args(['--group', 'g13_v1', '--terrain-types', 'stairs_convex_35cm,platform_100cm',
+                       '--skill-id', str(skill)])
+    assert protocol_dict(args)['fixed_actor_skill_id'] == skill
+    assert args.terrain_types == ('stairs_convex_35cm', 'platform_100cm')
 
 
 def test_joint_angle_csv_previews_and_batch_destinations(tmp_path):

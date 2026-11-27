@@ -275,6 +275,8 @@ def child_command(args, group, checkpoint, output=None, *, sweep=1):
         '--max-seconds', str(args.max_seconds), '--max-tilt-deg', str(args.max_tilt_deg),
         '--spawn-xy-jitter', str(args.spawn_xy_jitter), '--sim-device', args.sim_device,
         '--num-threads', str(args.num_threads)]
+    if args.skill_id is not None:
+        command.extend(['--skill-id', str(args.skill_id)])
     if args.no_record:
         command.append('--no-record')
     else:

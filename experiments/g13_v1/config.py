@@ -1,19 +1,19 @@
-"""Condition the G12 v1 low-level policy on ordinary or platform locomotion."""
+"""Train the skill-conditioned G13 student on the G12 v5 terrain curriculum."""
 
-from experiments.g12_v1.config import POLICY as V1_POLICY, configure_environment as configure_v1
+from experiments.g12_v5.config import POLICY as V5_POLICY, configure_environment as configure_v5
 from experiments.registry import SKILL_V1_EXPERIMENT
 
 
 KEY = SKILL_V1_EXPERIMENT
 TASK_NAME = "nezha_cts_" + KEY
-POLICY = dict(V1_POLICY, observation_dims=[3, 3, 3, 16, 16, 16, 1])
+POLICY = dict(V5_POLICY, observation_dims=[3, 3, 3, 16, 16, 16, 1])
 RUNNER = {
     "experiment_key": KEY,
     "experiment_name": "nezha_moe_cts/" + KEY,
     "run_name": KEY,
     "wandb_group": KEY,
     "wandb_tags": ["nezha", "cts", KEY],
-    "wandb_notes": "G12 v1 rewards with an explicit ordinary/platform skill ID for low-level CTS training.",
+    "wandb_notes": "G12 v5 curriculum (ordinary levels 0-9, platforms 0-19) with an explicit low-level skill ID.",
 }
 EXPORT_PATH = "deploy/deploy_mujoco/nezha/policy/" + KEY + "/policy.pt"
 
@@ -21,7 +21,7 @@ EXPORT_PATH = "deploy/deploy_mujoco/nezha/policy/" + KEY + "/policy.pt"
 def configure_environment(cfg):
     from rsl_rl.utils.cts_observations import add_skill_id, default_observation_config, observation_dimensions
 
-    configure_v1(cfg)
+    configure_v5(cfg)
     schema = cfg.env.observation_config
     if schema is None:
         schema = default_observation_config(history_length=cfg.env.frame_stack)
