@@ -210,6 +210,10 @@ class MoECTS:
         if self.temporal_loss_coef > 0:
             totals.update(temporal=0.0, temporal_valid_pairs=0.0)
         ppo_updates = student_updates = 0
+        task_value_errors = None
+        if self.actor_critic.critic_type == "task_mlp":
+            task_value_errors = torch.zeros(2, device=self.device)
+            task_value_counts = torch.zeros(2, device=self.device, dtype=torch.long)
         residual_squared_sum = residual_saturated = residual_elements = 0
         residual_abs_max = 0.0
         routing_stats = {
@@ -249,6 +253,11 @@ class MoECTS:
                 clipped_values = batch["values"] + (values - batch["values"]).clamp(-self.clip_param, self.clip_param)
                 value_errors = torch.maximum(value_errors, (clipped_values - batch["returns"]).square())
             value_loss = value_errors.mean()
+            if task_value_errors is not None:
+                platform = batch["platform_mask"]
+                task_masks = torch.stack((~platform, platform))
+                task_value_errors += (task_masks * value_errors.detach().flatten()).sum(dim=1)
+                task_value_counts += task_masks.sum(dim=1)
             entropy_mean = entropy.mean()
             loss = surrogate + self.value_loss_coef * value_loss - self.entropy_coef * entropy_mean
             if self.temporal_loss_coef > 0:
@@ -312,6 +321,11 @@ class MoECTS:
 
         for key in ("value", "surrogate", "teacher_surrogate", "student_surrogate", "entropy"):
             totals[key] /= ppo_updates
+        if task_value_errors is not None:
+            for name, error, count in zip(("value_ordinary", "value_high_platform"),
+                                          task_value_errors.tolist(), task_value_counts.tolist()):
+                if count:
+                    totals[name] = error / count
         totals["mean_latent_loss"] /= student_updates
         if self.actor_critic.residual_enabled:
             totals["residual_rms"] = math.sqrt(residual_squared_sum / residual_elements)

@@ -173,6 +173,7 @@ def test_real_task_registration_preserves_environment_and_training_isolation(
     v3_env, v3_train = cpu_task_registry.get_cfgs(get_experiment("g12_v3").TASK_NAME)
     v4_env, v4_train = cpu_task_registry.get_cfgs(get_experiment("g12_v4").TASK_NAME)
     v5_env, v5_train = cpu_task_registry.get_cfgs(get_experiment("g12_v5").TASK_NAME)
+    v6_env, v6_train = cpu_task_registry.get_cfgs(get_experiment("g12_v6").TASK_NAME)
     frozen_env, frozen_train = cpu_task_registry.get_cfgs(get_experiment("g13_v1").TASK_NAME)
     map_env, map_train = cpu_task_registry.get_cfgs(get_experiment("g13_v2").TASK_NAME)
     assert {key for key in EXPERIMENT_KEYS if key.startswith("g13_")} == {"g13_v1", "g13_v2"}
@@ -210,18 +211,28 @@ def test_real_task_registration_preserves_environment_and_training_isolation(
     expected_map = config_dict(cpu_task_registry, v5_env)
     expected_map["env"].update(observation_config=add_skill_id(default_observation_config(), privileged_only=True),
                                num_one_step_privileged_obs=296, num_privileged_obs=296)
+    assert config_dict(cpu_task_registry, v6_env) == expected_map
+    assert config_dict(cpu_task_registry, v6_train.policy) == dict(
+        config_dict(cpu_task_registry, v5_train.policy), observation_dims=[3, 3, 3, 16, 16, 16],
+        num_critic_obs=296, critic_type="task_mlp", critic_expert_num=0)
+    assert config_dict(cpu_task_registry, v6_train.algorithm) == config_dict(cpu_task_registry, v5_train.algorithm)
     assert config_dict(cpu_task_registry, map_env) == expected_map
     assert config_dict(cpu_task_registry, map_train.policy) == dict(
         config_dict(cpu_task_registry, v5_train.policy),
-        observation_dims=[3, 3, 3, 16, 16, 16], student_frozen_terrain=True, teacher_map_attention=True)
+        observation_dims=[3, 3, 3, 16, 16, 16], student_frozen_terrain=True, teacher_map_attention=True,
+        critic_type="task_mlp", critic_expert_num=0)
     assert config_dict(cpu_task_registry, map_train.algorithm) == config_dict(cpu_task_registry, v5_train.algorithm)
     assert config_dict(cpu_task_registry, frozen_env) == expected_map
     assert config_dict(cpu_task_registry, frozen_train.policy) == dict(
         config_dict(cpu_task_registry, map_train.policy), teacher_map_attention=False, teacher_frozen_terrain=True)
     assert config_dict(cpu_task_registry, frozen_train.algorithm) == config_dict(cpu_task_registry, map_train.algorithm)
+    for policy in (v6_train.policy, map_train.policy, frozen_train.policy):
+        assert (policy.critic_type, policy.critic_task_count, policy.critic_expert_num) == ("task_mlp", 2, 0)
+        assert (policy.actor_type, policy.actor_expert_num) == ("moe", 8)
+        assert (policy.student_encoder_type, policy.expert_num) == ("moe", 8)
     for key, config in (("g12_v1", v1_train), ("g12_v2", v2_train),
                         ("g12_v3", v3_train), ("g12_v4", v4_train), ("g12_v5", v5_train),
-                        ("g13_v1", frozen_train), ("g13_v2", map_train)):
+                        ("g12_v6", v6_train), ("g13_v1", frozen_train), ("g13_v2", map_train)):
         assert config.runner.experiment_key == config.runner.run_name == config.runner.wandb_group == key
         assert config.runner.experiment_name == "nezha_moe_cts/" + key
         assert export_path(key).endswith("/nezha/policy/" + key + "/policy.pt")

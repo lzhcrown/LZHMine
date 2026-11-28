@@ -100,7 +100,7 @@ def play(args, task_name=TASK_NAME, export_path=None,
     if expected_policy is None:
         from experiments.registry import get_experiment
         expected_policy = get_experiment(train_cfg.runner.experiment_key).POLICY
-    validate_checkpoint_policy(checkpoint, expected_policy)
+    validate_checkpoint_policy(checkpoint, expected_policy, inference=True)
     validate_checkpoint_actor(checkpoint, expected_actor_type, expected_actor_expert_num)
     if checkpoint.get("environment_config"):
         task_registry.restore_environment_config(env_cfg, checkpoint["environment_config"])

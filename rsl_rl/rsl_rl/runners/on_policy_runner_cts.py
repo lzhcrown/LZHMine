@@ -413,8 +413,8 @@ class MoECTSOnPolicyRunner:
     def initialize_from(self, path):
         """Start a controlled fine-tuning run with fresh optimizers in every arm.
 
-        Common weights, training clock and command ranges are inherited. A new
-        platform value head starts from the corresponding ordinary value head.
+        Common weights, training clock and command ranges are inherited.
+        Switching from a gated critic to independent task heads starts new value networks.
         """
         if (self.current_learning_iteration != 0 or self.alg.storage.step != 0
                 or self.alg.optimizer.state or self.alg.optimizer_stu_enc.state):
@@ -426,7 +426,10 @@ class MoECTSOnPolicyRunner:
         current = self.alg.actor_critic.state_dict()
         source = checkpoint["model_state_dict"].copy()
         transfer_skill_inputs(source, checkpoint, self.policy_config, self.observation_config)
-        if checkpoint["policy_config"]["critic_task_count"] < self.policy_config["critic_task_count"]:
+        replace_critic = checkpoint["policy_config"]["critic_type"] != self.policy_config["critic_type"]
+        if replace_critic:
+            source = {key: value for key, value in source.items() if not key.startswith("critic.")}
+        elif checkpoint["policy_config"]["critic_task_count"] < self.policy_config["critic_task_count"]:
             # Grouped Conv1d outputs are laid out [expert, task]. Duplicate
             # each expert's G7 scalar, keeping both initial values identical.
             for name in ("weight", "bias"):
@@ -436,6 +439,8 @@ class MoECTSOnPolicyRunner:
         missing = set(current) - set(source)
         allowed = {key for key in current if key.startswith("actor.residual.")
                    or key == "actor.residual_action_scales"}
+        if replace_critic:
+            allowed.update(key for key in current if key.startswith("critic.heads."))
         if self.policy_config["teacher_map_attention"] and not checkpoint["policy_config"]["teacher_map_attention"]:
             allowed.update(key for key in current if key.startswith("teacher_encoder.map_attention."))
         map_prefix = "student_moe_encoder.terrain_encoder."
@@ -446,7 +451,7 @@ class MoECTSOnPolicyRunner:
             else:
                 allowed.update(key for key in current if key.startswith(map_prefix))
         if unexpected or missing - allowed:
-            raise ValueError("Initialization weights differ beyond the action residual or teacher map extension")
+            raise ValueError("Initialization weights differ beyond the action residual, map encoders or new critic heads")
         # New residual branches retain their zero-output initialization.
         current.update(source)
         self.alg.actor_critic.load_state_dict(current, strict=True)
@@ -458,6 +463,8 @@ class MoECTSOnPolicyRunner:
             "curriculum": "restore_clock_and_command_ranges",
             "seed": int(self.train_cfg.get("seed", 10)),
         }
+        if replace_critic:
+            self.initialization["critic"] = "reinitialized_task_heads"
         # Extra residual parameters must not change the random stream used to
         # reset the physical environments and collect the first rollout.
         seed = self.initialization["seed"]

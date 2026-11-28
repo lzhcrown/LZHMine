@@ -1,4 +1,4 @@
-"""Validate and transfer a compatible non-residual all-MoE starting point."""
+"""Validate and transfer a CTS starting point with compatible student and actor experts."""
 
 from rsl_rl.modules.frozen_terrain_encoder import TERRAIN_LATENT_DIM
 
@@ -10,11 +10,10 @@ RESIDUAL_POLICY_KEYS = frozenset((
     "residual_enabled", "residual_hidden_dims", "residual_action_scales",
 ))
 WARM_START_TARGET_KEYS = RESIDUAL_POLICY_KEYS | {
-    "critic_task_count", "teacher_map_attention", "student_frozen_terrain",
+    "critic_type", "critic_expert_num", "critic_task_count", "teacher_map_attention", "student_frozen_terrain",
 }
 BASE_STRUCTURE_KEYS = (
     "student_encoder_type", "expert_num", "actor_type", "actor_expert_num",
-    "critic_type", "critic_expert_num",
 )
 
 
@@ -38,8 +37,7 @@ def transfer_skill_inputs(state, checkpoint, target_policy, target_schema):
     source_current, source_history, source_privileged = observation_dimensions(source_schema)
     if source_schema != target_schema:
         student_has_id = any(term["name"] == "skill_id" for term in target_schema["proprioceptive_terms"])
-        privileged_only = target_policy["teacher_map_attention"] and not student_has_id
-        if add_skill_id(source_schema, privileged_only=privileged_only) != target_schema:
+        if add_skill_id(source_schema, privileged_only=not student_has_id) != target_schema:
             raise ValueError("Initialization observation schema differs from checkpoint")
         base.update(num_one_step_obs=current, num_actor_obs=history, num_critic_obs=privileged,
                     observation_dims=[term["dim"] for term in target_schema["proprioceptive_terms"]])
@@ -55,6 +53,12 @@ def transfer_skill_inputs(state, checkpoint, target_policy, target_schema):
             state[query_key] = pad(state[query_key], (0, privileged_delta))
     for module, columns in (("student_moe_encoder", history - source_history),
                             ("actor", current - source_current), ("critic", privileged_delta)):
+        if module == "critic" and target_policy["critic_type"] == "task_mlp":
+            if columns and checkpoint["policy_config"]["critic_type"] == "task_mlp":
+                for task in range(target_policy["critic_task_count"]):
+                    key = f"critic.heads.{task}.network.0.weight"
+                    state[key] = pad(state[key], (0, columns))
+            continue
         if columns:
             for layer in ("experts.backbone", "gating_network.0"):
                 key = "{}.moe.{}.network.0.weight".format(module, layer)
@@ -69,7 +73,7 @@ def transfer_skill_inputs(state, checkpoint, target_policy, target_schema):
 
 
 def validate_initialization_source(checkpoint, target_policy):
-    """Initialize a compatible all-MoE arm from a non-residual source."""
+    """Check model and training compatibility before explicitly warm-starting a CTS run."""
     source = normalize_policy_config(checkpoint["policy_config"])
     target = normalize_policy_config(target_policy)
     if source["teacher_frozen_terrain"] or target["teacher_frozen_terrain"]:
@@ -86,9 +90,14 @@ def validate_initialization_source(checkpoint, target_policy):
         raise ValueError("Initialization cannot discard trained teacher map attention")
     if source["student_frozen_terrain"] and not target["student_frozen_terrain"]:
         raise ValueError("Initialization cannot discard the trained student geometry inputs")
-    for name in ("student_encoder_type", "actor_type", "critic_type"):
+    for name in ("student_encoder_type", "actor_type"):
         if source[name] != "moe" or target[name] != "moe":
             raise ValueError("--init_from requires all-MoE source and target policies")
+    critic_types = (source["critic_type"], target["critic_type"])
+    if critic_types not in (("moe", "moe"), ("moe", "task_mlp"), ("task_mlp", "task_mlp")):
+        raise ValueError("Unsupported critic architectures for --init_from: {} -> {}".format(*critic_types))
+    if critic_types == ("moe", "moe") and source["critic_expert_num"] != target["critic_expert_num"]:
+        raise ValueError("Initialization checkpoint differs in critic_expert_num")
     for key in BASE_STRUCTURE_KEYS:
         if source[key] != target[key]:
             raise ValueError("Initialization checkpoint differs in " + key)

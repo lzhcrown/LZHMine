@@ -12,7 +12,7 @@
   --headless --duration 30 --vx 0.5 --vy 0.0 --yaw 0.0
 ```
 
-分组独立导出和 play 自动导出默认写入 `deploy/deploy_mujoco/nezha/policy/<实验组>/policy.pt`，并在同目录生成 `policy.json`；目录不存在时自动创建。每次导出只覆盖对应目录的这两个文件。导出和仿真入口都会校验学生、Actor、训练时 Critic 的类型及专家数。如需保留多个策略，通过 `--output` 指定不同文件名，并将仿真的 `--policy` 改为对应路径。
+分组独立导出和 play 自动导出默认写入 `deploy/deploy_mujoco/nezha/policy/<实验组>/policy.pt`，并在同目录生成 `policy.json`。目录不存在时自动创建。每次导出只覆盖对应目录的这两个文件。导出和仿真入口会校验模型结构。G13 v1/v2 支持回放同版本较早的地图学生检查点，训练时的 Critic 可以是旧的 8 专家 MoE 或新的两个任务价值网络。如需保留多个策略，通过 `--output` 指定不同文件名，并将仿真的 `--policy` 改为对应路径。
 
 相对场景／策略路径以 `deploy/deploy_mujoco/` 为基准，也支持绝对路径。分组仿真入口不传 `--policy` 时读取本组的 `policy.pt`。公共导出／play 入口默认使用 `g1_student_moe`，直接调用 `deploy_mujoco.py -c nezha_moe_cts.yaml` 读取 YAML 指定的策略，当前同样为 `nezha/policy/g1_student_moe/policy.pt`。
 

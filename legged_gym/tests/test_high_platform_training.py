@@ -5,22 +5,25 @@ import sys
 import pytest
 import torch
 
+from deploy.deploy_mujoco.runtime import NezhaCTSPolicyRuntime
+from experiments.common import export_main
 from experiments.registry import (
     PLATFORM_EXPERIMENT, PLATFORM_EXPERIMENT_KEYS, PLATFORM_V1_EXPERIMENT, PLATFORM_V2_EXPERIMENT,
-    PLATFORM_V3_EXPERIMENT, PLATFORM_V4_EXPERIMENT, PLATFORM_V5_EXPERIMENT, SKILL_V1_EXPERIMENT,
-    SKILL_EXPERIMENT_KEYS, SKILL_V2_EXPERIMENT, clone_config, configure_experiment, get_experiment,
+    PLATFORM_V3_EXPERIMENT, PLATFORM_V4_EXPERIMENT, PLATFORM_V5_EXPERIMENT, PLATFORM_V6_EXPERIMENT,
+    SKILL_EXPERIMENT_KEYS, SKILL_V1_EXPERIMENT, SKILL_V2_EXPERIMENT, clone_config, configure_experiment, get_experiment,
 )
 from legged_gym.terrains.platform_rewards import (
     platform_reward_scales, platform_v1_reward_scales, platform_v2_reward_scales,
 )
 from rsl_rl.modules.frozen_terrain_encoder import TerrainEncoder, terrain_encoder_checkpoint
 from rsl_rl.runners.on_policy_runner_cts import MoECTSOnPolicyRunner
+from rsl_rl.utils.cts_checkpoint import validate_checkpoint_policy
 from rsl_rl.utils.cts_observations import observation_dimensions
 from rsl_rl.utils.wf_curriculum import WFCurriculum
 from test_cts_checkpoint_restoration import restore_args
 from test_cts_experiments import actual_config_module, config_dict
 from test_cts_initialization import all_moe_config
-from test_cts_runner import FakeVectorEnv, cpu_task_registry
+from test_cts_runner import FakeVectorEnv, cpu_task_registry, runner_config
 from test_platform_rewards import robot
 from test_wf_curriculum import make_env
 
@@ -42,6 +45,66 @@ def stage_one_artifact(tmp_path):
     path = tmp_path / "terrain_encoder.pt"
     torch.save(terrain_encoder_checkpoint(TerrainEncoder()), path)
     return str(path)
+
+
+@pytest.mark.parametrize("field,change", [
+    ("skill_id", {"noise": .1}),
+    ("height_scan", {"name": "wrong_map"}),
+])
+def test_v6_rejects_same_width_checkpoint_with_wrong_teacher_inputs(actual_config_module, field, change):
+    group = get_experiment(PLATFORM_V6_EXPERIMENT)
+    cfg = clone_config(actual_config_module.NezhaMoECTSCfg())
+    group.configure_environment(cfg)
+    schema = cfg.env.observation_config
+    term = next(term for term in schema["privileged_terms"] if term["name"] == field)
+    term.update(change)
+    assert observation_dimensions(schema) == (57, 228, 296)
+    with pytest.raises(ValueError, match=field):
+        validate_checkpoint_policy({"policy_config": group.POLICY, "observation_config": schema}, group.POLICY)
+
+
+def test_v6_trains_with_teacher_skill_and_replays_from_proprioception(
+        tmp_path, monkeypatch, actual_config_module):
+    torch.manual_seed(17)
+    group = get_experiment(PLATFORM_V6_EXPERIMENT)
+    cfg = clone_config(actual_config_module.NezhaMoECTSCfg())
+    group.configure_environment(cfg)
+    env = CpuPlatformEnv(cfg)
+    settings = runner_config()
+    settings["policy"].update(group.POLICY)
+    settings["runner"].update(group.RUNNER)
+    runner = MoECTSOnPolicyRunner(env, settings)
+    env.max_episode_length = runner.num_steps_per_env + 1
+    env.privileged[:, -1] = env.high_platform_mask.float()
+    runner.learn(1)
+    policy = runner.alg.actor_critic
+    assert not (policy.student_frozen_terrain or policy.teacher_frozen_terrain or policy.teacher_map_attention)
+    # Identical body history and map, different task ID, including in the teaching latent.
+    history = torch.randn(1, 228).repeat(2, 1)
+    privileged = torch.randn(1, 296).repeat(2, 1)
+    privileged[:, -1] = torch.tensor([0., 1.])
+    with torch.inference_mode():
+        z = policy.teacher_encoder(privileged)
+        assert not torch.allclose(z[0], z[1])
+        actions = runner.get_inference_policy()(history)
+        torch.testing.assert_close(actions[0], actions[1])
+        student = policy.action_mean_with_diagnostics(history, privileged, is_teacher=False)[0]
+        torch.testing.assert_close(student, actions)
+        assert actions.shape == (2, 16)
+    snapshot = tmp_path / "model_1.pt"
+    runner.save(snapshot)
+    output = tmp_path / "v6_policy.pt"
+    monkeypatch.setattr(sys, "argv", ["export.py", "--checkpoint", str(snapshot), "--output", str(output)])
+    export_main(PLATFORM_V6_EXPERIMENT)
+    runtime = NezhaCTSPolicyRuntime(str(output), default_dof_pos=[0.] * 16,
+                                    p_gains=[10.] * 16, d_gains=[2.] * 16, expected_policy=group.POLICY)
+    assert runtime.policy.get_critic_type() == "task_mlp"
+    assert runtime.policy.get_critic_task_count() == 2
+    with torch.inference_mode():
+        torch.testing.assert_close(runtime.policy(history), actions)
+    applied, torques = runtime.step([0.] * 3, [0., 0., -1.], [.8, 0., 0.], [0.] * 16, [0.] * 16)
+    assert applied.shape == torques.shape == (16,)
+    assert torch.isfinite(applied).all() and torch.isfinite(torques).all()
 
 
 @pytest.mark.parametrize("target_key", PLATFORM_EXPERIMENT_KEYS)
@@ -94,7 +157,7 @@ def test_g7_warm_start_retains_target_terrain_commands_rewards_and_two_values(
     assert restored.rewards.scales.stand_still == -3.1
     expected_scales = platform_reward_scales()
     if target_key in (PLATFORM_V1_EXPERIMENT, PLATFORM_V3_EXPERIMENT, PLATFORM_V4_EXPERIMENT,
-                      PLATFORM_V5_EXPERIMENT, *SKILL_EXPERIMENT_KEYS):
+                      PLATFORM_V5_EXPERIMENT, PLATFORM_V6_EXPERIMENT, *SKILL_EXPERIMENT_KEYS):
         expected_scales = platform_v1_reward_scales()
         if target_key in (PLATFORM_V3_EXPERIMENT, PLATFORM_V4_EXPERIMENT):
             expected_scales["run_still"] = -.10
@@ -112,7 +175,7 @@ def test_g7_warm_start_retains_target_terrain_commands_rewards_and_two_values(
     assert restored.rewards.base_height_target == expected_height
     assert not getattr(restored.rewards, "platform_climb", False)
     assert restored.terrain.curriculum_rule == ("wf" if target_key == PLATFORM_EXPERIMENT else "dreamwaq")
-    expected_cap = 9 if target_key in (PLATFORM_V5_EXPERIMENT, *SKILL_EXPERIMENT_KEYS) else None
+    expected_cap = 9 if target_key in (PLATFORM_V5_EXPERIMENT, PLATFORM_V6_EXPERIMENT, *SKILL_EXPERIMENT_KEYS) else None
     assert getattr(restored.terrain, "ordinary_max_level", None) == expected_cap
     assert (restored.terrain.num_rows, restored.terrain.difficulty_reference_rows) == (20, 10)
     for kind in ("platform_pit", "platform_block"):
@@ -132,15 +195,16 @@ def test_g7_warm_start_retains_target_terrain_commands_rewards_and_two_values(
     assert target.policy_config["critic_task_count"] == 2
     probe = torch.randn(5, source.env.num_obs)
     scan = None
-    if target_key == SKILL_V2_EXPERIMENT:
+    if target_key in (PLATFORM_V6_EXPERIMENT, SKILL_V2_EXPERIMENT):
         skills = (torch.arange(5) % 2).float()[:, None]
         assert (env.num_one_step_obs, env.num_obs, env.num_privileged_obs) == (57, 228, 296)
         privileged = torch.randn(5, 295)
         scan = target.alg.actor_critic.student_height_scan(torch.cat((privileged, skills), dim=1))
+        assert target.initialization["critic"] == "reinitialized_task_heads"
         for teacher in (False, True):
-            actual = target.alg.actor_critic.evaluate(
-                probe, torch.cat((privileged, skills), dim=1), teacher, skills[:, 0].bool())
-            expected = source.alg.actor_critic.evaluate(probe, privileged, teacher)
+            actual = target.alg.actor_critic.action_mean_with_diagnostics(
+                probe, torch.cat((privileged, skills), dim=1), teacher)
+            expected = source.alg.actor_critic.action_mean_with_diagnostics(probe, privileged, teacher)
             torch.testing.assert_close(actual, expected)
     torch.testing.assert_close(target.alg.actor_critic.act_inference(probe, scan),
                                source.alg.actor_critic.act_inference(probe))
@@ -209,9 +273,10 @@ def test_intermediate_highplatform_pitch_rate_snapshot_restores_until_v2_warm_st
     (PLATFORM_V4_EXPERIMENT, PLATFORM_V2_EXPERIMENT),
     (PLATFORM_V1_EXPERIMENT, PLATFORM_V5_EXPERIMENT),
     (PLATFORM_V5_EXPERIMENT, PLATFORM_V1_EXPERIMENT),
+    (PLATFORM_V5_EXPERIMENT, PLATFORM_V6_EXPERIMENT),
     (PLATFORM_V1_EXPERIMENT, SKILL_V2_EXPERIMENT),
 ])
-def test_platform_group_transfer_requires_warm_start_and_copies_both_value_heads(
+def test_platform_group_transfer_requires_warm_start_and_preserves_compatible_weights(
         tmp_path, monkeypatch, actual_config_module, cpu_task_registry, source_key, target_key):
     from test_cts_checkpoint_restoration import train_namespace
 
@@ -240,7 +305,7 @@ def test_platform_group_transfer_requires_warm_start_and_copies_both_value_heads
     if target_key == SKILL_V2_EXPERIMENT:
         args.map_encoder_checkpoint = stage_one_artifact(tmp_path)
     env, restored = cpu_task_registry.make_env(task, args=args)
-    expected_cap = 9 if target_key in (PLATFORM_V5_EXPERIMENT, *SKILL_EXPERIMENT_KEYS) else None
+    expected_cap = 9 if target_key in (PLATFORM_V5_EXPERIMENT, PLATFORM_V6_EXPERIMENT, *SKILL_EXPERIMENT_KEYS) else None
     assert getattr(restored.terrain, "ordinary_max_level", None) == expected_cap
     assert restored.rewards.platform_scales == target_env_cfg.rewards.platform_scales
     assert restored.rewards.base_height_target == target_env_cfg.rewards.base_height_target
@@ -251,9 +316,15 @@ def test_platform_group_transfer_requires_warm_start_and_copies_both_value_heads
     target, _ = cpu_task_registry.make_alg_runner(env, task, args=args, log_root=None)
     assert target.current_learning_iteration == 1
     assert not target.alg.optimizer.state and not target.alg.optimizer_stu_enc.state
+    independent_critic = target_key in (PLATFORM_V6_EXPERIMENT, SKILL_V2_EXPERIMENT)
+    if independent_critic:
+        assert target.initialization["critic"] == "reinitialized_task_heads"
     for name, tensor in source.alg.actor_critic.state_dict().items():
+        if independent_critic and name.startswith("critic."):
+            assert name not in target.alg.actor_critic.state_dict()
+            continue
         transferred = target.alg.actor_critic.state_dict()[name]
-        if target_key in SKILL_EXPERIMENT_KEYS and transferred.shape != tensor.shape:
+        if independent_critic and transferred.shape != tensor.shape:
             assert transferred.ndim == tensor.ndim == 2 and transferred.shape[1] > tensor.shape[1]
             assert torch.count_nonzero(transferred[:, tensor.shape[1]:]) == 0
             transferred = transferred[:, :tensor.shape[1]]

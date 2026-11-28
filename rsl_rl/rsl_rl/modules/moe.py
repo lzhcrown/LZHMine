@@ -176,3 +176,23 @@ class MoECritic(nn.Module):
 
     def get_expert_probabilities(self, inputs: torch.Tensor) -> torch.Tensor:
         return self.moe.gating_network(inputs)
+
+
+class TaskMLPCritic(nn.Module):
+    """One independent scalar value network per reward task, in ordinary/platform order."""
+
+    def __init__(self, input_dim, hidden_dims, activation="elu"):
+        super().__init__()
+        self.heads = nn.ModuleList([MLP(input_dim, 1, hidden_dims, activation) for _ in range(2)])
+
+    def forward(self, inputs, platform_mask):
+        if (platform_mask is None or platform_mask.dtype != torch.bool
+                or platform_mask.shape != (inputs.shape[0],)):
+            raise ValueError("Two task values require one boolean platform label per sample")
+        values = inputs.new_empty((inputs.size(0), 1))
+        for head, selected in zip(self.heads, (~platform_mask, platform_mask)):
+            rows = selected.nonzero(as_tuple=False).flatten()
+            # An absent task must keep grad=None so Adam skips momentum and weight decay.
+            if rows.numel():
+                values.index_copy_(0, rows, head(inputs.index_select(0, rows)))
+        return values

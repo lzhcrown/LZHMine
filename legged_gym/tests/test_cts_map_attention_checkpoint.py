@@ -73,7 +73,10 @@ def test_legacy_g13_to_geometry_student_round_trip(tmp_path, actual_config_modul
     target = joint_runner(map_encoder_checkpoint=artifact_path)
     with pytest.raises(ValueError, match="Policy configuration differs"):
         target.load(path)
+    fresh_critic = {name: tensor.clone() for name, tensor in target.alg.actor_critic.critic.state_dict().items()}
     target.initialize_from(path)
+    assert target.initialization["critic"] == "reinitialized_task_heads"
+    assert_nested_equal(target.alg.actor_critic.critic.state_dict(), fresh_critic)
     stage_one_weights = torch.load(artifact_path, map_location="cpu", weights_only=True)["encoder_state_dict"]
     assert_nested_equal(target.alg.actor_critic.student_moe_encoder.terrain_encoder.state_dict(), stage_one_weights)
     assert target.current_learning_iteration == source.current_learning_iteration
@@ -85,15 +88,10 @@ def test_legacy_g13_to_geometry_student_round_trip(tmp_path, actual_config_modul
     labelled_history = torch.cat((history, torch.zeros(8, 4)), dim=1)
     privileged = torch.randn(8, target.env.num_privileged_obs)
     privileged[:, -1] = torch.arange(8) % 2
-    platform = privileged[:, -1].bool()
     for teacher in (True, False):
         previous = source.alg.actor_critic.action_mean_with_diagnostics(labelled_history, privileged, teacher)
         transferred = target.alg.actor_critic.action_mean_with_diagnostics(history, privileged, teacher)
         torch.testing.assert_close(previous, transferred)
-        torch.testing.assert_close(
-            source.alg.actor_critic.evaluate(labelled_history, privileged, teacher, platform),
-            target.alg.actor_critic.evaluate(history, privileged, teacher, platform),
-        )
     torch.testing.assert_close(source.alg.actor_critic.teacher_encoder(privileged),
                                target.alg.actor_critic.teacher_encoder(privileged))
 

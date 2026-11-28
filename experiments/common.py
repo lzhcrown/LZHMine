@@ -1,7 +1,21 @@
-"""Thin experiment entry points with lazy imports for separate runtimes."""
+"""Shared CTS experiment setup and entry points with lazy runtime imports."""
 
 from experiments.registry import export_path, get_experiment
 from legged_gym.scripts._bootstrap import configure_runtime
+
+
+def configure_teacher_skill_observation(cfg):
+    from rsl_rl.utils.cts_observations import add_skill_id, default_observation_config, observation_dimensions
+
+    schema = cfg.env.observation_config
+    if schema is None:
+        schema = default_observation_config(history_length=cfg.env.frame_stack)
+    schema = add_skill_id(schema, privileged_only=True)
+    cfg.env.observation_config = schema
+    current, history, privileged = observation_dimensions(schema)
+    cfg.env.num_one_step_observations = current
+    cfg.env.num_observations = history
+    cfg.env.num_privileged_obs = cfg.env.num_one_step_privileged_obs = privileged
 
 
 def train_main(key):

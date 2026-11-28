@@ -94,7 +94,7 @@ class NezhaCTSPolicyRuntime:
             expected_policy = {k: v for k, v in expected_policy.items() if k != "critic_task_count"}
         validate_checkpoint_policy(
             {"policy_config": self.policy_config, "observation_config": self.observation_config},
-            expected_policy,
+            expected_policy, inference=True,
         )
         for term in terms:
             if term["name"] in ("skill_id", "terrain_id"):

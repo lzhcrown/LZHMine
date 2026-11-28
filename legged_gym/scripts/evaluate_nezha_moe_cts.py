@@ -60,7 +60,7 @@ def evaluate_one(args, group, path, output):
 
     experiment = get_experiment(group)
     checkpoint = load_cts_checkpoint(str(path), map_location='cpu')
-    validate_checkpoint_policy(checkpoint, experiment.POLICY)
+    validate_checkpoint_policy(checkpoint, experiment.POLICY, inference=True)
     if not checkpoint.get('environment_config'):
         raise ValueError('Evaluation requires a checkpoint containing environment_config')
     cfg, _ = task_registry.get_cfgs(experiment.TASK_NAME)

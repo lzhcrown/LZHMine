@@ -4,7 +4,9 @@ import copy
 import math
 import os
 import torch
-from rsl_rl.utils.cts_observations import validate_observation_config
+from rsl_rl.utils.cts_observations import (
+    default_observation_config, observation_dimensions, validate_observation_config, validate_teacher_task_scan,
+)
 
 
 ARCHITECTURE = "nezha_moe_cts"
@@ -38,6 +40,13 @@ def normalize_policy_config(policy_config):
         ("critic_type", "critic_expert_num", "mlp"),
     ):
         module_type = policy.setdefault(type_key, legacy_type)
+        if type_key == "critic_type" and module_type == "task_mlp":
+            if task_count != 2:
+                raise ValueError("task_mlp requires critic_task_count=2 (ordinary and high platform)")
+            count = policy.setdefault(count_key, 0)
+            if type(count) is not int or count != 0:
+                raise ValueError("task_mlp has no soft-routing experts; use critic_expert_num=0")
+            continue
         if module_type not in ("mlp", "moe"):
             raise ValueError("Unsupported CTS {}: {}".format(type_key, module_type))
         if module_type == "mlp":
@@ -88,13 +97,28 @@ def resolve_map_encoder_checkpoint(frozen, path, resuming):
     return path
 
 
-def validate_checkpoint_policy(checkpoint, expected_policy):
-    """Reject any student/actor/critic mismatch before restoring an experiment."""
+def validate_checkpoint_policy(checkpoint, expected_policy, *, inference=False):
+    """Match training structures; permit the archived G13 critic for student-only inference."""
     if expected_policy is None:
         return checkpoint
     policy = normalize_policy_config(checkpoint["policy_config"])
     expected = normalize_policy_config(expected_policy)
+    if (inference and expected["critic_type"] == "task_mlp"
+            and policy["critic_type"] == "moe" and policy["critic_expert_num"] == 8
+            and policy["critic_task_count"] == 2 and policy["student_frozen_terrain"]):
+        # Both G13 students predate the replacement of the training-only MoE critic.
+        expected.update(critic_type="moe", critic_expert_num=8)
     spec = checkpoint.get("observation_config", {})
+    if "num_critic_obs" in expected:
+        privileged_width = sum(term["dim"] for term in spec.get("privileged_terms", ()))
+        if expected["num_critic_obs"] != privileged_width:
+            raise ValueError("Checkpoint privileged observation width does not match the selected experiment")
+        # G12 v6 explicitly requests the WF privileged frame plus one task ID.
+        # Other raw-input task critics may still use the original WF schema.
+        if (expected["critic_type"] == "task_mlp" and not expected["student_frozen_terrain"]
+                and not expected["teacher_map_attention"] and not expected["teacher_frozen_terrain"]
+                and privileged_width == observation_dimensions(default_observation_config())[2] + 1):
+            validate_teacher_task_scan(spec)
     has_skill = any(term["name"] == "skill_id" for term in spec.get("proprioceptive_terms", ()))
     if ("observation_dims" in expected and expected["observation_dims"] != policy.get("observation_dims")
             or has_skill and "observation_dims" not in expected):
@@ -154,6 +178,10 @@ def validate_cts_checkpoint(checkpoint):
         if has_moe != (policy[type_key] == "moe"):
             raise ValueError("Checkpoint {} disagrees with saved weights".format(type_key))
     state = checkpoint["model_state_dict"]
+    task_heads = {key.split(".", 3)[2] for key in state if key.startswith("critic.heads.")}
+    expected_heads = {"0", "1"} if policy["critic_type"] == "task_mlp" else set()
+    if task_heads != expected_heads:
+        raise ValueError("Checkpoint critic_type or task value heads disagree with saved weights")
     has_map_attention = any(key.startswith("teacher_encoder.map_attention.") for key in state)
     if has_map_attention != policy["teacher_map_attention"]:
         raise ValueError("Checkpoint teacher_map_attention disagrees with saved weights")
@@ -185,6 +213,8 @@ def validate_cts_checkpoint(checkpoint):
             raise ValueError("Checkpoint residual action scales disagree with metadata")
     spec = checkpoint["observation_config"]
     validate_observation_config(spec)
+    if checkpoint.get("train_config", {}).get("runner", {}).get("experiment_key") == "g12_v6":
+        validate_teacher_task_scan(spec)
     for key in DIMENSION_KEYS:
         if key not in policy:
             raise ValueError("Checkpoint policy_config is missing " + key)

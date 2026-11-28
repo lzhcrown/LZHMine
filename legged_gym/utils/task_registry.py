@@ -321,8 +321,10 @@ class TaskRegistry:
             map_encoder_checkpoint=getattr(args, "map_encoder_checkpoint", None), resume_path=resume_path,
         )
         if init_path is not None:
-            print("Initializing all-MoE comparison with fresh optimizers from: " + init_path)
-            runner.initialize_from(init_path)
+            print("Initializing CTS policy with fresh optimizers from: " + init_path)
+            initialized = runner.initialize_from(init_path)
+            if initialized.get("critic") == "reinitialized_task_heads":
+                print("Initialized two new independent value networks for ordinary and high-platform terrain.")
         return runner, train_cfg
 
 

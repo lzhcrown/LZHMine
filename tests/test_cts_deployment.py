@@ -9,7 +9,9 @@ import torch
 from deploy.deploy_mujoco.runtime import NezhaCTSPolicyRuntime
 from legged_gym.scripts.export_nezha_moe_cts import export
 from rsl_rl.modules.actor_critic_moe_cts import ActorCriticMoECTS
-from rsl_rl.utils.cts_checkpoint import load_cts_checkpoint, normalize_policy_config, policy_from_checkpoint
+from rsl_rl.utils.cts_checkpoint import (
+    load_cts_checkpoint, normalize_policy_config, policy_from_checkpoint, validate_checkpoint_policy,
+)
 from rsl_rl.utils.cts_export import CTSStudentExporter
 from rsl_rl.utils.cts_observations import (
     CTSObservationHistory, build_proprioception, default_observation_config,
@@ -157,7 +159,8 @@ def test_export_rejects_different_term_layout(tmp_path):
 
 
 @pytest.mark.parametrize("group", ["g13_v1", "g13_v2"])
-def test_g13_export_replays_with_training_student_inputs(tmp_path, group):
+@pytest.mark.parametrize("legacy_dense_critic", [False, True])
+def test_g13_export_replays_with_training_student_inputs(tmp_path, group, legacy_dense_critic):
     from experiments.registry import get_experiment
     from rsl_rl.utils.cts_observations import add_skill_id, flatten_history, observation_dimensions
 
@@ -167,17 +170,25 @@ def test_g13_export_replays_with_training_student_inputs(tmp_path, group):
     config = dict(policy, num_actor_obs=history, num_one_step_obs=current, num_critic_obs=privileged,
                   history_length=4, num_actions=16, actor_hidden_dims=[24], critic_hidden_dims=[24],
                   teacher_encoder_hidden_dims=[24], student_encoder_hidden_dims=[24, 16])
+    if legacy_dense_critic:
+        config.update(critic_type="moe", critic_expert_num=8)
     model = ActorCriticMoECTS(**config, observation_config=schema).eval()
     checkpoint_path = tmp_path / "model_1.pt"
     torch.save({"architecture": "nezha_moe_cts", "format_version": 1,
                 "observation_config": schema, "policy_config": config,
                 "model_state_dict": model.state_dict()}, checkpoint_path)
+    if legacy_dense_critic:
+        with pytest.raises(ValueError, match="critic_type|critic_expert_num"):
+            validate_checkpoint_policy(load_cts_checkpoint(checkpoint_path), policy)
     policy_path = export(Namespace(checkpoint=str(checkpoint_path), run=None, output=str(tmp_path / "student.pt")),
                          expected_policy=policy)
     runtime = NezhaCTSPolicyRuntime(policy_path, default_dof_pos=[0.] * 16,
                                     p_gains=[10.] * 16, d_gains=[2.] * 16, expected_policy=policy)
     assert runtime.policy.get_teacher_map_attention() == (group == "g13_v2")
     assert runtime.policy.get_teacher_frozen_terrain() == (group == "g13_v1")
+    assert runtime.policy.get_critic_type() == config["critic_type"]
+    assert runtime.policy.get_num_critic_experts() == config["critic_expert_num"]
+    assert runtime.policy.get_critic_task_count() == 2
     assert runtime.student_frozen_terrain
     assert not any("teacher" in name for name, _ in runtime.policy.named_parameters())
     sensors = ([0.] * 3, [0., 0., -1.], [.8, 0., 0.], [0.] * 16, [0.] * 16)

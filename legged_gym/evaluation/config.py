@@ -6,8 +6,8 @@ from pathlib import Path
 import re
 from types import SimpleNamespace
 
-from experiments.registry import (EXPERIMENT_KEYS, LEGACY_EXPERIMENT_KEYS,
-                                  RESIDUAL_EXPERIMENT_KEYS, ALL_MOE_EXPERIMENT_KEYS, REPO_ROOT)
+from experiments.registry import (EXPERIMENT_KEYS, LEGACY_EXPERIMENT_KEYS, RESIDUAL_EXPERIMENT_KEYS,
+                                  ALL_MOE_EXPERIMENT_KEYS, TASK_CRITIC_EXPERIMENT_KEYS, REPO_ROOT)
 from .presets import (PATCH_TERRAIN_TYPES, PATCH_SUPPORTED_TERRAIN_TYPES, PATCH_SIZE_M, PATCH_PLATFORM_LENGTH_M,
                       PATCH_CORRIDOR_WIDTH_M, PATCH_SLOPE_ANGLE_DEG, PATCH_SLOPE_LENGTH_M, PATCH_SLOPE_WIDTH_M)
 from .timing import MAX_ATTEMPT_SECONDS
@@ -33,7 +33,7 @@ def parse_args(argv=None):
     parser.add_argument('--detail-trial-indices',
                         help='Comma-separated zero-based episode indices per environment; trial_ids defaults to 0.')
     parser.add_argument('--expert-weights-only', action='store_true',
-                        help='All-MoE groups: capture Student/Actor gates instead of other metric streams.')
+                        help='Capture the Student and Actor gate weights for supported MoE policies.')
     parser.add_argument('--record-residual', action='store_true',
                         help='Also record pre-compensation means, corrections and final means for selected trials.')
     parser.add_argument('--residual-scale', type=float, default=1.,
@@ -63,8 +63,9 @@ def parse_args(argv=None):
     if args.metric_successes_per_terrain < 0:
         parser.error('metric-successes-per-terrain must be nonnegative')
     groups = selected_groups(args.group)
-    if args.expert_weights_only and (not set(groups).issubset(ALL_MOE_EXPERIMENT_KEYS) or args.no_record):
-        parser.error('--expert-weights-only requires all-MoE groups and recording enabled')
+    if args.expert_weights_only and (
+            not set(groups).issubset((*ALL_MOE_EXPERIMENT_KEYS, *TASK_CRITIC_EXPERIMENT_KEYS)) or args.no_record):
+        parser.error('--expert-weights-only requires a supported MoE student/actor group and recording enabled')
     if args.record_residual and args.no_record:
         parser.error('--record-residual requires recording enabled')
     if not math.isfinite(args.residual_scale) or not 0 <= args.residual_scale <= 1:

@@ -10,6 +10,9 @@ from copy import deepcopy
 import torch
 
 
+_SKILL_ID_TERM = {"name": "skill_id", "dim": 1, "scale": 1.0, "noise": 0.0, "clip": [0.0, 1.0]}
+
+
 def default_observation_config(history_length=4, wheel_indices=None):
     """Return a fresh WF 57 x 4 / 295 observation schema."""
     def term(name, dim, scale=1.0, noise=0.0, clip=100.0):
@@ -86,6 +89,21 @@ def observation_dimensions(config):
     return current, current * int(config["history_length"]), privileged
 
 
+def validate_teacher_task_scan(config):
+    """The task-conditioned teacher reads the raw grid and ID; the student reads WF proprioception."""
+    if config is None:
+        raise ValueError("The task-conditioned teacher requires an observation schema")
+    privileged = config.get("privileged_terms", ())
+    if not privileged or privileged[-1] != _SKILL_ID_TERM:
+        raise ValueError("The task-conditioned teacher requires a clean trailing binary skill_id")
+    if len(privileged) < 2 or (privileged[-2]["name"], privileged[-2]["dim"]) != ("height_scan", 187):
+        raise ValueError("The task-conditioned teacher requires a 187-point height_scan before skill_id")
+    student_terms = [(t["name"], t["dim"]) for t in config.get("proprioceptive_terms", ())]
+    expected = [(t["name"], t["dim"]) for t in default_observation_config()["proprioceptive_terms"]]
+    if student_terms != expected:
+        raise ValueError("The student requires only the standard WF proprioceptive terms")
+
+
 def observation_term_slice(terms, name):
     """Locate a named term in a single concatenated observation frame."""
     start = 0
@@ -100,7 +118,7 @@ def observation_term_slice(terms, name):
 def add_skill_id(config, *, privileged_only=False):
     """Keep the oracle task in privileged observations and optionally the student frame."""
     config = deepcopy(config)
-    term = {"name": "skill_id", "dim": 1, "scale": 1.0, "noise": 0.0, "clip": [0.0, 1.0]}
+    term = _SKILL_ID_TERM
     for key in ("proprioceptive_terms", "privileged_terms"):
         terms = config[key]
         skills = [item for item in terms if item["name"] == "skill_id"]

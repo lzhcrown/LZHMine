@@ -79,19 +79,26 @@ def test_platform_outcome_rates_count_each_full_episode_once_before_reset(tmp_pa
             assert samples[0].value == pytest.approx(value)
 
 
-def test_platform_labels_follow_pre_step_samples_through_ppo(tmp_path):
+@pytest.mark.parametrize("critic_type", ["moe", "task_mlp"])
+def test_platform_labels_follow_pre_step_samples_through_ppo(tmp_path, critic_type):
     env = FakeVectorEnv()
     env.high_platform_mask = torch.arange(env.num_envs) % 3 == 0
     cfg = all_moe_config()
-    cfg["policy"]["critic_task_count"] = 2
+    cfg["policy"].update(critic_type=critic_type, critic_task_count=2,
+                         critic_expert_num=8 if critic_type == "moe" else 0)
     cfg["runner"]["num_steps_per_env"] = 1
     runner = MoECTSOnPolicyRunner(env, cfg)
     alg = runner.alg
     policy = alg.actor_critic
-    heads = policy.critic.moe.experts.experts
     with torch.no_grad():
-        heads.weight.zero_()
-        heads.bias.view(-1, 2).copy_(torch.tensor([1., 5.]))
+        if critic_type == "task_mlp":
+            for network, value in zip(policy.critic.heads, (1., 5.)):
+                network.network[-1].weight.zero_()
+                network.network[-1].bias.fill_(value)
+        else:
+            heads = policy.critic.moe.experts.experts
+            heads.weight.zero_()
+            heads.bias.view(-1, 2).copy_(torch.tensor([1., 5.]))
 
     # Half the envs time out; simulate an in-place change of their terrain at reset.
     labels = env.high_platform_mask.clone()
@@ -118,6 +125,39 @@ def test_platform_labels_follow_pre_step_samples_through_ppo(tmp_path):
     exported = torch.jit.script(CTSStudentExporter(loaded, env.observation_config))
     with torch.no_grad():
         torch.testing.assert_close(exported(obs), policy.act_inference(obs))
+
+
+@pytest.mark.parametrize("active_task", [0, 1], ids=["only_ordinary", "only_high_platform"])
+def test_task_critics_update_only_the_present_task_after_adam_warmup(active_task, tmp_path):
+    torch.manual_seed(19)
+    env = FakeVectorEnv()
+    env.high_platform_mask = torch.arange(env.num_envs) % 2 == 0
+    cfg = all_moe_config()
+    cfg["policy"].update(critic_type="task_mlp", critic_expert_num=0, critic_task_count=2)
+    cfg["algorithm"]["weight_decay"] = .01
+    runner = MoECTSOnPolicyRunner(env, cfg, log_dir=str(tmp_path))
+    model = runner.alg.actor_critic
+    heads = model.critic.heads
+
+    ordinary, platform = (set(head.parameters()) for head in heads)
+    assert ordinary.isdisjoint(platform)
+    assert set(model.critic.parameters()) == ordinary | platform
+    # Differences in Adam moments are observable only after both heads have been updated.
+    runner.learn(1)
+    for params in (ordinary, platform):
+        assert all(runner.alg.optimizer.state[p]["step"].item() > 0 for p in params)
+    before = {p: p.detach().clone() for p in model.critic.parameters()}
+    steps = {p: runner.alg.optimizer.state[p]["step"].item() for p in model.critic.parameters()}
+    env.high_platform_mask.fill_(bool(active_task))
+    runner.learn(1)
+    for p in heads[1 - active_task].parameters():
+        assert torch.equal(p, before[p])
+        assert runner.alg.optimizer.state[p]["step"].item() == steps[p]
+    assert any(not torch.equal(p, before[p]) for p in heads[active_task].parameters())
+    events = EventAccumulator(str(tmp_path)).Reload()
+    for task, tag in enumerate(("Loss/value_ordinary", "Loss/value_high_platform")):
+        assert [s.step for s in events.Scalars(tag)] == ([0, 1] if task == active_task else [0])
+    assert not any(tag.startswith("CriticExperts/") for tag in events.Tags()["scalars"])
 
 
 def test_g7_warm_start_initializes_both_value_heads(tmp_path):

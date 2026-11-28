@@ -140,6 +140,25 @@ done
   --init_from /path/to/g12_v1/model_XXXX.pt --num_envs 4096 --max_iterations 1000 --seed 10
 ```
 
+### G12 v6 教师任务编号与独立 Critic
+
+`g12_v6` 继承 v5 的两套奖励、速度指令和课程。平地、楼梯及其他常规地形使用任务编号 0，最高 9 级。凸台和凹台使用任务编号 1，最高 19 级。v5 已按地形选择奖励，并从同一个 MoE Critic 的两个输出中选出对应价值。v6 把同一地形编号加入教师输入，并给每类地形分配独立的价值网络。[v6 配置](experiments/g12_v6/config.py)
+
+| 模块 | v6 的输入和作用 |
+| --- | --- |
+| 教师 | 在 v5 的 295 维特权观测末尾追加一位任务编号，得到 296 维。原有的 187 个局部高程采样值直接随其余观测送入教师 MLP。 |
+| 学生与共享 Actor | 学生用 4 帧、每帧 57 维的本体观测与速度指令估计教师隐变量。共享 Actor 据隐变量和当前帧生成 16 维动作。学生与 Actor 各有 8 个专家。导出的学生策略只需 228 维历史。 |
+| Critic | 两个参数独立的 MLP 分别估计常规和高台回报。每条样本的 296 维特权观测与对应隐变量进入所属任务的 Critic。 |
+
+直接从头训练运动策略即可，整个实验只需一段训练。
+
+```bash
+.venv/bin/python experiments/g12_v6/train.py --from_scratch --headless \
+  --num_envs 4096 --max_iterations 20000 --seed 10 --run_name g12_v6_proprio_s10
+```
+
+TensorBoard 的 `Loss/value_ordinary` 和 `Loss/value_high_platform` 分别记录两个 Critic 的预测损失。与 v5 比较时，两组使用同一种子、训练预算和速度指令，对照学生在连续楼梯上的动作、100 cm 凸台通过率和台面上的腿部姿态。v6 同时引入教师任务编号和独立 Critic，比较结果反映二者的合并效果。
+
 ### G13 v1 主实验 · 先训练高程图编码器，再冻结编码器学习运动
 
 G13 沿用 G12 v5 的两套奖励、速度指令和地形课程。平地、楼梯及其他常规地形为 0–9 级，凸台和凹台为 0–19 级。两个版本都用同一种学生输入，以检验地形几何特征能否帮助学生区分连续楼梯与孤立高台。
@@ -151,6 +170,8 @@ G13 沿用 G12 v5 的两套奖励、速度指令和地形课程。平地、楼�
 | v1、v2 学生 | 228 维四帧本体与指令历史，加上当前高程图经预训练编码器得到的 16 维几何特征 | 两组从同一个第一阶段权重初始化学生地图编码器并冻结；学生编码器融合历史和几何信息，共享 MoE Actor 生成 16 维动作 |
 
 学生每个控制步都需要一张与机身位姿对齐的局部高程图。训练和仿真从当前地形采样；实机需要能提供同样扫描的地图来源。16 维特征取代学生的深度视觉输入，任务编号仅作为教师侧的特权信息。
+
+**第二阶段的价值估计。** G13 v1 和 v2 都使用两个参数独立的标量价值网络，隐藏层均为 512、256、128。平地、楼梯和其他常规地形的样本交给常规 Critic，凸台和凹台的样本交给高台 Critic。两个网络用各自的回报目标更新。训练时以地形标签选择 Critic，部署时由 8 专家 Student 编码器和 8 专家 Actor 生成动作。TensorBoard 通过 `Loss/value_ordinary` 和 `Loss/value_high_platform` 分别记录两类样本的价值损失。
 
 **第一阶段学习地形几何。** 在九类启用的 WF 地形上采样 187 点局部高程图，台沿附近加密采样。卷积和四个注意力查询将高程图压缩成 16 维特征，临时解码器根据遮挡、加噪后的输入重建干净的扫描。训练损失包含遮挡点误差、全图误差和相邻点高差误差。按独立验证集上遮挡点的平均绝对误差选取权重。[地图预训练](experiments/g13_v1/pretrain.py)
 
@@ -166,10 +187,10 @@ G13 沿用 G12 v5 的两套奖励、速度指令和地形课程。平地、楼�
 ```bash
 .venv/bin/python experiments/g13_v1/train.py --from_scratch --headless \
   --map_encoder_checkpoint logs/g13_v1/terrain_encoder.pt \
-  --num_envs 4096 --max_iterations 20000 --seed 10 --run_name g13_v1_student_geometry_s10
+  --num_envs 4096 --max_iterations 20000 --seed 10 --run_name g13_v1_task_critics_s10
 ```
 
-新版运动检查点中已包含学生地图编码器，续训时使用 `--resume`。旧版仅使用本体历史的运动检查点缺少新增的学生几何输入，以上从头训练命令可以直接复用第一阶段地图权重。
+上述命令直接复用第一阶段地图权重，从第 0 轮训练新的运动策略和两个 Critic。同一版本的双 Critic 运动检查点可以用 `--resume` 续训。对照旧 MoE Critic 可使用提交 `816c99f` 中的同名实验，在两个版本中固定第一阶段权重、种子、训练步数和评估地形。
 
 ### G13 v2 备选实验 · 地图编码与运动联合训练
 
@@ -178,7 +199,7 @@ G13 沿用 G12 v5 的两套奖励、速度指令和地形课程。平地、楼�
 ```bash
 .venv/bin/python experiments/g13_v2/train.py --from_scratch --headless \
   --map_encoder_checkpoint logs/g13_v1/terrain_encoder.pt \
-  --num_envs 4096 --max_iterations 20000 --seed 10 --run_name g13_v2_student_geometry_s10
+  --num_envs 4096 --max_iterations 20000 --seed 10 --run_name g13_v2_task_critics_s10
 ```
 
 ### G13 固定地形评估

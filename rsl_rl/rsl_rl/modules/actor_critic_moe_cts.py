@@ -16,7 +16,7 @@ from torch.distributions import Normal
 from .frozen_terrain_encoder import (
     FrozenTerrainEncoder, FrozenTerrainTeacherEncoder, TERRAIN_LATENT_DIM, pretrained_scan_slice,
 )
-from .moe import L2Norm, MLP, MoE, MoEActor, MoECritic, SimNorm
+from .moe import L2Norm, MLP, MoE, MoEActor, MoECritic, SimNorm, TaskMLPCritic
 from .teacher_map_attention import MapAttentionTeacherEncoder, TeacherMapAttention
 
 
@@ -130,8 +130,9 @@ class ActorCriticMoECTS(nn.Module):
                 ("student_encoder", student_encoder_type, expert_num),
                 ("actor", actor_type, actor_expert_num),
                 ("critic", critic_type, critic_expert_num)):
-            if network_type not in ("mlp", "moe"):
-                raise ValueError("%s_type must be 'mlp' or 'moe'" % name)
+            allowed = ("mlp", "moe", "task_mlp") if name == "critic" else ("mlp", "moe")
+            if network_type not in allowed:
+                raise ValueError("%s_type must be one of %s" % (name, allowed))
             if (isinstance(count, bool) or int(count) != count or count < 0
                     or (network_type == "moe" and count < 1)):
                 raise ValueError("%s expert count must be a positive integer for MoE" % name)
@@ -154,6 +155,8 @@ class ActorCriticMoECTS(nn.Module):
         self.critic_expert_num = int(critic_expert_num) if critic_type == "moe" else 0
         if type(critic_task_count) is not int or critic_task_count not in (1, 2):
             raise ValueError("critic_task_count must be 1 or 2")
+        if critic_type == "task_mlp" and (critic_task_count != 2 or critic_expert_num != 0):
+            raise ValueError("task_mlp requires critic_task_count=2 and critic_expert_num=0")
         self.critic_task_count = critic_task_count
         self.teacher_map_attention = teacher_map_attention
         self.teacher_frozen_terrain = teacher_frozen_terrain
@@ -214,6 +217,8 @@ class ActorCriticMoECTS(nn.Module):
         if critic_type == "moe":
             self.critic = MoECritic(self.critic_expert_num, latent_dim + num_critic_obs,
                                     critic_hidden_dims, activation, critic_task_count)
+        elif critic_type == "task_mlp":
+            self.critic = TaskMLPCritic(latent_dim + num_critic_obs, critic_hidden_dims, activation)
         else:
             self.critic = MLP(latent_dim + num_critic_obs, critic_task_count, critic_hidden_dims, activation)
         self.std = nn.Parameter(init_noise_std * torch.ones(num_actions))
@@ -310,8 +315,10 @@ class ActorCriticMoECTS(nn.Module):
         if self.critic_type == "moe":
             value, self.critic_gate_weights = self.critic.moe(inputs)
         else:
-            value = self.critic(inputs)
             self.critic_gate_weights = inputs.new_empty((inputs.shape[0], 0))
+            if self.critic_type == "task_mlp":
+                return self.critic(inputs, platform_mask)
+            value = self.critic(inputs)
         if self.critic_task_count == 2:
             if (platform_mask is None or platform_mask.dtype != torch.bool
                     or platform_mask.shape != (value.shape[0],)):

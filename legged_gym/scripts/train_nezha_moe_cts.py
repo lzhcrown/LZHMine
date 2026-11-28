@@ -38,11 +38,16 @@ def train(args, task_name="nezha_cts_g1_student_moe"):
     print("Nezha MoE-CTS | current={} history={} privileged={} actions={}".format(
         env.num_one_step_obs, env.num_obs, env.num_privileged_obs, env.num_actions,
     ))
-    print("Teacher envs={} | Student envs={} | Student={} ({}) | Actor={} ({}) | Critic={} ({}) | Logs={}".format(
+    policy = runner.alg.actor_critic
+    critic_description = (
+        "task_mlp (ordinary / high_platform, independent)"
+        if policy.critic_type == "task_mlp"
+        else "{} ({})".format(policy.critic_type, policy.critic_expert_num)
+    )
+    print("Teacher envs={} | Student envs={} | Student={} ({}) | Actor={} ({}) | Critic={} | Logs={}".format(
         runner.alg.teacher_env_idxs.numel(), runner.alg.student_env_idxs.numel(),
-        runner.alg.actor_critic.student_encoder_type, runner.alg.actor_critic.expert_num,
-        runner.alg.actor_critic.actor_type, runner.alg.actor_critic.actor_expert_num,
-        runner.alg.actor_critic.critic_type, runner.alg.actor_critic.critic_expert_num, runner.log_dir,
+        policy.student_encoder_type, policy.expert_num, policy.actor_type, policy.actor_expert_num,
+        critic_description, runner.log_dir,
     ))
     if getattr(env, "high_platform_mask", None) is not None:
         mask = env.high_platform_mask
@@ -69,7 +74,8 @@ def training_args():
         {"name": "--viewer", "action": "store_true",
          "help": "Show the training viewer (training is headless by default)."},
         {"name": "--init_from", "type": str,
-         "help": "Initialize from a non-residual all-MoE training checkpoint; reset both optimizers and preserve curriculum progress."},
+         "help": "Warm-start from a compatible policy, resetting the optimizers and retaining curriculum progress. "
+                 "When transferring a shared critic to independent task critics, both task critics start fresh."},
         {"name": "--map_encoder_checkpoint", "type": str,
          "help": "Stage-one height-scan encoder required to start g13_v1 or g13_v2. Resume uses the embedded weights."},
         {"name": "--from_scratch", "action": "store_true", "default": False,

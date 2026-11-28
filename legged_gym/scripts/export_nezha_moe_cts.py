@@ -54,7 +54,7 @@ def resolve_checkpoint(checkpoint=None, run=None, experiment=EXPERIMENT):
 def export(args, expected_actor_type=None, expected_actor_expert_num=None, expected_policy=None):
     path = resolve_checkpoint(args.checkpoint, args.run, getattr(args, "experiment", EXPERIMENT))
     checkpoint = load_cts_checkpoint(path, map_location="cpu")
-    validate_checkpoint_policy(checkpoint, expected_policy)
+    validate_checkpoint_policy(checkpoint, expected_policy, inference=True)
     validate_checkpoint_actor(checkpoint, expected_actor_type, expected_actor_expert_num)
     policy = policy_from_checkpoint(checkpoint, device="cpu").eval()
     output = os.path.abspath(args.output or DEFAULT_EXPORT_PATH)
