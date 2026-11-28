@@ -30,6 +30,11 @@ def train(args, task_name="nezha_cts_g1_student_moe"):
     env, env_cfg = task_registry.make_env(name=args.task, args=args)
     runner, cfg = task_registry.make_alg_runner(env, name=args.task, args=args)
     print("Experiment={} | Task={}".format(getattr(cfg.runner, "experiment_key", "legacy"), args.task))
+    if runner.alg.actor_critic.student_frozen_terrain:
+        teacher_map = "frozen pretrained encoder" if runner.alg.actor_critic.teacher_frozen_terrain else "jointly trained attention"
+        print("Student terrain=frozen pretrained encoder | Teacher terrain={} | Stage 1 source={}".format(
+            teacher_map,
+            (runner.initialization or {}).get("map_encoder_checkpoint", "locomotion checkpoint")))
     print("Nezha MoE-CTS | current={} history={} privileged={} actions={}".format(
         env.num_one_step_obs, env.num_obs, env.num_privileged_obs, env.num_actions,
     ))
@@ -65,6 +70,8 @@ def training_args():
          "help": "Show the training viewer (training is headless by default)."},
         {"name": "--init_from", "type": str,
          "help": "Initialize from a non-residual all-MoE training checkpoint; reset both optimizers and preserve curriculum progress."},
+        {"name": "--map_encoder_checkpoint", "type": str,
+         "help": "Stage-one height-scan encoder required to start g13_v1 or g13_v2. Resume uses the embedded weights."},
         {"name": "--from_scratch", "action": "store_true", "default": False,
          "help": "Explicitly train a comparison group without a pretrained starting point."},
     ])

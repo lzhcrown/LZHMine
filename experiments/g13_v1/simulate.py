@@ -1,4 +1,4 @@
-"""Run the skill-conditioned low-level policy in MuJoCo."""
+"""Run the G13 v1 geometry-conditioned student in MuJoCo."""
 
 from pathlib import Path
 import sys

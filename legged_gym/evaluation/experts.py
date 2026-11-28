@@ -37,10 +37,10 @@ def apply_residual_scale(policy, multiplier):
 
 
 @torch.inference_mode()
-def act_with_expert_weights(policy, observations):
+def act_with_expert_weights(policy, observations, height_scan=None):
     if policy.student_encoder_type != 'moe' or policy.actor_type != 'moe':
         raise ValueError('Expert capture requires MoE Student and Actor')
-    actions, student, actor, _, _ = policy.act_inference_with_diagnostics(observations)
+    actions, student, actor, _, _ = policy.act_inference_with_diagnostics(observations, height_scan)
     return actions, {'student': student, 'actor': actor}
 
 

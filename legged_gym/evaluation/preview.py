@@ -74,10 +74,11 @@ def run_preview(args, cfg, sim_params, physics_engine, policy, environment_class
             while not env.evaluation_complete:
                 start = time.monotonic()
                 observations = env.get_observations()
+                scan = env.get_student_height_scan() if policy.student_frozen_terrain else None
                 if trace is None:
-                    actions = policy.act_inference(observations)
+                    actions = policy.act_inference(observations, scan)
                 else:
-                    actions, student, actor, _, _ = policy.act_inference_with_diagnostics(observations)
+                    actions, student, actor, _, _ = policy.act_inference_with_diagnostics(observations, scan)
                     trace.begin_step(student, actor, actions, observations)
                 env.step(actions)
                 for row in env.completed_episodes:

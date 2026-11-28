@@ -56,7 +56,7 @@ def test_evaluation_overrides_do_not_mutate_training_snapshot():
     ['--speed', 'nan'], ['--speed', '0'], ['--max-seconds', 'inf'], ['--max-seconds', '30.01'],
     ['--envs-per-terrain', '0'], ['--spawn-xy-jitter', '.06'],
     ['--terrain-types', 'flat,flat'], ['--checkpoint-path', '/tmp/model.pt'],
-    ['--group', 'g12_v1', '--skill-id', '0'], ['--group', 'g13_v1', '--skill-id', '2'],
+    ['--group', 'g13_v1', '--skill-id', '0'],
     ['--episodes-per-terrain', '0'], ['--episodes-per-terrain', '-500'],
     ['--episodes-per-env', '0'], ['--episodes-per-env', '-1'],
     ['--envs-per-terrain', '16', '--episodes-per-terrain', '500'],
@@ -89,14 +89,6 @@ def test_preview_defaults_and_rejects_output_destination():
         parse_args(['--no-record', '--output-dir', '/tmp/not-a-capture'])
 
 
-@pytest.mark.parametrize('skill', [0, 1])
-def test_fixed_skill_on_same_evaluation_terrains(skill):
-    args = parse_args(['--group', 'g13_v1', '--terrain-types', 'stairs_convex_35cm,platform_100cm',
-                       '--skill-id', str(skill)])
-    assert protocol_dict(args)['fixed_actor_skill_id'] == skill
-    assert args.terrain_types == ('stairs_convex_35cm', 'platform_100cm')
-
-
 def test_joint_angle_csv_previews_and_batch_destinations(tmp_path):
     from legged_gym.scripts.evaluate_nezha_moe_cts import child_command
     path = tmp_path / 'leg_angles.csv'
@@ -120,8 +112,9 @@ def test_joint_angle_csv_cannot_replace_the_final_summary(tmp_path, monkeypatch)
     assert not output.exists()
 
 
-@pytest.mark.parametrize('group', ['g12_high_platform', 'g12_v1', 'g12_v2', 'g12_v3', 'g12_v4', 'g12_v5'])
-def test_g12_stair_and_platform_preview_selection(group):
+@pytest.mark.parametrize('group', ['g12_high_platform', 'g12_v1', 'g12_v2', 'g12_v3', 'g12_v4', 'g12_v5',
+                                   'g13_v1', 'g13_v2'])
+def test_stair_and_platform_preview_selection(group):
     terrains = ['stairs_convex_35cm'] + [f'platform_{cm}cm' for cm in range(45, 111, 5)]
     args = parse_args(['--group', group, '--terrain-types', ','.join(terrains),
                        '--viewer', '--no-record'])

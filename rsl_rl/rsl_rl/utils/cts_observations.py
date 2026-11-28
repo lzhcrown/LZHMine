@@ -86,16 +86,31 @@ def observation_dimensions(config):
     return current, current * int(config["history_length"]), privileged
 
 
-def add_skill_id(config):
-    """Append the oracle task to each observation without moving existing features."""
+def observation_term_slice(terms, name):
+    """Locate a named term in a single concatenated observation frame."""
+    start = 0
+    for term in terms:
+        end = start + term["dim"]
+        if term["name"] == name:
+            return slice(start, end)
+        start = end
+    raise ValueError("Observation schema is missing " + name)
+
+
+def add_skill_id(config, *, privileged_only=False):
+    """Keep the oracle task in privileged observations and optionally the student frame."""
     config = deepcopy(config)
     term = {"name": "skill_id", "dim": 1, "scale": 1.0, "noise": 0.0, "clip": [0.0, 1.0]}
     for key in ("proprioceptive_terms", "privileged_terms"):
         terms = config[key]
-        if not any(item["name"] == "skill_id" for item in terms):
-            terms.append(deepcopy(term))
-        elif terms[-1] != term:
+        skills = [item for item in terms if item["name"] == "skill_id"]
+        if skills and (len(skills) != 1 or terms[-1] != term):
             raise ValueError("Expected a clean skill_id scalar at the end of " + key)
+        if privileged_only and key == "proprioceptive_terms":
+            if skills:
+                terms.pop()
+        elif not skills:
+            terms.append(deepcopy(term))
     return validate_observation_config(config)
 
 
@@ -120,16 +135,13 @@ def _build_terms(raw, terms, wheel_indices, add_noise, noise_level):
     return torch.cat(values, dim=-1)
 
 
-def build_proprioception(raw, config=None, add_noise=False, noise_level=1.0, *, fixed_skill_id=None):
+def build_proprioception(raw, config=None, add_noise=False, noise_level=1.0):
     """Construct a current frame: uniform noise, clipping, then scaling.
 
     ``raw['joint_pos']`` is already relative to the robot's default pose.
     Wheel rates are preserved; only wheel positions are masked.
     """
     config = default_observation_config() if config is None else config
-    if fixed_skill_id is not None:
-        # Override only the student's copy. Privileged observations use the actual terrain.
-        raw = dict(raw, skill_id=torch.full_like(raw["skill_id"], fixed_skill_id))
     return _build_terms(raw, config["proprioceptive_terms"], config["wheel_indices"], add_noise, noise_level)
 
 

@@ -1,4 +1,4 @@
-"""Train the skill-conditioned low-level policy."""
+"""Train locomotion with pretrained terrain features for the student and teacher."""
 
 from pathlib import Path
 import sys

@@ -33,7 +33,6 @@ class NezhaCTSPolicyRuntime:
         joint_names: Sequence[str] = None,
         policy=None,
         expected_policy=None,
-        skill_id: int = None,
     ):
         self.device = torch.device(device)
         self.policy = (
@@ -48,14 +47,22 @@ class NezhaCTSPolicyRuntime:
             self.policy.get_student_encoder_type()
             if hasattr(self.policy, "get_student_encoder_type") else "moe"
         )
+        self.student_frozen_terrain = (
+            self.policy.get_student_frozen_terrain() if hasattr(self.policy, "get_student_frozen_terrain") else False
+        )
         self.policy_config = {
             "student_encoder_type": self.student_encoder_type,
+            "student_frozen_terrain": self.student_frozen_terrain,
             "expert_num": self.num_experts,
             "actor_type": self.policy.get_actor_type() if hasattr(self.policy, "get_actor_type") else "mlp",
             "actor_expert_num": self.policy.get_num_actor_experts() if hasattr(self.policy, "get_num_actor_experts") else 0,
             "critic_type": self.policy.get_critic_type() if hasattr(self.policy, "get_critic_type") else "mlp",
             "critic_expert_num": self.policy.get_num_critic_experts() if hasattr(self.policy, "get_num_critic_experts") else 0,
             "critic_task_count": self.policy.get_critic_task_count() if hasattr(self.policy, "get_critic_task_count") else 1,
+            "teacher_map_attention": (self.policy.get_teacher_map_attention()
+                                      if hasattr(self.policy, "get_teacher_map_attention") else False),
+            "teacher_frozen_terrain": (self.policy.get_teacher_frozen_terrain()
+                                       if hasattr(self.policy, "get_teacher_frozen_terrain") else False),
             "num_actions": NUM_ACTIONS,
         }
         if hasattr(self.policy, "get_residual_config_json"):
@@ -89,13 +96,14 @@ class NezhaCTSPolicyRuntime:
             {"policy_config": self.policy_config, "observation_config": self.observation_config},
             expected_policy,
         )
-        self.skill_observation = None
-        if any(term["name"] == "skill_id" for term in terms):
-            if type(skill_id) is not int or skill_id not in (0, 1):
-                raise ValueError("Set --skill-id 0 for ordinary terrain (including stairs) or 1 for platforms.")
-            self.skill_observation = torch.tensor([[skill_id]], device=self.device, dtype=torch.float32)
-        elif skill_id is not None:
-            raise ValueError("--skill-id requires a policy trained with the skill_id observation")
+        for term in terms:
+            if term["name"] in ("skill_id", "terrain_id"):
+                raise ValueError("Legacy student export requires an oracle {} input".format(term["name"]))
+        if self.student_frozen_terrain:
+            from rsl_rl.modules.frozen_terrain_encoder import pretrained_scan_slice
+            privileged = self.observation_config["privileged_terms"]
+            pretrained_scan_slice(self.observation_config, sum(term["dim"] for term in privileged))
+            self.height_term = next(term for term in privileged if term["name"] == "height_scan")
         self.control_config = json.loads(self.policy.get_control_config_json())
         self.clip_actions = float(self.control_config.get("clip_actions", 100.0))
         if self.clip_actions <= 0:
@@ -186,18 +194,30 @@ class NezhaCTSPolicyRuntime:
             "joint_vel": velocity.unsqueeze(0),
             "actions": self.previous_actions.unsqueeze(0),
         }
-        if self.skill_observation is not None:
-            raw["skill_id"] = self.skill_observation
         return build_proprioception(raw, config=self.observation_config, add_noise=False)
 
     @torch.inference_mode()
-    def step(self, base_ang_vel, projected_gravity, commands, dof_pos, dof_vel) -> Tuple[torch.Tensor, torch.Tensor]:
+    def step(self, base_ang_vel, projected_gravity, commands, dof_pos, dof_vel,
+             height_scan=None) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Use one current scan (base z minus offset minus surface z, in metres) for a terrain student."""
+        if self.student_frozen_terrain:
+            if height_scan is None:
+                raise ValueError("The geometry-conditioned student requires a current height_scan")
+            scan = torch.as_tensor(height_scan, dtype=torch.float32, device=self.device)
+            if scan.shape != (self.height_term["dim"],) or not torch.isfinite(scan).all():
+                raise ValueError("height_scan must contain 187 finite heights in metres")
+            scan = (scan.clamp(*self.height_term["clip"]) * self.height_term["scale"]).unsqueeze(0)
         frame = self.build_one_step(base_ang_vel, projected_gravity, commands, dof_pos, dof_vel)
         history = self.observations.update(frame)
-        actions = self.policy(history).squeeze(0).clamp(-self.clip_actions, self.clip_actions)
+        if self.student_frozen_terrain:
+            actions, probabilities, _, _, _ = self.policy.forward_with_diagnostics(history, scan)
+        else:
+            actions = self.policy(history)
+            probabilities = self.policy.get_expert_probabilities(history)
+        actions = actions.squeeze(0).clamp(-self.clip_actions, self.clip_actions)
         if actions.shape != (NUM_ACTIONS,) or not torch.isfinite(actions).all():
             raise RuntimeError("CTS policy must return 16 finite actions")
-        probabilities = self.policy.get_expert_probabilities(history).squeeze(0)
+        probabilities = probabilities.squeeze(0)
         if probabilities.shape != (self.num_experts,) or not torch.isfinite(probabilities).all():
             raise RuntimeError("CTS policy returned invalid expert weights")
         self.last_expert_probabilities.copy_(probabilities)

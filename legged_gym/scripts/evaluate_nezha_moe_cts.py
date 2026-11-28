@@ -147,10 +147,11 @@ def evaluate_one(args, group, path, output):
             last_report = time.monotonic()
             with torch.inference_mode():
                 while not env.evaluation_complete:
+                    observations = env.get_observations()
+                    scan = env.get_student_height_scan() if policy.student_frozen_terrain else None
                     if args.expert_weights_only or args.record_residual or trace is not None:
-                        observations = env.get_observations()
                         actions, student_gate, actor_gate, pre, correction = policy.act_inference_with_diagnostics(
-                            observations)
+                            observations, scan)
                         if trace is not None:
                             trace.begin_step(student_gate, actor_gate, actions, observations)
                         if args.expert_weights_only:
@@ -159,7 +160,7 @@ def evaluate_one(args, group, path, output):
                             record_residual_step(writer, env, pre, correction, actions,
                                 policy.actor.residual_action_scales if policy.residual_enabled else None)
                     else:
-                        actions = policy.act_inference(env.get_observations())
+                        actions = policy.act_inference(observations, scan)
                     env.step(actions)
                     if time.monotonic() - last_report >= 10:
                         print('{}: {}/{} attempts'.format(group, len(env.completed_episodes),
@@ -275,8 +276,6 @@ def child_command(args, group, checkpoint, output=None, *, sweep=1):
         '--max-seconds', str(args.max_seconds), '--max-tilt-deg', str(args.max_tilt_deg),
         '--spawn-xy-jitter', str(args.spawn_xy_jitter), '--sim-device', args.sim_device,
         '--num-threads', str(args.num_threads)]
-    if args.skill_id is not None:
-        command.extend(['--skill-id', str(args.skill_id)])
     if args.no_record:
         command.append('--no-record')
     else:

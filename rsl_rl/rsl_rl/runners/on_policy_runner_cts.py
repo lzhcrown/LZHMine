@@ -15,9 +15,10 @@ from rsl_rl.algorithms.moe_cts import MoECTS
 from rsl_rl.modules.actor_critic_moe_cts import ActorCriticMoECTS
 from rsl_rl.utils.cts_checkpoint import (
     ARCHITECTURE, FORMAT_VERSION, load_cts_checkpoint, normalize_policy_config,
+    resolve_map_encoder_checkpoint,
 )
 from rsl_rl.utils.cts_initialization import (
-    extend_skill_input_weights, skill_input_extension, validate_initialization_source,
+    transfer_skill_inputs, validate_initialization_source,
 )
 
 
@@ -34,7 +35,8 @@ def _config_dict(value):
 
 
 class MoECTSOnPolicyRunner:
-    def __init__(self, env, train_cfg, log_dir=None, device="cpu"):
+    def __init__(self, env, train_cfg, log_dir=None, device="cpu", *,
+                 map_encoder_checkpoint=None, resume_path=None):
         self.env = env
         self.device = device
         self.train_cfg = copy.deepcopy(train_cfg)
@@ -42,6 +44,10 @@ class MoECTSOnPolicyRunner:
         self.log_dir = log_dir
         self.observation_config = copy.deepcopy(env.observation_config)
         self.policy_config = normalize_policy_config(self.train_cfg["policy"])
+        map_encoder_checkpoint = resolve_map_encoder_checkpoint(
+            self.policy_config["teacher_frozen_terrain"] or self.policy_config["student_frozen_terrain"],
+            map_encoder_checkpoint, resume_path is not None,
+        )
         self.policy_config.update(
             num_actor_obs=env.num_obs,
             num_critic_obs=env.num_privileged_obs,
@@ -54,7 +60,18 @@ class MoECTSOnPolicyRunner:
             raise ValueError("MoECTSOnPolicyRunner requires ActorCriticMoECTS")
         if self.cfg.get("algorithm_class_name", "MoECTS") != "MoECTS":
             raise ValueError("MoECTSOnPolicyRunner requires MoECTS")
-        policy = ActorCriticMoECTS(**self.policy_config).to(device)
+        policy = ActorCriticMoECTS(**self.policy_config, observation_config=self.observation_config).to(device)
+        if policy.teacher_map_attention and hasattr(env, "height_points"):
+            policy.teacher_encoder.map_attention.validate_grid(env.height_points)
+        if policy.teacher_frozen_terrain and hasattr(env, "height_points"):
+            policy.teacher_encoder.validate_grid(env.height_points)
+        self.initialization = None
+        if map_encoder_checkpoint is not None:
+            if policy.student_frozen_terrain:
+                policy.student_moe_encoder.terrain_encoder.load_pretrained(map_encoder_checkpoint)
+            else:
+                policy.teacher_encoder.load_pretrained(map_encoder_checkpoint)
+            self.initialization = {"map_encoder_checkpoint": map_encoder_checkpoint}
         policy.observation_config = copy.deepcopy(self.observation_config)
         self.alg = MoECTS(policy, num_envs=env.num_envs, device=device, **self.train_cfg["algorithm"])
         self.num_steps_per_env = int(self.cfg["num_steps_per_env"])
@@ -75,8 +92,13 @@ class MoECTSOnPolicyRunner:
         self.tot_time = 0.0
         self.writer = None
         self.wandb_run = None
-        self.initialization = None
+        self._terrain_teacher_slots = None
+        if any(term["name"] == "skill_id" for term in self.observation_config["privileged_terms"]):
+            self._terrain_teacher_slots = torch.zeros(env.num_envs, dtype=torch.bool)
+            self._terrain_teacher_slots[self.alg.teacher_env_idxs.cpu()] = True
         self.env.reset()
+        if resume_path is not None:
+            self.load(resume_path)
 
     def _open_logs(self):
         if self.log_dir is None:
@@ -304,15 +326,22 @@ class MoECTSOnPolicyRunner:
         levels, columns = torch.stack((levels, columns)).detach().cpu()
         grouped = {}
         for column, kind in enumerate(column_types):
-            grouped.setdefault(kind, []).append(levels[columns == column])
+            grouped.setdefault(kind, []).append((columns == column).nonzero(as_tuple=True)[0])
         metrics = {}
         for kind, parts in grouped.items():
-            values = torch.cat(parts)
-            if values.numel() == 0:
+            slots = torch.cat(parts)
+            if slots.numel() == 0:
                 continue
+            values = levels[slots].float()
             prefix = "Terrain/{}/".format(kind)
-            metrics[prefix + "level_mean"] = values.float().mean().item()
+            metrics[prefix + "level_mean"] = values.mean().item()
             metrics[prefix + "level_max"] = values.max().item()
+            if self._terrain_teacher_slots is not None and kind in (
+                    "stairs_up", "stairs_down", "platform_block", "platform_pit"):
+                teachers = self._terrain_teacher_slots[slots]
+                for role, mask in (("teacher", teachers), ("student", ~teachers)):
+                    if mask.any():
+                        metrics[prefix + role + "_level_mean"] = values[mask].mean().item()
         return metrics
 
     def _control_config(self):
@@ -392,13 +421,11 @@ class MoECTSOnPolicyRunner:
             raise ValueError("initialize_from requires a fresh runner; use load to resume")
         checkpoint = load_cts_checkpoint(path, map_location=self.device)
         validate_initialization_source(checkpoint, self.policy_config)
-        append_skill = skill_input_extension(checkpoint, self.policy_config, self.observation_config)
         if checkpoint["train_config"]["runner"]["num_steps_per_env"] != self.num_steps_per_env:
             raise ValueError("Initialization must preserve the rollout length")
         current = self.alg.actor_critic.state_dict()
         source = checkpoint["model_state_dict"].copy()
-        if append_skill:
-            extend_skill_input_weights(source, self.observation_config["history_length"])
+        transfer_skill_inputs(source, checkpoint, self.policy_config, self.observation_config)
         if checkpoint["policy_config"]["critic_task_count"] < self.policy_config["critic_task_count"]:
             # Grouped Conv1d outputs are laid out [expert, task]. Duplicate
             # each expert's G7 scalar, keeping both initial values identical.
@@ -409,13 +436,22 @@ class MoECTSOnPolicyRunner:
         missing = set(current) - set(source)
         allowed = {key for key in current if key.startswith("actor.residual.")
                    or key == "actor.residual_action_scales"}
+        if self.policy_config["teacher_map_attention"] and not checkpoint["policy_config"]["teacher_map_attention"]:
+            allowed.update(key for key in current if key.startswith("teacher_encoder.map_attention."))
+        map_prefix = "student_moe_encoder.terrain_encoder."
+        if self.policy_config["student_frozen_terrain"]:
+            if checkpoint["policy_config"]["student_frozen_terrain"]:
+                if any(not torch.equal(source[k], current[k]) for k in current if k.startswith(map_prefix)):
+                    raise ValueError("Initialization source and --map_encoder_checkpoint have different student geometry")
+            else:
+                allowed.update(key for key in current if key.startswith(map_prefix))
         if unexpected or missing - allowed:
-            raise ValueError("Initialization weights differ beyond the action residual")
-        # Strict loading of the complete merged state prevents silent partial
-        # loads. Fresh constructor values supply the zero-output residual.
+            raise ValueError("Initialization weights differ beyond the action residual or teacher map extension")
+        # New residual branches retain their zero-output initialization.
         current.update(source)
         self.alg.actor_critic.load_state_dict(current, strict=True)
         self.initialization = {
+            **(self.initialization or {}),
             "source_checkpoint": os.path.abspath(os.fspath(path)),
             "source_iteration": int(checkpoint.get("next_iter", checkpoint["iter"])),
             "optimizer": "reset_both_adam",

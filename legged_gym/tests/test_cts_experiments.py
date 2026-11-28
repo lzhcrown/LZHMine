@@ -173,7 +173,9 @@ def test_real_task_registration_preserves_environment_and_training_isolation(
     v3_env, v3_train = cpu_task_registry.get_cfgs(get_experiment("g12_v3").TASK_NAME)
     v4_env, v4_train = cpu_task_registry.get_cfgs(get_experiment("g12_v4").TASK_NAME)
     v5_env, v5_train = cpu_task_registry.get_cfgs(get_experiment("g12_v5").TASK_NAME)
-    skill_env, skill_train = cpu_task_registry.get_cfgs(get_experiment("g13_v1").TASK_NAME)
+    frozen_env, frozen_train = cpu_task_registry.get_cfgs(get_experiment("g13_v1").TASK_NAME)
+    map_env, map_train = cpu_task_registry.get_cfgs(get_experiment("g13_v2").TASK_NAME)
+    assert {key for key in EXPERIMENT_KEYS if key.startswith("g13_")} == {"g13_v1", "g13_v2"}
     assert all(cpu_task_registry.get_task_class(task) is FakeVectorEnv for task in tasks)
     assert not getattr(v1_env.rewards, "platform_climb", False)
     assert "base_height" not in platform_env.rewards.platform_scales
@@ -205,15 +207,21 @@ def test_real_task_registration_preserves_environment_and_training_isolation(
     expected_v5["terrain"]["ordinary_max_level"] = 9
     assert config_dict(cpu_task_registry, v5_env) == expected_v5
     assert config_dict(cpu_task_registry, v5_train.policy) == config_dict(cpu_task_registry, v1_train.policy)
-    expected_skill = config_dict(cpu_task_registry, v5_env)
-    expected_skill["env"].update(observation_config=add_skill_id(default_observation_config()),
-                                 num_one_step_observations=58, num_observations=232,
-                                 num_one_step_privileged_obs=296, num_privileged_obs=296)
-    assert config_dict(cpu_task_registry, skill_env) == expected_skill
-    assert config_dict(cpu_task_registry, skill_train.policy) == dict(
-        config_dict(cpu_task_registry, v1_train.policy), observation_dims=[3, 3, 3, 16, 16, 16, 1])
+    expected_map = config_dict(cpu_task_registry, v5_env)
+    expected_map["env"].update(observation_config=add_skill_id(default_observation_config(), privileged_only=True),
+                               num_one_step_privileged_obs=296, num_privileged_obs=296)
+    assert config_dict(cpu_task_registry, map_env) == expected_map
+    assert config_dict(cpu_task_registry, map_train.policy) == dict(
+        config_dict(cpu_task_registry, v5_train.policy),
+        observation_dims=[3, 3, 3, 16, 16, 16], student_frozen_terrain=True, teacher_map_attention=True)
+    assert config_dict(cpu_task_registry, map_train.algorithm) == config_dict(cpu_task_registry, v5_train.algorithm)
+    assert config_dict(cpu_task_registry, frozen_env) == expected_map
+    assert config_dict(cpu_task_registry, frozen_train.policy) == dict(
+        config_dict(cpu_task_registry, map_train.policy), teacher_map_attention=False, teacher_frozen_terrain=True)
+    assert config_dict(cpu_task_registry, frozen_train.algorithm) == config_dict(cpu_task_registry, map_train.algorithm)
     for key, config in (("g12_v1", v1_train), ("g12_v2", v2_train),
-                        ("g12_v3", v3_train), ("g12_v4", v4_train), ("g12_v5", v5_train), ("g13_v1", skill_train)):
+                        ("g12_v3", v3_train), ("g12_v4", v4_train), ("g12_v5", v5_train),
+                        ("g13_v1", frozen_train), ("g13_v2", map_train)):
         assert config.runner.experiment_key == config.runner.run_name == config.runner.wandb_group == key
         assert config.runner.experiment_name == "nezha_moe_cts/" + key
         assert export_path(key).endswith("/nezha/policy/" + key + "/policy.pt")
@@ -222,7 +230,7 @@ def test_real_task_registration_preserves_environment_and_training_isolation(
         config_dict(cpu_task_registry, general_env.rewards),
         platform_scales=v1_env.rewards.platform_scales, platform_base_height_target=.52,
     )
-    assert (skill_env.commands.wf_settings["reward_curriculum"] == v5_env.commands.wf_settings["reward_curriculum"]
+    assert (frozen_env.commands.wf_settings["reward_curriculum"] == v5_env.commands.wf_settings["reward_curriculum"]
             == general_env.commands.wf_settings["reward_curriculum"])
     for kind in ("platform_pit", "platform_block"):
         assert platform_env.terrain.wf_sub_terrains[kind]["platform_height_range"] == [.20, .70]

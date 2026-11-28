@@ -14,6 +14,7 @@ from rsl_rl.utils.cts_observations import (
     default_observation_config,
     extract_current_observation,
     observation_dimensions,
+    observation_term_slice,
     validate_observation_config,
 )
 
@@ -33,7 +34,7 @@ def test_wf_dimensions_and_schema_round_trip():
     assert default_observation_config()["history_length"] == 4
 
 
-def test_skill_id_is_clean_and_follows_the_episode_in_every_history_frame():
+def test_legacy_student_schema_preserves_the_episode_skill_in_every_history_frame():
     base = default_observation_config()
     config = add_skill_id(base)
     assert observation_dimensions(config) == (58, 232, 296)
@@ -56,19 +57,40 @@ def test_skill_id_is_clean_and_follows_the_episode_in_every_history_frame():
     assert torch.count_nonzero(obs[:, -4:]) == 0
 
 
-@pytest.mark.parametrize("skill", [0, 1])
-def test_fixed_student_skill_on_both_terrains_and_after_partial_reset(skill):
-    config = add_skill_id(default_observation_config())
+def test_teacher_only_skill_leaves_student_history_identical_across_terrains_and_resets():
+    base = default_observation_config()
+    config = add_skill_id(base, privileged_only=True)
+    assert observation_dimensions(config) == (57, 228, 296)
+    assert config["proprioceptive_terms"] == base["proprioceptive_terms"]
+    assert config["privileged_terms"] == add_skill_id(base)["privileged_terms"]
     history = CTSObservationHistory(2, config)
     raw = raw_observations()
-    raw["skill_id"] = torch.tensor([[0.], [1.]])
     for step in range(5):
         if step == 2:
-            history.reset(torch.tensor([1]))
-        frame = build_proprioception(raw, config, fixed_skill_id=skill)
-        assert torch.all(history.update(frame)[:, -4:] == skill)
-        assert torch.equal(frame[:, :-1], build_proprioception(raw, config)[:, :-1])
-        assert build_privileged_observations(raw, config)[:, -1].tolist() == [0., 1.]
+            history.reset(torch.tensor([0, 1]))
+        raw["skill_id"] = torch.tensor([[step % 2], [1 - step % 2]], dtype=torch.float32)
+        raw["actions"].fill_(step / 10)
+        privileged = build_privileged_observations(raw, config)
+        assert torch.equal(privileged[:, -1:], raw["skill_id"])
+        frame = build_proprioception(raw, config)
+        assert torch.equal(frame, build_proprioception(raw, base))
+        obs = history.update(frame)
+        assert torch.equal(obs[0], obs[1])
+
+
+def test_geometry_student_reads_only_scaled_height_scan_when_privileged_fields_move():
+    schema = add_skill_id(default_observation_config(), privileged_only=True)
+    terms = schema["privileged_terms"]
+    scan_term = next(term for term in terms if term["name"] == "height_scan")
+    terms.remove(scan_term)
+    terms.insert(1, scan_term)
+    raw = raw_observations()
+    raw["skill_id"] = torch.tensor([[0.0], [1.0]])
+    raw["height_scan"][:] = torch.linspace(-2, 2, 187)
+    frame = build_privileged_observations(raw, schema)
+    scan = frame[:, observation_term_slice(terms, "height_scan")]
+    torch.testing.assert_close(scan, raw["height_scan"].clamp(-1, 1) * 2.5)
+    assert torch.equal(scan[0], scan[1])
 
 
 def test_proprioception_preserves_wheel_rates_and_masks_only_wheel_positions():

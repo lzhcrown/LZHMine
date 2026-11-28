@@ -32,8 +32,6 @@ from rsl_rl.utils.cts_export import CTSStudentExporter
 TASK_NAME = "nezha_cts_g1_student_moe"
 PLAY_ARGUMENTS = [
     {"name": "--checkpoint_path", "type": str, "help": "Explicit CTS model_<iteration>.pt path."},
-    {"name": "--skill-id", "type": int, "choices": [0, 1],
-     "help": "Force the student skill (0 ordinary, 1 platform). By default the terrain supplies it."},
     {"name": "--command_x", "type": float, "default": 1.0},
     {"name": "--command_y", "type": float, "default": 0.0},
     {"name": "--command_yaw", "type": float, "default": 0.0},
@@ -108,7 +106,6 @@ def play(args, task_name=TASK_NAME, export_path=None,
         task_registry.restore_environment_config(env_cfg, checkpoint["environment_config"])
         task_registry._restore_asset_path(env_cfg)
     env_cfg.env.observation_config = checkpoint["observation_config"]
-    env_cfg.env.fixed_actor_skill_id = args.skill_id
     env_cfg.env.num_envs = args.play_num_envs
     env_cfg.env.episode_length_s = MAX_ATTEMPT_SECONDS
     env_cfg.sim.physx.max_gpu_contact_pairs = max(2 ** 10, args.play_num_envs * 256)
@@ -155,7 +152,8 @@ def play(args, task_name=TASK_NAME, export_path=None,
         if joint_angles is not None:
             joint_angles.start()
         for step in (count() if total_steps is None else range(total_steps)):
-            actions, student_weights, actor_weights, _, _ = policy.act_inference_with_diagnostics(observations)
+            scan = env.get_student_height_scan() if policy.student_frozen_terrain else None
+            actions, student_weights, actor_weights, _, _ = policy.act_inference_with_diagnostics(observations, scan)
             if joint_angles is not None:
                 joint_angles.begin_step(student_weights, actor_weights, actions, observations)
             if args.gate_log_interval > 0 and step % args.gate_log_interval == 0:

@@ -140,37 +140,60 @@ done
   --init_from /path/to/g12_v1/model_XXXX.pt --num_envs 4096 --max_iterations 1000 --seed 10
 ```
 
-### G13 v1 技能编号与楼梯步态对照
+### G13 v1 主实验 · 先训练高程图编码器，再冻结编码器学习运动
 
-`g13_v1` 使用 `g12_v5` 的地形课程，常规地形为 **0–9 级**，凸台和凹台为 **0–19 级**。各级地形的高度公式、速度指令、两套奖励和两个价值输出沿用 `g12_v1`。模拟器按回合地块提供一个无噪声标量，平地、楼梯和坡地为 0，凸台和凹台为 1。编号进入当前本体帧、学生的四帧历史和教师/价值网络的特权观测，启动时三个宽度应分别为 58、232、296。攀上台面后仍使用该回合的编号 1。
+G13 沿用 G12 v5 的两套奖励、速度指令和地形课程。平地、楼梯及其他常规地形为 0–9 级，凸台和凹台为 0–19 级。两个版本都用同一种学生输入，以检验地形几何特征能否帮助学生区分连续楼梯与孤立高台。
 
-从**同一个**已验证的 v1 检查点启动无编号的 `g12_v5` 和有编号的 `g13_v1`，两组采用相同课程、种子和追加训练轮数。G13 对新增输入的权重以零初始化，微调前两个编号都复现源策略。示例追加 1000 轮。
+| 网络 | 每个控制步的输入 | 地图如何参与运动学习 |
+| --- | --- | --- |
+| v1 教师 | 296 维特权观测，其中包含 187 点局部高程图和任务编号（常规 0，高台 1） | 预训练编码器将高程图压缩为 16 维，运动训练期间冻结 |
+| v2 教师 | 同一套 296 维特权观测 | 用本体状态、指令和任务编号查询高程图，教师地图注意力随运动策略共同训练 |
+| v1、v2 学生 | 228 维四帧本体与指令历史，加上当前高程图经预训练编码器得到的 16 维几何特征 | 两组从同一个第一阶段权重初始化学生地图编码器并冻结；学生编码器融合历史和几何信息，共享 MoE Actor 生成 16 维动作 |
 
-要从调整前的 G13 权重转到 9 级常规课程，使用 `g13_v1/train.py --init_from` 指向旧 G13 检查点。`--resume` 按档案中原有的地形上限续训。
+学生每个控制步都需要一张与机身位姿对齐的局部高程图。训练和仿真从当前地形采样；实机需要能提供同样扫描的地图来源。16 维特征取代学生的深度视觉输入，任务编号仅作为教师侧的特权信息。
+
+**第一阶段学习地形几何。** 在九类启用的 WF 地形上采样 187 点局部高程图，台沿附近加密采样。卷积和四个注意力查询将高程图压缩成 16 维特征，临时解码器根据遮挡、加噪后的输入重建干净的扫描。训练损失包含遮挡点误差、全图误差和相邻点高差误差。按独立验证集上遮挡点的平均绝对误差选取权重。[地图预训练](experiments/g13_v1/pretrain.py)
+
+已有第一阶段编码器时可以直接用于第二阶段。服务器上可将权重放入 `logs/g13_v1/terrain_encoder.pt`，也可以运行以下命令生成。
 
 ```bash
-V1_CKPT=/path/to/g12_v1/model_XXXX.pt
-for group in g12_v5 g13_v1; do
-  .venv/bin/python "experiments/$group/train.py" --init_from "$V1_CKPT" \
-    --num_envs 4096 --max_iterations 1000 --seed 10 --run_name "${group}_stair_ablation"
-done
+.venv/bin/python experiments/g13_v1/pretrain.py \
+  --epochs 64 --seed 10 --output logs/g13_v1/terrain_encoder.pt
 ```
 
-用训练好的 G7 作为楼梯动作参考，将 G7、等轮数微调的 v5 和 G13 分别代入以下命令。固定楼梯预设为单阶高 35 cm、踏面宽 30 cm，高于 v5 和 G13 的第 9 级训练楼梯，训练踏面宽 35 cm。各组应使用同一评估预设、指令和出生扰动。下例为每种地形运行 20 次，CSV 需使用新的输出路径。
+**第二阶段学习动作。** v1 教师将 16 维地形特征与其余 109 维特权输入拼接，Critic 读取完整特权观测。动作网络从头训练，学生同步学习匹配教师隐变量。第一阶段的解码器只用于训练时的地图重建。[v1 配置](experiments/g13_v1/config.py)
+
+```bash
+.venv/bin/python experiments/g13_v1/train.py --from_scratch --headless \
+  --map_encoder_checkpoint logs/g13_v1/terrain_encoder.pt \
+  --num_envs 4096 --max_iterations 20000 --seed 10 --run_name g13_v1_student_geometry_s10
+```
+
+新版运动检查点中已包含学生地图编码器，续训时使用 `--resume`。旧版仅使用本体历史的运动检查点缺少新增的学生几何输入，以上从头训练命令可以直接复用第一阶段地图权重。
+
+### G13 v2 备选实验 · 地图编码与运动联合训练
+
+如果 v1 在连续楼梯或高台的表现未达预期，再单独启动 v2。v2 的学生仍读取第一阶段的几何特征，教师使用独立的地图注意力。两组采用相同的学生输入、奖励、地形课程和训练预算，对照的是教师的地图表示和训练方式。[v2 配置](experiments/g13_v2/config.py) · [教师地图注意力](rsl_rl/rsl_rl/modules/teacher_map_attention.py)
+
+```bash
+.venv/bin/python experiments/g13_v2/train.py --from_scratch --headless \
+  --map_encoder_checkpoint logs/g13_v1/terrain_encoder.pt \
+  --num_envs 4096 --max_iterations 20000 --seed 10 --run_name g13_v2_student_geometry_s10
+```
+
+### G13 固定地形评估
+
+先评估 v1。若随后训练 v2，将 `GROUP` 和 `CKPT` 改为对应实验。两组使用相同的速度指令和种子，比较连续楼梯第二、三级的关节角、实际速度、100 cm 凸台的完整通过率和登顶后的腿姿。25 cm 楼梯接近训练单阶高度上限，35 cm 用于检验泛化。TensorBoard 的 `Terrain/{stairs_up,stairs_down,platform_block,platform_pit}/` 分别记录 `teacher_level_mean` 和 `student_level_mean`。
 
 ```bash
 GROUP=g13_v1
 CKPT=/path/to/trained/model_XXXX.pt
 .venv/bin/python legged_gym/scripts/evaluate_nezha_moe_cts.py \
-  --group "$GROUP" --checkpoint-path "$CKPT" --viewer --no-record \
-  --terrain-types stairs_convex_35cm,stairs_concave_35cm,platform_100cm --speed 0.8 --seed 10 \
-  --spawn-xy-jitter 0.05 --envs-per-terrain 1 --episodes-per-env 20 \
-  --joint-angles-csv "evaluations/${GROUP}_stairs35_block100.csv"
+  --group "$GROUP" --checkpoint-path "$CKPT" --seed 10 --speed 0.8 \
+  --terrain-types stairs_convex_25cm,stairs_convex_35cm,platform_100cm \
+  --spawn-xy-jitter 0.05 --envs-per-terrain 4 --episodes-per-terrain 20 \
+  --joint-angles-csv "evaluations/${GROUP}_student_geometry.csv"
 ```
-
-先核对 G13 轨迹中的 `actor_skill_id`，有动作的楼梯行应为 0，高台行为 1。在相同的上阶阶段比较三组的通过率、实际前进速度和后腿大腿/小腿角度，对突然下蹲的回合同时查看关节目标角和实际角。用 100 cm 凸台的完整通过率核对攀台能力。
-
-要检查同一地形上两个技能的表现，可在上述评估命令中分别追加 `--skill-id 0` 和 `--skill-id 1`，使用同一个训练好的 G13 检查点，并给两次运行指定不同的 CSV 路径。每次运行的 `terrain` 列记录实际地形，所有已执行动作的 `actor_skill_id` 应等于指定编号。交互回放 `experiments/g13_v1/play.py` 也支持该参数。
 
 ### G0–G11 对照实验
 

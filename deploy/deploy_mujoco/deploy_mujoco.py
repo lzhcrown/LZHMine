@@ -387,11 +387,12 @@ def run(args, expected_policy=None):
         torque_limits=cfg["torque_limits"],
         device=args.device,
         expected_policy=expected_policy,
-        skill_id=args.skill_id,
     )
+    scanner = None
+    if runtime.student_frozen_terrain:
+        from deploy.deploy_mujoco.runtime.terrain_scan import TerrainHeightScanner
+        scanner = TerrainHeightScanner(mujoco, model, runtime.observation_config["height_offset"])
     print(f"CTS student: {runtime.student_encoder_type}, {runtime.num_experts} experts, observation schema loaded from model")
-    if args.skill_id is not None:
-        print(f"Fixed skill ID: {args.skill_id} (0 = ordinary/stairs, 1 = platform)")
     initial_base_height = float(cfg.get("initial_base_height", 0.60))
     initial_base_position, terrain_description = _terrain_course_spawn(
         mujoco, model, cfg, initial_base_height
@@ -541,6 +542,11 @@ def run(args, expected_policy=None):
                 runtime.reset()
                 in_standby = False
 
+            scan = None
+            if scanner is not None:
+                # mj_step integrated qpos. Refresh Cartesian transforms and sensors at that same endpoint.
+                mujoco.mj_forward(model, data)
+                scan = scanner.scan(data, data.xpos[root_body_id], data.xquat[root_body_id])
             rotation = data.xmat[root_body_id].reshape(3, 3)
             projected_gravity = rotation.T @ np.array([0.0, 0.0, -1.0])
             # MuJoCo's gyro sensor is already expressed in the IMU/site body
@@ -554,6 +560,7 @@ def run(args, expected_policy=None):
                 commands,
                 dof_pos,
                 dof_vel,
+                height_scan=scan,
             )
             if runtime.num_experts > 0 and gate_log_interval > 0 and policy_step % gate_log_interval == 0:
                 expert_probs = runtime.expert_probabilities().cpu().numpy()
@@ -608,8 +615,6 @@ def parse_args():
     )
     parser.add_argument("--model", help="Floating-base Nezha MJCF or MuJoCo-compatible URDF")
     parser.add_argument("--policy", help="Exported policy.pt")
-    parser.add_argument("--skill-id", type=int, choices=(0, 1),
-                        help="Fixed ID for a skill-conditioned policy: 0 for ordinary terrain and stairs, 1 for platforms.")
     parser.add_argument(
         "--terrain",
         help="Start in a named course lane, e.g. stairs_15cm or ramp_25deg; number keys switch lanes in the viewer.",

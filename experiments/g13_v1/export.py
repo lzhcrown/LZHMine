@@ -1,4 +1,4 @@
-"""Export the skill-conditioned low-level policy."""
+"""Export the G13 v1 geometry-conditioned student."""
 
 from pathlib import Path
 import sys

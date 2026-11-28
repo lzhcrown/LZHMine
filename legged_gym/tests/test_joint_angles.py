@@ -141,7 +141,7 @@ def test_trace_only_exports_real_moe_columns(tmp_path, student_n, actor_n):
     assert all(float(last[name]) > 0. for name in gate_fields)
 
 
-def test_trace_records_newest_skill_from_the_actual_actor_input(tmp_path):
+def test_legacy_trace_records_newest_skill_from_the_actual_actor_input(tmp_path):
     env = make_env()
     env.observation_config = {
         "history_length": 2,
@@ -151,7 +151,7 @@ def test_trace_records_newest_skill_from_the_actual_actor_input(tmp_path):
     observations[:, -2:] = torch.tensor([[1., 0.], [0., 1.]])
     gates = torch.empty(2, 0)
     path = tmp_path / "skills.csv"
-    with open_joint_angles(path, env, "g13_v1", ["stairs_convex_35cm", "platform_100cm"]) as trace:
+    with open_joint_angles(path, env, "legacy_labelled_student", ["stairs_convex_35cm", "platform_100cm"]) as trace:
         trace.start()
         trace.begin_step(gates, gates, torch.zeros_like(env.dof_pos), observations)
         observations.zero_()  # env.step can replace the observation, including on reset

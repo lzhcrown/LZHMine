@@ -1,4 +1,4 @@
-"""Replay the skill-conditioned low-level policy in Isaac Gym."""
+"""Replay the G13 v1 geometry-conditioned student in Isaac Gym."""
 
 from pathlib import Path
 import sys

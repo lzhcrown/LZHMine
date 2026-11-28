@@ -156,36 +156,72 @@ def test_export_rejects_different_term_layout(tmp_path):
         CTSStudentExporter(make_policy(), schema)
 
 
-def test_skill_conditioned_checkpoint_exports_and_replays_both_ids(tmp_path):
-    from experiments.g13_v1.config import POLICY
-    from rsl_rl.utils.cts_observations import add_skill_id, flatten_history
+@pytest.mark.parametrize("group", ["g13_v1", "g13_v2"])
+def test_g13_export_replays_with_training_student_inputs(tmp_path, group):
+    from experiments.registry import get_experiment
+    from rsl_rl.utils.cts_observations import add_skill_id, flatten_history, observation_dimensions
 
-    schema = add_skill_id(default_observation_config())
-    config = dict(POLICY, num_actor_obs=232, num_one_step_obs=58, num_critic_obs=296,
+    schema = add_skill_id(default_observation_config(), privileged_only=True)
+    policy = get_experiment(group).POLICY
+    current, history, privileged = observation_dimensions(schema)
+    config = dict(policy, num_actor_obs=history, num_one_step_obs=current, num_critic_obs=privileged,
                   history_length=4, num_actions=16, actor_hidden_dims=[24], critic_hidden_dims=[24],
                   teacher_encoder_hidden_dims=[24], student_encoder_hidden_dims=[24, 16])
-    model = ActorCriticMoECTS(**config).eval()
+    model = ActorCriticMoECTS(**config, observation_config=schema).eval()
     checkpoint_path = tmp_path / "model_1.pt"
     torch.save({"architecture": "nezha_moe_cts", "format_version": 1,
                 "observation_config": schema, "policy_config": config,
                 "model_state_dict": model.state_dict()}, checkpoint_path)
     policy_path = export(Namespace(checkpoint=str(checkpoint_path), run=None, output=str(tmp_path / "student.pt")),
-                         expected_policy=POLICY)
-    kwargs = dict(policy_path=policy_path, default_dof_pos=[0.] * 16,
-                  p_gains=[10.] * 16, d_gains=[2.] * 16, expected_policy=POLICY)
-    with pytest.raises(ValueError, match="skill-id"):
-        NezhaCTSPolicyRuntime(**kwargs)
-    with pytest.raises(ValueError, match="skill-id"):
-        NezhaCTSPolicyRuntime(**kwargs, skill_id=2)
-    for skill_id in (0, 1):
-        runtime = NezhaCTSPolicyRuntime(**kwargs, skill_id=skill_id)
-        sensors = ([0.] * 3, [0., 0., -1.], [.8, 0., 0.], [0.] * 16, [0.] * 16)
-        actions, _ = runtime.step(*sensors)
+                         expected_policy=policy)
+    runtime = NezhaCTSPolicyRuntime(policy_path, default_dof_pos=[0.] * 16,
+                                    p_gains=[10.] * 16, d_gains=[2.] * 16, expected_policy=policy)
+    assert runtime.policy.get_teacher_map_attention() == (group == "g13_v2")
+    assert runtime.policy.get_teacher_frozen_terrain() == (group == "g13_v1")
+    assert runtime.student_frozen_terrain
+    assert not any("teacher" in name for name, _ in runtime.policy.named_parameters())
+    sensors = ([0.] * 3, [0., 0., -1.], [.8, 0., 0.], [0.] * 16, [0.] * 16)
+    for bad_scan in (None, torch.zeros(57), torch.full((187,), float("nan"))):
+        with pytest.raises(ValueError, match="height_scan"):
+            runtime.step(*sensors, height_scan=bad_scan)
+    assert not runtime.observations.initialized.any()
+    assert runtime.policy.get_num_actor_obs() == 228
+    scan = torch.linspace(-1.5, 1.5, 187)
+    outputs = []
+    for raw_scan in (scan, -scan):
+        runtime.reset()  # Identical proprioception/history in the two trials.
+        actions, _ = runtime.step(*sensors, height_scan=raw_scan)
         frames = runtime.observations.buffer
-        torch.testing.assert_close(frames[0, :, -1], torch.full((4,), float(skill_id)))
-        history = flatten_history(frames, config["observation_dims"])
+        assert frames.shape == (1, 4, 57)
+        history = flatten_history(frames, model.observation_dims)
         with torch.inference_mode():
-            torch.testing.assert_close(actions, model.act_inference(history)[0])
+            normalized = raw_scan.clamp(-1., 1.)[None] * 2.5
+            mean, gates, _, _, _ = model.act_inference_with_diagnostics(history, normalized)
+            torch.testing.assert_close(actions, mean[0])
+            torch.testing.assert_close(runtime.expert_probabilities(), gates[0])
+        outputs.append(actions)
+    assert not torch.allclose(*outputs)
+
+
+@pytest.mark.parametrize("group", ["g13_v1", "g13_v2", None])
+def test_runtime_rejects_the_earlier_export_with_student_id(tmp_path, group):
+    from experiments.registry import get_experiment
+    from rsl_rl.utils.cts_observations import add_skill_id
+
+    schema = add_skill_id(default_observation_config())
+    legacy = ActorCriticMoECTS(
+        **get_experiment("g12_v5").POLICY, num_actor_obs=232, num_one_step_obs=58,
+        num_critic_obs=296, history_length=4, num_actions=16, observation_config=schema,
+        observation_dims=[term["dim"] for term in schema["proprioceptive_terms"]],
+        teacher_map_attention=(group == "g13_v2"), actor_hidden_dims=[24], critic_hidden_dims=[24],
+        teacher_encoder_hidden_dims=[24], student_encoder_hidden_dims=[24, 16],
+    )
+    path = CTSStudentExporter(legacy, schema).export(tmp_path / "legacy_student.pt")
+    with pytest.raises(ValueError, match="observation_dims|skill_id"):
+        NezhaCTSPolicyRuntime(
+            path, default_dof_pos=[0.] * 16, p_gains=[10.] * 16, d_gains=[2.] * 16,
+            expected_policy=get_experiment(group).POLICY if group else None,
+        )
 
 
 @pytest.mark.parametrize("actor_type", [None, "mlp", "moe"])

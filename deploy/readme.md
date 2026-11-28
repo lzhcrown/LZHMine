@@ -18,9 +18,11 @@
 
 导出和 MuJoCo 入口都会自动加入仓库内的 Python 包路径，无需设置 `PYTHONPATH`。可在仓库根目录直接执行 `.venv-mujoco/bin/python experiments/g1_student_moe/simulate.py` 打开仿真窗口。
 
-学生输入为 57 维本体观测的 4 帧历史，共 228 维，输出 16 个动作。观测维数、尺度、裁剪、轮关节位置掩码和 term-major 历史顺序直接读取模型元数据，与训练共用预处理模块；runtime 保留真实轮速。reset 清除旧历史，下一次传感器帧填满历史。
+学生使用 57 维本体与指令的 4 帧历史，共 228 维，输出 16 个动作。观测维数、尺度、裁剪、轮关节位置掩码和 term-major 历史顺序读取模型元数据。runtime 保留真实轮速。reset 清除旧历史，下一次传感器帧填满历史。
 
-学生和 Actor 各自可以是 MLP 或 8 专家 MoE。MuJoCo 日志中的 `expert_i` 权重表示学生编码器；MLP 学生返回空权重并跳过专家日志。Actor 权重可通过导出模型的 `get_actor_expert_probabilities(history)` 单独查询。这些专家的编号没有预设运动模式或对应关系。教师和 Critic 不参与部署，Critic 类型只作为训练来源元数据保留。
+**G13 v1 和 v2 还需要当前地形扫描。** MuJoCo 从场景中取机器人周围的 17 × 11 个高程，按机身航向排列。实机若使用 `runtime.step(..., height_scan=...)`，每个控制步提供 187 个以米计的 `机身 z − 0.5 m − 地表 z`，沿 x 方向从 −0.8 至 +0.8 m 最先变化，沿 y 从 −0.5 至 +0.5 m 换行，间距 0.1 m。runtime 执行裁剪和缩放。直接调用 TorchScript 时，接口为 `policy(history, scaled_scan)`，第二个参数应已经完成 `clamp(-1, 1) × 2.5`，形状为 `[N,187]`。冻结编码器包含在导出文件内，学生从中取得 16 维几何特征。
+
+学生和 Actor 各自可以是 MLP 或 8 专家 MoE。MuJoCo 日志中的 `expert_i` 权重表示学生编码器的门控概率。Actor 权重可通过导出模型的 `get_actor_expert_probabilities` 查询，参数与策略推理相同。每个专家的作用由训练学习。部署只运行学生编码器和 Actor。
 
 策略每 0.02 s 更新一次，低层 PD 每个物理步计算：12 个腿关节用位置目标，4 个轮关节用速度目标。默认腿部尺度 0.25、轮速尺度 10。runtime 校验 checkpoint 导出的控制元数据与 YAML 一致，包括默认姿态、PD 增益、力矩限制、关节顺序与控制周期。
 

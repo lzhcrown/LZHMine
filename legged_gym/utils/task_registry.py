@@ -33,12 +33,14 @@ import os
 from datetime import datetime
 
 from rsl_rl.runners import MoECTSOnPolicyRunner
-from rsl_rl.utils.cts_checkpoint import DIMENSION_KEYS, load_cts_checkpoint, validate_checkpoint_policy
-from rsl_rl.utils.cts_initialization import RESIDUAL_POLICY_KEYS, validate_initialization_source
+from rsl_rl.utils.cts_checkpoint import (
+    DIMENSION_KEYS, load_cts_checkpoint, resolve_map_encoder_checkpoint, validate_checkpoint_policy,
+)
+from rsl_rl.utils.cts_initialization import WARM_START_TARGET_KEYS, validate_initialization_source
 
 from legged_gym import LEGGED_GYM_ROOT_DIR
 from legged_gym.terrains.wf import PLATFORM_TYPES
-from experiments.registry import (PLATFORM_EXPERIMENT_KEYS, RESIDUAL_EXPERIMENT_KEYS,
+from experiments.registry import (PLATFORM_EXPERIMENT_KEYS, RESIDUAL_EXPERIMENT_KEYS, SKILL_V1_EXPERIMENT,
                                   VERSIONED_PLATFORM_EXPERIMENT_KEYS, clone_config, get_experiment)
 from .helpers import (
     get_args, update_cfg_from_args, class_to_dict, update_class_from_dict,
@@ -83,16 +85,23 @@ class TaskRegistry:
     def _validate_experiment_checkpoint(train_cfg, checkpoint):
         experiment_key = getattr(train_cfg.runner, "experiment_key", None)
         source_key = checkpoint.get("train_config", {}).get("runner", {}).get("experiment_key")
+        # The frozen-encoder experiment originally saved locomotion runs under g13_v3.
+        if (experiment_key == SKILL_V1_EXPERIMENT and source_key == "g13_v3"
+                and checkpoint.get("policy_config", {}).get("teacher_frozen_terrain") is True):
+            source_key = SKILL_V1_EXPERIMENT
         # These tasks share a policy shape with G12 but use different rewards.
         # Older G13 checkpoints also carry their own task-specific environment.
         distinct_platform_tasks = (*VERSIONED_PLATFORM_EXPERIMENT_KEYS, "g13_platform_climb")
         if experiment_key != source_key and (
             experiment_key in distinct_platform_tasks or source_key in distinct_platform_tasks
         ):
+            hint = " Use --init_from to change training tasks."
+            if (getattr(train_cfg.policy, "teacher_frozen_terrain", False)
+                    or checkpoint.get("policy_config", {}).get("teacher_frozen_terrain", False)):
+                hint = " Use the matching experiment entry point."
             raise ValueError(
                 "Platform resume requires the same experiment_key: "
-                "checkpoint={!r}, target={!r}. Use --init_from to change training tasks."
-                .format(source_key, experiment_key)
+                "checkpoint={!r}, target={!r}.{}".format(source_key, experiment_key, hint)
             )
         if experiment_key:
             validate_checkpoint_policy(checkpoint, class_to_dict(train_cfg.policy))
@@ -141,6 +150,8 @@ class TaskRegistry:
         path = getattr(args, "cts_init_from", None) or getattr(args, "init_from", None)
         if path is None:
             return None
+        if getattr(train_cfg.policy, "teacher_frozen_terrain", False):
+            raise ValueError("--init_from is unsupported for frozen terrain policies")
         if train_cfg.runner.resume or getattr(args, "from_scratch", False):
             raise ValueError("--init_from cannot be combined with --resume or --from_scratch")
         path = os.path.abspath(os.path.expanduser(path))
@@ -210,6 +221,14 @@ class TaskRegistry:
             env_cfg = default_env_cfg
         _, train_cfg = update_cfg_from_args(None, train_cfg, args)
         init_path = self._initialization_path(train_cfg, args)
+        # Training supplies this option even when omitted. Play and standalone
+        # environment construction do not need a stage-one artifact.
+        if hasattr(args, "map_encoder_checkpoint"):
+            resolve_map_encoder_checkpoint(
+                (getattr(train_cfg.policy, "teacher_frozen_terrain", False)
+                 or getattr(train_cfg.policy, "student_frozen_terrain", False)),
+                args.map_encoder_checkpoint, train_cfg.runner.resume,
+            )
         resume_path = self._resume_path(train_cfg)
         source_path = init_path or resume_path
         if source_path is not None:
@@ -281,10 +300,10 @@ class TaskRegistry:
         if init_path is not None:
             checkpoint = load_cts_checkpoint(init_path)
             validate_initialization_source(checkpoint, class_to_dict(train_cfg.policy))
-            # Restore the base architecture/hyperparameters in all four arms;
-            # retain only the intended residual and temporal experiment factors.
+            # Retain the target experiment's architecture extensions while
+            # restoring the shared backbone and source training hyperparameters.
             for key, value in checkpoint["policy_config"].items():
-                if key not in DIMENSION_KEYS and key not in RESIDUAL_POLICY_KEYS and key != "critic_task_count":
+                if key not in DIMENSION_KEYS and key not in WARM_START_TARGET_KEYS:
                     setattr(train_cfg.policy, key, copy.deepcopy(value))
             temporal_coef = getattr(train_cfg.algorithm, "temporal_loss_coef", 0.0)
             update_class_from_dict(train_cfg.algorithm, checkpoint["train_config"]["algorithm"])
@@ -295,11 +314,13 @@ class TaskRegistry:
         log_dir = None if log_root is None else os.path.join(
             log_root, datetime.now().strftime("%Y%m%d_%H%M%S_%f") + "_" + train_cfg.runner.run_name,
         )
-        runner = MoECTSOnPolicyRunner(env, class_to_dict(train_cfg), log_dir, device=args.rl_device)
         if resume_path is not None:
-            print("Loading model from: " + resume_path)
-            runner.load(resume_path)
-        elif init_path is not None:
+            print("Loading model from: {}".format(resume_path))
+        runner = MoECTSOnPolicyRunner(
+            env, class_to_dict(train_cfg), log_dir, device=args.rl_device,
+            map_encoder_checkpoint=getattr(args, "map_encoder_checkpoint", None), resume_path=resume_path,
+        )
+        if init_path is not None:
             print("Initializing all-MoE comparison with fresh optimizers from: " + init_path)
             runner.initialize_from(init_path)
         return runner, train_cfg

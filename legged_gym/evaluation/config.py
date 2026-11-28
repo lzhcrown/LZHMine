@@ -7,7 +7,7 @@ import re
 from types import SimpleNamespace
 
 from experiments.registry import (EXPERIMENT_KEYS, LEGACY_EXPERIMENT_KEYS,
-                                  RESIDUAL_EXPERIMENT_KEYS, ALL_MOE_EXPERIMENT_KEYS, SKILL_V1_EXPERIMENT, REPO_ROOT)
+                                  RESIDUAL_EXPERIMENT_KEYS, ALL_MOE_EXPERIMENT_KEYS, REPO_ROOT)
 from .presets import (PATCH_TERRAIN_TYPES, PATCH_SUPPORTED_TERRAIN_TYPES, PATCH_SIZE_M, PATCH_PLATFORM_LENGTH_M,
                       PATCH_CORRIDOR_WIDTH_M, PATCH_SLOPE_ANGLE_DEG, PATCH_SLOPE_LENGTH_M, PATCH_SLOPE_WIDTH_M)
 from .timing import MAX_ATTEMPT_SECONDS
@@ -39,8 +39,6 @@ def parse_args(argv=None):
     parser.add_argument('--residual-scale', type=float, default=1.,
                         help='Inference-only multiplier in [0,1]; 0 disables a trained residual for diagnosis.')
     parser.add_argument('--terrain-types', default=','.join(PATCH_TERRAIN_TYPES))
-    parser.add_argument('--skill-id', type=int, choices=(0, 1),
-                        help='Force the G13 student skill on every terrain (0 ordinary, 1 platform).')
     parser.add_argument('--envs-per-terrain', type=int, help='Parallel slots per terrain. Default: 1 for preview, 20 for recording.')
     repetitions = parser.add_mutually_exclusive_group()
     repetitions.add_argument('--episodes-per-terrain', type=int,
@@ -65,8 +63,6 @@ def parse_args(argv=None):
     if args.metric_successes_per_terrain < 0:
         parser.error('metric-successes-per-terrain must be nonnegative')
     groups = selected_groups(args.group)
-    if args.skill_id is not None and args.group != SKILL_V1_EXPERIMENT:
-        parser.error('--skill-id requires --group ' + SKILL_V1_EXPERIMENT)
     if args.expert_weights_only and (not set(groups).issubset(ALL_MOE_EXPERIMENT_KEYS) or args.no_record):
         parser.error('--expert-weights-only requires all-MoE groups and recording enabled')
     if args.record_residual and args.no_record:
@@ -174,7 +170,6 @@ def protocol_dict(args):
     return dict(
         version=14, reference='LZHMine obstacle traversal and wheel_gym_CQ patch crossing; terrain revision 12',
         data_mode=mode,
-        fixed_actor_skill_id=args.skill_id,
         expert_weights_only=args.expert_weights_only,
         record_residual=args.record_residual, residual_scale=args.residual_scale,
         detail_selection=args.detail_selection, detail_trial_indices=list(args.detail_trial_indices),
@@ -209,7 +204,6 @@ def configure_evaluation(env_cfg, args, group, checkpoint):
     cfg = copy.deepcopy(env_cfg)
     cfg.seed = args.seed
     cfg.env.num_envs = len(args.terrain_types) * args.envs_per_terrain
-    cfg.env.fixed_actor_skill_id = args.skill_id
     cfg.env.episode_length_s = args.max_seconds
     cfg.noise.add_noise = False
     cfg.init_state.rand_init_dof = False

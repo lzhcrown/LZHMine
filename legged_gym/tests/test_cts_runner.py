@@ -13,7 +13,7 @@ from tensorboard.backend.event_processing.event_accumulator import EventAccumula
 
 from rsl_rl.runners.on_policy_runner_cts import MoECTSOnPolicyRunner
 from rsl_rl.utils.cts_checkpoint import load_cts_checkpoint, policy_from_checkpoint
-from rsl_rl.utils.cts_observations import default_observation_config
+from rsl_rl.utils.cts_observations import add_skill_id, default_observation_config, observation_dimensions
 from rsl_rl.utils.wf_curriculum import WFCurriculum, default_wf_command_config
 
 
@@ -507,6 +507,27 @@ def test_terrain_metrics_skip_unsupported_type_mappings(terrain_mode):
         env.terrain.column_types = ["flat"]
     runner = MoECTSOnPolicyRunner(env, runner_config())
     assert runner._terrain_metrics() == {}
+
+
+@pytest.mark.parametrize("privileged_only", [False, True])
+def test_skill_terrain_metrics_compare_roles_on_the_same_terrain(privileged_only):
+    env = FakeVectorEnv()
+    env.observation_config = add_skill_id(env.observation_config, privileged_only=privileged_only)
+    env.num_one_step_obs, env.num_obs, env.num_privileged_obs = observation_dimensions(env.observation_config)
+    env.cfg = SimpleNamespace(terrain=SimpleNamespace(curriculum=True))
+    env.terrain = SimpleNamespace(column_types=["stairs_up", "platform_block", "stairs_up", "platform_pit"])
+    # Student slots 0 and 4 are on stairs and block. Both stair columns are pooled.
+    env.terrain_types = torch.tensor([2, 0, 0, 1, 1, 2, 1, 3])
+    env.terrain_levels = torch.tensor([9, 4, 6, 8, 1, 5, 6, 3])
+    runner = MoECTSOnPolicyRunner(env, runner_config())
+    metrics = runner._terrain_metrics()
+    assert metrics["Terrain/stairs_up/level_mean"] == 6
+    assert metrics["Terrain/stairs_up/teacher_level_mean"] == 5
+    assert metrics["Terrain/stairs_up/student_level_mean"] == 9
+    assert metrics["Terrain/platform_block/teacher_level_mean"] == 7
+    assert metrics["Terrain/platform_block/student_level_mean"] == 1
+    assert metrics["Terrain/platform_pit/teacher_level_mean"] == 3
+    assert "Terrain/platform_pit/student_level_mean" not in metrics
 
 
 @pytest.mark.parametrize("interruption", [RuntimeError, KeyboardInterrupt])

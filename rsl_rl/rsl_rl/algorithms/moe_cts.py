@@ -42,12 +42,13 @@ class MoECTS:
         self.teacher_env_idxs = teacher_mask.nonzero(as_tuple=False).flatten()
         self.env_order = torch.cat((self.teacher_env_idxs, self.student_env_idxs))
 
-        self.ppo_parameters = (list(actor_critic.teacher_encoder.parameters())
+        self.ppo_parameters = ([p for p in actor_critic.teacher_encoder.parameters() if p.requires_grad]
                                + list(actor_critic.actor.parameters())
                                + list(actor_critic.critic.parameters()) + [actor_critic.std])
         self.optimizer = optim.Adam(self.ppo_parameters, lr=learning_rate,
                                     betas=betas, weight_decay=weight_decay)
-        self.optimizer_stu_enc = optim.Adam(actor_critic.student_moe_encoder.parameters(),
+        self.student_parameters = [p for p in actor_critic.student_moe_encoder.parameters() if p.requires_grad]
+        self.optimizer_stu_enc = optim.Adam(self.student_parameters,
                                             lr=student_encoder_learning_rate,
                                             betas=betas, weight_decay=weight_decay)
         self.storage = None
@@ -285,7 +286,9 @@ class MoECTS:
         student_samples = 0
         for observations, privileged in self.storage.student_mini_batch_generator(
                 self.num_mini_batches, self.num_learning_epochs):
-            student_latent, weights = self.actor_critic.student_moe_encoder(observations)
+            student_latent, weights = self.actor_critic.student_moe_encoder(
+                observations, self.actor_critic.student_height_scan(privileged),
+            )
             with torch.no_grad():
                 teacher_latent = self.actor_critic.teacher_encoder(privileged)
             latent_loss = (student_latent - teacher_latent).square().mean()
@@ -295,7 +298,7 @@ class MoECTS:
                 student_loss = student_loss + self.load_balance_coef * load_balance
             self.optimizer_stu_enc.zero_grad(set_to_none=True)
             student_loss.backward()
-            nn.utils.clip_grad_norm_(self.actor_critic.student_moe_encoder.parameters(),
+            nn.utils.clip_grad_norm_(self.student_parameters,
                                      self.max_grad_norm, error_if_nonfinite=True)
             self.optimizer_stu_enc.step()
             totals["mean_latent_loss"] += latent_loss.item()

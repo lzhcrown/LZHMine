@@ -7,6 +7,7 @@ from isaacgym import gymtorch
 from isaacgym.torch_utils import quat_rotate_inverse
 
 from legged_gym.envs.nezha.nezha_robot import NezhaRobot
+from rsl_rl.modules.teacher_map_attention import height_grid_xy, validate_height_grid
 from rsl_rl.utils.cts_observations import (
     CTSObservationHistory,
     build_privileged_observations,
@@ -14,6 +15,7 @@ from rsl_rl.utils.cts_observations import (
     contact_history_features,
     default_observation_config,
     observation_dimensions,
+    observation_term_slice,
     validate_observation_config,
 )
 
@@ -26,13 +28,12 @@ class NezhaMoECTSEnv(NezhaRobot):
             if provided is None else provided
         )
         validate_observation_config(self.observation_config)
-        self.uses_skill_id = any(
+        student_has_skill_id = any(
             term["name"] == "skill_id" for term in self.observation_config["proprioceptive_terms"]
         )
-        self.fixed_actor_skill_id = getattr(cfg.env, "fixed_actor_skill_id", None)
-        if self.fixed_actor_skill_id is not None:
-            if self.fixed_actor_skill_id not in (0, 1) or not self.uses_skill_id:
-                raise ValueError("--skill-id requires 0 or 1 and a checkpoint trained with a skill_id observation")
+        self.uses_skill_id = student_has_skill_id or any(
+            term["name"] == "skill_id" for term in self.observation_config["privileged_terms"]
+        )
         current, history, privileged = observation_dimensions(self.observation_config)
         cfg.env.num_one_step_observations = current
         cfg.env.num_observations = history
@@ -63,6 +64,7 @@ class NezhaMoECTSEnv(NezhaRobot):
             self.num_envs, 3, self.num_wheels, 3, device=self.device
         )
         self.current_obs = torch.zeros(self.num_envs, self.num_one_step_obs, device=self.device)
+        self._student_scan_columns = None
 
     def reset(self):
         if self.wf_curriculum is None:
@@ -208,13 +210,21 @@ class NezhaMoECTSEnv(NezhaRobot):
         raw = self._raw_observations()
         self.current_obs.copy_(build_proprioception(
             raw, self.observation_config, add_noise=self.add_noise,
-            noise_level=self.cfg.noise.noise_level, fixed_skill_id=self.fixed_actor_skill_id,
+            noise_level=self.cfg.noise.noise_level,
         ))
         self.obs_buf.copy_(self.observation_history.update(self.current_obs))
         self.privileged_obs_buf.copy_(build_privileged_observations(raw, self.observation_config))
 
     def get_current_obs(self):
         return self.current_obs
+
+    def get_student_height_scan(self):
+        """Current clipped and scaled sensor scan, aligned with the last returned history."""
+        if self._student_scan_columns is None:
+            validate_height_grid(self.height_points, height_grid_xy())
+            self._student_scan_columns = observation_term_slice(
+                self.observation_config["privileged_terms"], "height_scan")
+        return self.privileged_obs_buf[:, self._student_scan_columns]
 
     def compute_termination_observations(self, env_ids):
         if env_ids.numel() == 0:

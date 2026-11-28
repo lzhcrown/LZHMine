@@ -3,7 +3,7 @@
 import copy
 import json
 import os
-from typing import Tuple
+from typing import Optional, Tuple
 
 import torch
 from torch import nn
@@ -40,6 +40,9 @@ class CTSStudentExporter(nn.Module):
         self.critic_type = actor_critic.critic_type
         self.critic_expert_num = int(actor_critic.critic_expert_num)
         self.critic_task_count = int(actor_critic.critic_task_count)
+        self.teacher_map_attention = actor_critic.teacher_map_attention
+        self.teacher_frozen_terrain = actor_critic.teacher_frozen_terrain
+        self.student_frozen_terrain = actor_critic.student_frozen_terrain
         self.history_length = int(actor_critic.history_length)
         self.observation_config_json = json.dumps(observation_config, sort_keys=True)
         self.control_config_json = json.dumps(control_config or {}, sort_keys=True)
@@ -52,17 +55,17 @@ class CTSStudentExporter(nn.Module):
             "residual_action_scales": actor_critic.residual_action_scales,
         }, sort_keys=True)
 
-    def forward(self, history: torch.Tensor) -> torch.Tensor:
-        mean, _, _, _, _ = self.forward_with_diagnostics(history)
+    def forward(self, history: torch.Tensor, height_scan: Optional[torch.Tensor] = None) -> torch.Tensor:
+        mean, _, _, _, _ = self.forward_with_diagnostics(history, height_scan)
         return mean
 
     @torch.jit.export
     def forward_with_diagnostics(
-            self, history: torch.Tensor
+            self, history: torch.Tensor, height_scan: Optional[torch.Tensor] = None
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         if history.dim() != 2 or history.shape[1] != self.num_actor_obs:
             raise ValueError("CTS student expects a batch of flattened observation histories")
-        latent, student_weights = self.student_encoder(history)
+        latent, student_weights = self.student_encoder(history, height_scan)
         current = history.index_select(-1, self.current_obs_indices)
         inputs = torch.cat((latent, current), dim=-1)
         if self.actor_is_moe:
@@ -90,14 +93,14 @@ class CTSStudentExporter(nn.Module):
         return self.current_obs_indices.new_empty((0,), dtype=torch.float32)
 
     @torch.jit.export
-    def get_expert_probabilities(self, history: torch.Tensor) -> torch.Tensor:
+    def get_expert_probabilities(self, history: torch.Tensor, height_scan: Optional[torch.Tensor] = None) -> torch.Tensor:
         # Keep the established deployment API referring to student experts.
-        return self.student_encoder.get_expert_probabilities(history)
+        return self.student_encoder.get_expert_probabilities(history, height_scan)
 
     @torch.jit.export
-    def get_actor_expert_probabilities(self, history: torch.Tensor) -> torch.Tensor:
+    def get_actor_expert_probabilities(self, history: torch.Tensor, height_scan: Optional[torch.Tensor] = None) -> torch.Tensor:
         if self.actor_is_moe:
-            latent, _ = self.student_encoder(history)
+            latent, _ = self.student_encoder(history, height_scan)
             current = history.index_select(-1, self.current_obs_indices)
             return self.actor.get_expert_probabilities(torch.cat((latent, current), dim=-1))
         return history.new_empty((history.shape[0], 0))
@@ -121,6 +124,18 @@ class CTSStudentExporter(nn.Module):
     @torch.jit.export
     def get_critic_task_count(self) -> int:
         return self.critic_task_count
+
+    @torch.jit.export
+    def get_teacher_map_attention(self) -> bool:
+        return self.teacher_map_attention
+
+    @torch.jit.export
+    def get_teacher_frozen_terrain(self) -> bool:
+        return self.teacher_frozen_terrain
+
+    @torch.jit.export
+    def get_student_frozen_terrain(self) -> bool:
+        return self.student_frozen_terrain
 
     @torch.jit.export
     def get_num_actor_experts(self) -> int:
@@ -167,6 +182,7 @@ class CTSStudentExporter(nn.Module):
             "num_actions": self.num_actions,
             "num_experts": self.num_experts,
             "student_encoder_type": self.student_encoder_type,
+            "student_frozen_terrain": self.student_frozen_terrain,
             "actor_type": self.actor_type,
             "actor_expert_num": self.actor_expert_num,
             "critic_type": self.critic_type,

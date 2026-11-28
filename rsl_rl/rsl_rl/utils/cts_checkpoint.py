@@ -2,6 +2,7 @@
 
 import copy
 import math
+import os
 import torch
 from rsl_rl.utils.cts_observations import validate_observation_config
 
@@ -15,7 +16,7 @@ DIMENSION_KEYS = (
 STRUCTURE_KEYS = (
     "student_encoder_type", "expert_num", "actor_type", "actor_expert_num",
     "critic_type", "critic_expert_num",
-    "critic_task_count",
+    "critic_task_count", "teacher_map_attention", "teacher_frozen_terrain", "student_frozen_terrain",
     "residual_enabled", "residual_hidden_dims", "residual_action_scales",
 )
 
@@ -26,6 +27,11 @@ def normalize_policy_config(policy_config):
     task_count = policy.setdefault("critic_task_count", 1)
     if type(task_count) is not int or task_count not in (1, 2):
         raise ValueError("critic_task_count must be 1 or 2")
+    for key in ("teacher_map_attention", "teacher_frozen_terrain", "student_frozen_terrain"):
+        if not isinstance(policy.setdefault(key, False), bool):
+            raise ValueError(key + " must be a boolean")
+    if policy["teacher_map_attention"] and policy["teacher_frozen_terrain"]:
+        raise ValueError("teacher_map_attention and teacher_frozen_terrain are mutually exclusive")
     for type_key, count_key, legacy_type in (
         ("student_encoder_type", "expert_num", "moe"),
         ("actor_type", "actor_expert_num", "mlp"),
@@ -66,6 +72,22 @@ def normalize_policy_config(policy_config):
     return policy
 
 
+def resolve_map_encoder_checkpoint(frozen, path, resuming):
+    """A fresh frozen map encoder needs stage-one weights. Resume carries its own copy."""
+    if path is None:
+        if frozen and not resuming:
+            raise ValueError("A fresh frozen terrain policy requires --map_encoder_checkpoint")
+        return None
+    if not frozen:
+        raise ValueError("--map_encoder_checkpoint requires a frozen terrain policy")
+    if resuming:
+        raise ValueError("--resume restores its own terrain encoder; omit --map_encoder_checkpoint")
+    path = os.path.abspath(os.path.expanduser(path))
+    if not os.path.isfile(path):
+        raise FileNotFoundError("Map encoder checkpoint does not exist: " + path)
+    return path
+
+
 def validate_checkpoint_policy(checkpoint, expected_policy):
     """Reject any student/actor/critic mismatch before restoring an experiment."""
     if expected_policy is None:
@@ -76,7 +98,13 @@ def validate_checkpoint_policy(checkpoint, expected_policy):
     has_skill = any(term["name"] == "skill_id" for term in spec.get("proprioceptive_terms", ()))
     if ("observation_dims" in expected and expected["observation_dims"] != policy.get("observation_dims")
             or has_skill and "observation_dims" not in expected):
+        if has_skill and expected["teacher_map_attention"] and policy["teacher_map_attention"]:
+            raise ValueError("Checkpoint observation_dims include the legacy student skill_id. "
+                             "Use a compatible explicit --init_from migration before changing student inputs.")
         raise ValueError("Checkpoint observation_dims do not match the selected experiment")
+    if (expected["teacher_map_attention"] or expected["teacher_frozen_terrain"]) and not any(
+            term["name"] == "skill_id" for term in spec.get("privileged_terms", ())):
+        raise ValueError("The terrain teacher requires skill_id in the checkpoint's privileged observations")
     for key in STRUCTURE_KEYS:
         if policy[key] != expected[key]:
             raise ValueError(
@@ -126,6 +154,25 @@ def validate_cts_checkpoint(checkpoint):
         if has_moe != (policy[type_key] == "moe"):
             raise ValueError("Checkpoint {} disagrees with saved weights".format(type_key))
     state = checkpoint["model_state_dict"]
+    has_map_attention = any(key.startswith("teacher_encoder.map_attention.") for key in state)
+    if has_map_attention != policy["teacher_map_attention"]:
+        raise ValueError("Checkpoint teacher_map_attention disagrees with saved weights")
+    has_frozen_terrain = any(key.startswith("teacher_encoder.terrain_encoder.") for key in state)
+    if has_frozen_terrain != policy["teacher_frozen_terrain"]:
+        raise ValueError("Checkpoint teacher_frozen_terrain disagrees with saved weights")
+    student_map_prefix = "student_moe_encoder.terrain_encoder."
+    has_student_map = any(key.startswith(student_map_prefix) for key in state)
+    if has_student_map != policy["student_frozen_terrain"]:
+        raise ValueError("Checkpoint student_frozen_terrain disagrees with saved weights")
+    if has_frozen_terrain and has_student_map:
+        # v1 shares one physical encoder. A conflicting second copy must not
+        # overwrite the first as load_state_dict traverses the module tree.
+        teacher_prefix = "teacher_encoder.terrain_encoder."
+        teacher_map = {k[len(teacher_prefix):]: v for k, v in state.items() if k.startswith(teacher_prefix)}
+        student_map = {k[len(student_map_prefix):]: v for k, v in state.items() if k.startswith(student_map_prefix)}
+        if teacher_map.keys() != student_map.keys() or any(
+                not torch.equal(v, student_map[k]) for k, v in teacher_map.items()):
+            raise ValueError("Checkpoint contains conflicting weights for the shared frozen terrain encoder")
     has_residual = any(key.startswith("actor.residual.") for key in state)
     has_scales = "actor.residual_action_scales" in state
     if has_residual != policy["residual_enabled"] or has_scales != policy["residual_enabled"]:
@@ -170,7 +217,8 @@ def policy_from_checkpoint(checkpoint, device="cpu"):
     from rsl_rl.modules.actor_critic_moe_cts import ActorCriticMoECTS
 
     validate_cts_checkpoint(checkpoint)
-    policy = ActorCriticMoECTS(**copy.deepcopy(checkpoint["policy_config"])).to(device)
+    policy = ActorCriticMoECTS(**copy.deepcopy(checkpoint["policy_config"]),
+                              observation_config=checkpoint["observation_config"]).to(device)
     policy.load_state_dict(checkpoint["model_state_dict"], strict=True)
     policy.observation_config = copy.deepcopy(checkpoint["observation_config"])
     return policy.eval()
